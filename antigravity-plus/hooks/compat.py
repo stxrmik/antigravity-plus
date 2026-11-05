@@ -141,7 +141,7 @@ def processes(name: str) -> List[Tuple[int, str]]:
         ps = shutil.which("powershell") or shutil.which("pwsh")
         if ps:
             query = (f"Get-CimInstance Win32_Process -Filter \"CommandLine LIKE '%{name}%'\" | "
-                     "ForEach-Object {{ \"$($_.ProcessId)`t$($_.CommandLine)\" }}")
+                     "ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }")
             for line in run([ps, "-NoProfile", "-Command", query], timeout=20).splitlines():
                 pid, _, cmd = line.partition("\t")
                 if pid.strip().isdigit():
