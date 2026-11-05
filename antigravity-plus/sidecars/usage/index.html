@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Расход токенов · Antigravity Plus</title>
+<script src="/preload.js"></script>
+<style>
+  /* Host tokens (pushed by Antigravity via theme-change) with fallbacks for a standalone browser. */
+  :root {
+    color-scheme: light;
+    --ap-bg: var(--background, #fcfcfb);
+    --ap-fg: var(--foreground, #0b0b0b);
+    --ap-muted: var(--muted-foreground, #6b6a66);
+    --ap-card: var(--card, #ffffff);
+    --ap-border: var(--border, #e1e0d9);
+    --ap-accent: var(--primary, #2a78d6);
+    /* data colors: reference palette slots 1-3 (fixed order), status colors */
+    --ap-s1: #2a78d6; --ap-s2: #eb6834; --ap-s3: #1baf7a;
+    --ap-good: #0ca30c; --ap-warn: #fab219; --ap-crit: #d03b3b;
+    --ap-grid: #e1e0d9; --ap-base: #c3c2b7;
+  }
+  :root[data-ap-theme="dark"] {
+    color-scheme: dark;
+    --ap-bg: var(--background, #1a1a19);
+    --ap-fg: var(--foreground, #f0efec);
+    --ap-muted: var(--muted-foreground, #a3a29a);
+    --ap-card: var(--card, #222220);
+    --ap-border: var(--border, #2c2c2a);
+    --ap-s1: #3987e5; --ap-s2: #d95926; --ap-s3: #199e70;
+    --ap-grid: #2c2c2a; --ap-base: #383835;
+  }
+  * { box-sizing: border-box; }
+  /* !important: preload.js sets an inline light fallback on <body> that would win outside the host */
+  html, body { margin: 0; background: var(--ap-bg) !important; color: var(--ap-fg) !important; }
+  body { font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+  #app { padding: 12px 14px 20px; max-width: 760px; margin: 0 auto; }
+  button, select { font: inherit; color: inherit; }
+  .muted { color: var(--ap-muted); }
+  .small { font-size: 12px; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .between { justify-content: space-between; }
+  .wrap { flex-wrap: wrap; }
+  .grow { flex: 1; min-width: 0; }
+  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  .top { position: sticky; top: 0; z-index: 2; background: var(--ap-bg); padding-bottom: 10px; margin: -12px -14px 4px; padding: 12px 14px 10px; border-bottom: 1px solid var(--ap-border); }
+  .tabs { display: inline-flex; border: 1px solid var(--ap-border); border-radius: 8px; padding: 2px; gap: 2px; }
+  .tabs button { border: 0; background: transparent; padding: 3px 10px; border-radius: 6px; cursor: pointer; color: var(--ap-muted); white-space: nowrap; }
+  .tabs button[aria-selected="true"] { background: var(--ap-card); color: var(--ap-fg); box-shadow: 0 0 0 1px var(--ap-border); }
+  select { width: 100%; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--ap-border); background: var(--ap-card); }
+  .live { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; min-width: 0; flex: 1; justify-content: flex-end; }
+  #live-text { overflow: hidden; text-overflow: ellipsis; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ap-muted); flex: none; }
+  .dot.on { background: var(--ap-good); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } }
+
+  .card { background: var(--ap-card); border: 1px solid var(--ap-border); border-radius: 12px; padding: 12px; margin-top: 10px; }
+  .card h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+  .card h3 .muted { font-weight: 400; }
+  .hero { font-size: 40px; font-weight: 600; letter-spacing: -0.5px; line-height: 1.1; }
+  .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+  .tile { border: 1px solid var(--ap-border); border-radius: 10px; padding: 8px 10px; background: var(--ap-card); }
+  .tile .v { font-size: 18px; font-weight: 600; }
+  .note { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--ap-border); font-size: 12px; }
+  .note .ic { flex: none; width: 16px; height: 16px; border-radius: 50%; display: inline-grid; place-items: center; font-weight: 700; font-size: 11px; color: #0b0b0b; }
+
+  .meter { position: relative; height: 10px; border-radius: 5px; overflow: hidden; margin: 6px 0 4px; }
+  .meter .track { position: absolute; inset: 0; opacity: .18; }
+  .meter .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 5px; transition: width .4s ease; }
+  .lim + .lim { margin-top: 10px; }
+  .limits { display: grid; grid-template-columns: auto minmax(48px, 1fr) auto; gap: 4px 10px; align-items: center; font-size: 12px; margin-top: 4px; }
+  .limits .meter { margin: 0; }
+  .limits .v { text-align: right; white-space: nowrap; }
+
+  .stack { display: flex; gap: 2px; height: 12px; margin: 4px 0 8px; }
+  .stack > div { min-width: 2px; height: 100%; }
+  .stack > div:first-child { border-radius: 4px 0 0 4px; }
+  .stack > div:last-child { border-radius: 0 4px 4px 0; }
+  .stack > div:only-child { border-radius: 4px; }
+  .legend { display: grid; grid-template-columns: auto 1fr auto auto; gap: 4px 10px; align-items: center; font-size: 12px; }
+  .sw { width: 10px; height: 10px; border-radius: 2px; }
+
+  svg.chart { display: block; width: 100%; overflow: visible; }
+  svg.chart text { font-size: 12px; fill: var(--ap-muted); }
+  svg.chart text.val { fill: var(--ap-fg); font-weight: 600; }
+  svg.chart .grid { stroke: var(--ap-grid); stroke-width: 1; }
+  svg.chart .base { stroke: var(--ap-base); stroke-width: 1; }
+  svg.chart .hit { fill: transparent; cursor: default; }
+  svg.chart .bar:hover, svg.chart .bar.hover { filter: brightness(1.12); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
+  th.w-n { width: 56px; } th.w-m { width: 68px; }
+  th { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sub { display: block; font-size: 12px; color: var(--ap-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td { overflow-wrap: anywhere; }
+  th { text-align: left; font-weight: 500; color: var(--ap-muted); padding: 4px 6px; border-bottom: 1px solid var(--ap-border); }
+  td { padding: 5px 6px; border-bottom: 1px solid var(--ap-border); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  td.r, th.r { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tr.click { cursor: pointer; }
+  tr.click:hover td { background: color-mix(in srgb, var(--ap-fg) 5%, transparent); }
+  details summary { cursor: pointer; color: var(--ap-muted); font-size: 12px; margin-top: 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { border: 1px solid var(--ap-border); border-radius: 999px; padding: 1px 8px; font-size: 12px; }
+  .empty { text-align: center; padding: 28px 8px; }
+  .err { border-color: var(--ap-crit); }
+  .stale { opacity: .6; transition: opacity .2s; }
+  #tip { position: fixed; z-index: 10; pointer-events: none; max-width: 280px; background: var(--ap-card); color: var(--ap-fg); border: 1px solid var(--ap-border); border-radius: 8px; padding: 6px 8px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.18); display: none; }
+  #tip .tv { font-weight: 600; font-size: 13px; }
+  #tip .key { display: inline-block; width: 12px; height: 2px; vertical-align: middle; margin-right: 6px; }
+  footer { margin-top: 12px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="top">
+    <div class="row between">
+      <div class="tabs" role="tablist">
+        <button role="tab" id="tab-session" aria-selected="true">Разговор</button>
+        <button role="tab" id="tab-all" aria-selected="false">Все разговоры</button>
+      </div>
+      <span class="live small muted" id="live"><span class="dot" id="dot"></span><span id="live-text">загрузка…</span></span>
+    </div>
+    <div style="margin-top:8px" id="picker-row"><select id="picker" aria-label="Разговор"></select></div>
+  </div>
+  <div id="view"></div>
+  <footer class="muted" id="foot"></footer>
+</div>
+<div id="tip" role="tooltip"></div>
+
+<script>
+(() => {
+  'use strict';
+  const params = new URLSearchParams(location.search);
+  const PANE_CONV = (window.sidecar && window.sidecar.conversationId) || params.get('conversationId') || '';
+  const state = { tab: 'session', selected: '', session: null, recent: null, sessionKey: '', recentKey: '',
+                  updatedAt: 0, error: null, loading: false, limits: null, limitsError: null };
+
+  // ───────── helpers ─────────
+  function h(tag, attrs, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === undefined || v === null || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'style') el.style.cssText = v;
+      else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else el.setAttribute(k, v === true ? '' : v);
+    }
+    for (const kid of kids.flat(Infinity)) {
+      if (kid === null || kid === undefined || kid === false) continue;
+      el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+    }
+    return el;
+  }
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  function s(tag, attrs, ...kids) {
+    const el = document.createElementNS(SVGNS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === undefined || v === null || v === false) continue;
+      if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+      else el.setAttribute(k, v);
+    }
+    for (const kid of kids.flat(Infinity)) {
+      if (kid === null || kid === undefined || kid === false) continue;
+      el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+    }
+    return el;
+  }
+  const fmtK = (v) => {
+    v = Number(v) || 0;
+    if (v >= 1e6) return (v / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M';
+    if (v >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
+    return String(Math.round(v));
+  };
+  const fmtUsd = (v) => {
+    v = Number(v) || 0;
+    if (v === 0) return '$0';
+    if (v < 0.01) return '$' + v.toFixed(4);
+    if (v < 1) return '$' + v.toFixed(3);
+    return '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+  const fmtPct = (v) => Math.round((Number(v) || 0) * 100) + '%';
+  const fmtInt = (v) => (Number(v) || 0).toLocaleString('ru-RU');
+  // Russian plural: ru(4, 'вызов', 'вызова', 'вызовов') → "4 вызова"
+  function ru(n, one, few, many) {
+    const a = Math.abs(n) % 100, b = a % 10;
+    const w = b === 1 && a !== 11 ? one : b >= 2 && b <= 4 && (a < 12 || a > 14) ? few : many;
+    return `${fmtInt(n)} ${w}`;
+  }
+  const calls = (n) => ru(n, 'вызов', 'вызова', 'вызовов');
+  const turnsW = (n) => ru(n, 'ход', 'хода', 'ходов');
+  function fmtAgo(iso) {
+    if (!iso) return '—';
+    const sec = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (sec < 45) return 'только что';
+    if (sec < 3600) return Math.round(sec / 60) + ' мин назад';
+    if (sec < 86400) return Math.round(sec / 3600) + ' ч назад';
+    return new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+  }
+  const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  function niceMax(v) {
+    if (v <= 0) return 1;
+    const p = Math.pow(10, Math.floor(Math.log10(v)));
+    for (const m of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (m * p >= v) return m * p;
+    return 10 * p;
+  }
+
+  // ───────── theme: follow the host's --background (pushed by preload.js) ─────────
+  function applyTheme() {
+    let dark;
+    const hostBg = getComputedStyle(document.documentElement).getPropertyValue('--background').trim();
+    const m = hostBg && getComputedStyle(document.body).backgroundColor.match(/rgba?\(([\d.]+),\s*([\d.]+),\s*([\d.]+)/);
+    if (m) {
+      const [r, g, b] = m.slice(1, 4).map(Number);
+      dark = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+    } else {
+      dark = matchMedia('(prefers-color-scheme: dark)').matches;
+    }
+    const next = dark ? 'dark' : 'light';
+    if (document.documentElement.dataset.apTheme !== next) {
+      document.documentElement.dataset.apTheme = next;
+      render();
+    }
+  }
+  window.addEventListener('message', (e) => { if (e.data && e.data.type === 'theme-change') setTimeout(applyTheme, 0); });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+
+  // ───────── tooltip ─────────
+  const tip = document.getElementById('tip');
+  function showTip(ev, value, lines, color) {
+    tip.replaceChildren(
+      h('div', { class: 'tv' }, color ? h('span', { class: 'key', style: `background:${color}` }) : null, value),
+      ...lines.filter(Boolean).map((l) => h('div', { class: 'muted' }, l)));
+    tip.style.display = 'block';
+    const pad = 12, w = tip.offsetWidth, hgt = tip.offsetHeight;
+    let x = ev.clientX + pad, y = ev.clientY + pad;
+    if (x + w > innerWidth - 4) x = ev.clientX - w - pad;
+    if (y + hgt > innerHeight - 4) y = ev.clientY - hgt - pad;
+    tip.style.left = Math.max(4, x) + 'px';
+    tip.style.top = Math.max(4, y) + 'px';
+  }
+  const hideTip = () => { tip.style.display = 'none'; };
+
+  // ───────── API ─────────
+  async function api(path, body) {
+    const opts = { method: 'POST', body: JSON.stringify(body || {}) };
+    const res = window.sidecar && window.sidecar.fetch
+      ? await window.sidecar.fetch(path, opts)
+      : await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'X-Sidecar-Token': params.get('token') || '' } });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || res.statusText || 'request failed');
+    return data;
+  }
+  async function loadSession() {
+    const id = state.selected || PANE_CONV;
+    try {
+      const data = await api('/api/session', { conversationId: id });
+      const key = JSON.stringify(data);
+      state.error = null;
+      state.updatedAt = Date.now();
+      if (key !== state.sessionKey) { state.sessionKey = key; state.session = data; render(); }
+      else renderLive();
+    } catch (e) { state.error = e.message; render(); }
+  }
+  async function loadRecent() {
+    try {
+      const data = await api('/api/recent', {});
+      const key = JSON.stringify(data);
+      if (key !== state.recentKey) { state.recentKey = key; state.recent = data; renderPicker(); if (state.tab === 'all') render(); }
+      if (state.tab === 'all') { state.error = null; state.updatedAt = Date.now(); renderLive(); }
+    } catch (e) { if (state.tab === 'all') { state.error = e.message; render(); } }
+  }
+  async function loadLimits() {
+    try { state.limits = await api('/api/limits', {}); state.limitsError = null; }
+    catch (e) { state.limitsError = e.message; }  // keep showing the last good numbers
+    renderLimits();
+  }
+
+  // ───────── charts ─────────
+  function chartWidth(el) { return Math.max(260, Math.floor((el && el.clientWidth) || 480)); }
+
+  function roundedTop(x, y, w, hgt, r) {
+    r = Math.min(r, w / 2, hgt);
+    if (hgt <= 0) return '';
+    return `M${x},${y + hgt}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + hgt}Z`;
+  }
+
+  // Columns with a single series: <= 24px, 4px rounded caps, label on the tallest, per-band hover.
+  function columns(host, items, opt) {
+    const W = chartWidth(host), H = opt.height || 120, padL = 4, padR = 4, padT = 18, padB = 22;
+    const max = Math.max(...items.map((d) => d.value), 0);
+    const yMax = niceMax(max) || 1;
+    const band = (W - padL - padR) / Math.max(1, items.length);
+    const bw = Math.max(3, Math.min(24, band * 0.62));
+    const y = (v) => padT + (1 - v / yMax) * (H - padT - padB);
+    const svg = s('svg', { class: 'chart', width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': opt.label });
+    svg.append(s('line', { class: 'base', x1: padL, x2: W - padR, y1: H - padB + 0.5, y2: H - padB + 0.5 }));
+    const color = css('--ap-s1');
+    let maxIdx = items.findIndex((d) => d.value === max);
+    items.forEach((d, i) => {
+      const cx = padL + band * i + band / 2;
+      const top = y(d.value);
+      const path = s('path', { class: 'bar', d: roundedTop(cx - bw / 2, top, bw, H - padB - top, 4), fill: color });
+      svg.append(path);
+      const hit = s('rect', { class: 'hit', x: padL + band * i, y: padT - 14, width: band, height: H - padT - padB + 14 + padB, tabindex: 0,
+        onpointermove: (ev) => { path.classList.add('hover'); showTip(ev, opt.fmt(d.value), d.tip, color); },
+        onpointerleave: () => { path.classList.remove('hover'); hideTip(); },
+        onfocus: (ev) => { const r = ev.target.getBoundingClientRect(); showTip({ clientX: r.left + r.width / 2, clientY: r.top }, opt.fmt(d.value), d.tip, color); },
+        onblur: hideTip });
+      svg.append(hit);
+      if (i === maxIdx && max > 0) svg.append(s('text', { class: 'val', x: cx, y: top - 5, 'text-anchor': 'middle' }, opt.fmt(d.value)));
+      if (opt.xLabel && (items.length <= 8 || i === 0 || i === items.length - 1 || i % Math.ceil(items.length / 6) === 0)) {
+        svg.append(s('text', { x: cx, y: H - 6, 'text-anchor': 'middle' }, opt.xLabel(d, i)));
+      }
+    });
+    host.replaceChildren(svg);
+  }
+
+  // Context size per model call: 2px line + 10% wash, end dot with surface ring, window limit hairline, crosshair tooltip.
+  function contextLine(host, calls, win) {
+    const W = chartWidth(host), H = 130, padL = 40, padR = 46, padT = 12, padB = 20;
+    const vals = calls.map((c) => c.prompt);
+    const peak = Math.max(...vals, 1);
+    const showWin = win && peak > win * 0.35;
+    const yMax = niceMax(showWin ? Math.max(win, peak) : peak * 1.1);
+    const n = vals.length;
+    const x = (i) => padL + (n <= 1 ? (W - padL - padR) / 2 : (i / (n - 1)) * (W - padL - padR));
+    const y = (v) => padT + (1 - v / yMax) * (H - padT - padB);
+    const color = css('--ap-s1');
+    const svg = s('svg', { class: 'chart', width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: 'img',
+                           'aria-label': 'Размер контекста по вызовам модели' });
+    for (const t of [0, yMax / 2, yMax]) {
+      svg.append(s('line', { class: t === 0 ? 'base' : 'grid', x1: padL, x2: W - padR, y1: Math.round(y(t)) + 0.5, y2: Math.round(y(t)) + 0.5 }));
+      svg.append(s('text', { x: padL - 6, y: y(t) + 4, 'text-anchor': 'end' }, fmtK(t)));
+    }
+    if (showWin) {
+      const wy = Math.round(y(win)) + 0.5;
+      svg.append(s('line', { x1: padL, x2: W - padR, y1: wy, y2: wy, stroke: css('--ap-muted'), 'stroke-width': 1 }));
+      svg.append(s('text', { x: W - padR + 4, y: wy + 4 }, 'лимит'));
+    }
+    if (n) {
+      const pts = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
+      svg.append(s('path', { d: `M${x(0)},${y(0)}L${pts.join('L')}L${x(n - 1)},${y(0)}Z`, fill: color, 'fill-opacity': 0.1 }));
+      svg.append(s('path', { d: `M${pts.join('L')}`, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+      svg.append(s('circle', { cx: x(n - 1), cy: y(vals[n - 1]), r: 4, fill: color, stroke: css('--ap-card'), 'stroke-width': 2 }));
+      svg.append(s('text', { class: 'val', x: x(n - 1) + 8, y: y(vals[n - 1]) + 4 }, fmtK(vals[n - 1])));
+    }
+    const cross = s('line', { x1: 0, x2: 0, y1: padT, y2: H - padB, stroke: css('--ap-muted'), 'stroke-width': 1, visibility: 'hidden' });
+    const dot = s('circle', { r: 4, fill: color, stroke: css('--ap-card'), 'stroke-width': 2, visibility: 'hidden' });
+    svg.append(cross, dot);
+    svg.append(s('rect', { class: 'hit', x: padL, y: 0, width: W - padL - padR, height: H,
+      onpointermove: (ev) => {
+        const r = svg.getBoundingClientRect();
+        const px = (ev.clientX - r.left) * (W / r.width);
+        const i = Math.max(0, Math.min(n - 1, Math.round(((px - padL) / (W - padL - padR)) * (n - 1))));
+        const c = calls[i];
+        if (!c) return;
+        cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.setAttribute('visibility', 'visible');
+        dot.setAttribute('cx', x(i)); dot.setAttribute('cy', y(c.prompt)); dot.setAttribute('visibility', 'visible');
+        showTip(ev, `${fmtK(c.prompt)} в контексте`, [
+          `вызов ${i + 1} из ${n} · ход ${c.turn} · ${fmtTime(c.ts)}`,
+          `вывод ${fmtK(c.output)} · ${fmtUsd(c.cost)}`,
+          c.tools && c.tools.length ? 'инструменты: ' + c.tools.join(', ') : '',
+        ], color);
+      },
+      onpointerleave: () => { cross.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); hideTip(); } }));
+    host.replaceChildren(svg);
+  }
+
+  // ───────── views ─────────
+  const view = document.getElementById('view');
+  const resizers = [];
+  function chartBox(draw) {
+    const box = h('div');
+    resizers.push(() => draw(box));
+    requestAnimationFrame(() => draw(box));
+    return box;
+  }
+
+  function note(kind, text) {
+    const bg = kind === 'crit' ? 'var(--ap-crit)' : kind === 'warn' ? 'var(--ap-warn)' : 'var(--ap-muted)';
+    const icon = kind === 'info' ? 'i' : '!';
+    return h('div', { class: 'note' }, h('span', { class: 'ic', style: `background:${bg};${kind === 'crit' ? 'color:#fff' : ''}` }, icon), h('div', null, text));
+  }
+
+  // Plan limits: one persistent card, refilled in place so polling never resets the rest of the view.
+  const limitsCard = h('div', { class: 'card' });
+  const WINDOWS = { '5h': '5 часов', weekly: 'Неделя' };
+  const family = (name) => (String(name || '').match(/gemini|claude|gpt/i) || [''])[0].toLowerCase();
+  const groupTitle = (g) => String(g.displayName || '').replace(/\s+models?$/i, '').replace(/\band\b/g, 'и');
+  function fmtIn(iso) {
+    const min = Math.max(1, Math.round((new Date(iso).getTime() - Date.now()) / 60000));
+    const d = Math.floor(min / 1440), hr = Math.floor((min % 1440) / 60), m = min % 60;
+    if (d) return `${d} дн${hr ? ` ${hr} ч` : ''}`;
+    if (hr) return `${hr} ч${m ? ` ${m} мин` : ''}`;
+    return `${m} мин`;
+  }
+  function renderLimits() {
+    const groups = (state.limits && state.limits.groups) || [];
+    if (!groups.length) {
+      limitsCard.replaceChildren(h('h3', null, 'Лимиты'), h('div', { class: 'small muted' },
+        state.limitsError ? `Antigravity не отдал лимиты: ${state.limitsError}`
+          : state.limits ? 'Antigravity не сообщает лимиты для этого аккаунта.' : 'Загрузка…'));
+      return;
+    }
+    const cur = family(state.tab === 'session' && state.session && state.session.context ? state.session.context.model : '');
+    limitsCard.replaceChildren(
+      h('h3', null, 'Лимиты ', h('span', { class: 'muted' }, '— сколько израсходовано')),
+      ...groups.map((g) => {
+        const models = String(g.description || '').replace(/^.*?:\s*/, '');
+        const buckets = (g.buckets || []).slice().sort((a, b) => (a.window === '5h' ? 0 : 1) - (b.window === '5h' ? 0 : 1));
+        return h('div', { class: 'lim' },
+          h('div', { class: 'row' }, h('span', { style: 'font-weight:600' }, groupTitle(g)),
+            h('span', { class: 'small muted ellipsis grow', title: models }, models),
+            cur && `${g.displayName} ${g.description}`.toLowerCase().includes(cur) ? h('span', { class: 'chip' }, 'модель разговора') : null),
+          h('div', { class: 'limits' }, buckets.map((b) => {
+            // proto3 JSON drops zero values: no remainingFraction means nothing is left
+            const left = Math.min(1, Math.max(0, Number(b.remainingFraction) || 0));
+            const used = 1 - left, fresh = left >= 0.9995;
+            const color = used >= 0.9 ? 'var(--ap-crit)' : used >= 0.7 ? 'var(--ap-warn)' : 'var(--ap-s1)';
+            const label = WINDOWS[b.window] || b.displayName || b.window;
+            const when = b.resetTime ? new Date(b.resetTime).toLocaleString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+            const tipOn = (ev) => showTip(ev, `${fmtPct(used)} израсходовано`, [`осталось ${fmtPct(left)}`, fresh ? 'окно ещё не начато' : `полный сброс: ${when}`], color);
+            return [
+              h('span', { class: 'muted' }, label),
+              h('div', { class: 'meter', role: 'meter', 'aria-label': `${groupTitle(g)}, ${label}: израсходовано`, 'aria-valuenow': Math.round(used * 100),
+                         'aria-valuemin': 0, 'aria-valuemax': 100, onpointermove: tipOn, onpointerleave: hideTip },
+                h('div', { class: 'track', style: `background:${color}` }),
+                h('div', { class: 'fill', style: `width:${(used * 100).toFixed(1)}%;background:${color}` })),
+              h('span', { class: 'v num' }, `${fmtPct(used)} · ${fresh ? 'не начат' : `сброс через ${fmtIn(b.resetTime)}`}`),
+            ];
+          })));
+      }),
+      h('div', { class: 'small muted', style: 'margin-top:8px' }, 'Модели группы делят общие лимиты; расход пропорционален стоимости токенов.'));
+  }
+
+  function renderSession() {
+    const d = state.session;
+    if (!d) return [h('div', { class: 'empty muted' }, 'Загрузка…')];
+    if (d.empty) {
+      return [h('div', { class: 'card empty' },
+        h('div', { style: 'font-weight:600' }, 'Пока нет данных'),
+        h('div', { class: 'muted small' }, d.reason === 'no-conversations'
+          ? 'В Antigravity ещё нет разговоров с вызовами модели.'
+          : 'В этом разговоре ещё не было вызовов модели — данные появятся после первого ответа агента.')), limitsCard];
+    }
+    const t = d.totals, ctx = d.context;
+    const out = [];
+
+    // hero + caption
+    const models = (d.models || []).join(', ') || d.default_model || '—';
+    out.push(h('div', { class: 'card' },
+      h('div', { class: 'row between' },
+        h('div', { class: 'small muted' }, 'Стоимость по API (эквивалент)'),
+        h('div', { class: 'small muted' }, d.duration || '')),
+      h('div', { class: 'hero', title: 'API-эквивалент, а не ваш счёт' }, fmtUsd(t.cost)),
+      h('div', { class: 'small muted ellipsis', title: models }, `${models} · ${turnsW(d.turns.length)} · ${calls(t.calls)}`),
+      d.model_guessed_calls ? note('info', `Модель не записана в транскрипт (так бывает у разговоров, запущенных через agentapi) — ${ru(d.model_guessed_calls, 'вызов оценён', 'вызова оценены', 'вызовов оценены')} по цене ${d.default_model}.`) : null,
+      (d.unpriced_models || []).length ? note('warn', `Нет цены для: ${d.unpriced_models.join(', ')} — их токены в стоимость не входят. Добавьте цену в skills/usage/pricing.json.`) : null,
+      t.saved > 0 ? h('div', { class: 'small muted', style: 'margin-top:4px' }, `Кэш сэкономил ${fmtUsd(t.saved)} — без кэша было бы ${fmtUsd(t.cost_no_cache)}`) : null));
+
+    out.push(limitsCard);
+
+    // context meter
+    if (ctx) {
+      const f = Math.min(1, ctx.fraction || 0);
+      const sev = f >= 0.85 ? 'crit' : f >= 0.7 ? 'warn' : 'ok';
+      const fillColor = sev === 'crit' ? 'var(--ap-crit)' : sev === 'warn' ? 'var(--ap-warn)' : 'var(--ap-s1)';
+      out.push(h('div', { class: 'card' },
+        h('div', { class: 'row between' }, h('h3', { style: 'margin:0' }, 'Контекст'),
+          h('span', { class: 'num' }, `${fmtK(ctx.current)} / ${fmtK(ctx.window)} · ${fmtPct(f)}`)),
+        h('div', { class: 'meter', role: 'meter', 'aria-valuenow': Math.round(f * 100), 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-label': 'Заполнение контекста' },
+          h('div', { class: 'track', style: `background:${fillColor}` }),
+          h('div', { class: 'fill', style: `width:${(f * 100).toFixed(1)}%;background:${fillColor}` })),
+        h('div', { class: 'small muted' }, `пик ${fmtK(ctx.peak)} · модель ${ctx.model}`),
+        sev === 'crit' ? note('crit', 'Контекст почти заполнен: скоро начнётся сжатие истории. Подведите итог и начните новый разговор.')
+          : sev === 'warn' ? note('warn', 'Контекст заполнен больше чем на 70% — для новой большой задачи лучше начать новый разговор.') : null));
+    }
+
+    // tiles
+    out.push(h('div', { class: 'tiles' },
+      h('div', { class: 'tile' }, h('div', { class: 'small muted' }, 'Токенов'), h('div', { class: 'v' }, fmtK(t.total))),
+      h('div', { class: 'tile' }, h('div', { class: 'small muted' }, 'Попадание в кэш'), h('div', { class: 'v' }, fmtPct(t.hit_rate))),
+      h('div', { class: 'tile' }, h('div', { class: 'small muted' }, 'Вывод'), h('div', { class: 'v' }, fmtK(t.output)))));
+
+    // composition: cache read / new input / output (fixed slot order)
+    const parts = [
+      { label: 'чтение из кэша', v: t.cache_read, cost: t.cost_cache_read, c: 'var(--ap-s1)' },
+      { label: 'новый ввод', v: t.input, cost: t.cost_input, c: 'var(--ap-s2)' },
+      { label: 'вывод (с thinking)', v: t.output, cost: t.cost_output, c: 'var(--ap-s3)' },
+    ];
+    const total = Math.max(1, t.total);
+    out.push(h('div', { class: 'card' },
+      h('h3', null, 'Состав токенов'),
+      h('div', { class: 'stack', role: 'img', 'aria-label': 'Доли токенов: кэш, ввод, вывод' },
+        parts.filter((p) => p.v > 0).map((p) => h('div', { style: `flex:${p.v / total} 1 0;background:${p.c}`,
+          onpointermove: (ev) => showTip(ev, `${fmtK(p.v)} · ${fmtPct(p.v / total)}`, [p.label, fmtUsd(p.cost)], p.c), onpointerleave: hideTip }))),
+      h('div', { class: 'legend' }, parts.map((p) => [
+        h('span', { class: 'sw', style: `background:${p.c}` }), h('span', null, p.label),
+        h('span', { class: 'num r' }, `${fmtK(p.v)} · ${fmtPct(p.v / total)}`), h('span', { class: 'num r', style: 'text-align:right' }, fmtUsd(p.cost))]))));
+
+    // context growth
+    if ((d.calls || []).length > 1) {
+      out.push(h('div', { class: 'card' },
+        h('h3', null, 'Рост контекста ', h('span', { class: 'muted' }, '— токенов в промпте на каждом вызове')),
+        chartBox((box) => contextLine(box, d.calls, ctx && ctx.window))));
+    }
+
+    // cost per turn
+    if ((d.turns || []).length) {
+      const turns = d.turns.slice(-24);
+      out.push(h('div', { class: 'card' },
+        h('h3', null, 'Стоимость по ходам', d.turns.length > 24 ? h('span', { class: 'muted' }, ` — последние 24 из ${d.turns.length}`) : ''),
+        chartBox((box) => columns(box, turns.map((x) => ({ value: x.cost, tip: [`ход ${x.idx} · ${fmtTime(x.ts)}`, x.text, `${calls(x.calls)} · ${fmtK(x.total)} токенов`] })),
+          { label: 'Стоимость по ходам', fmt: fmtUsd, xLabel: (_, i) => String(turns[i].idx) })),
+        h('details', null, h('summary', null, 'Таблица'),
+          h('table', null, h('thead', null, h('tr', null, h('th', { class: 'r', style: 'width:24px' }, '#'), h('th', null, 'Запрос'), h('th', { class: 'r w-n' }, 'Токены'), h('th', { class: 'r w-m' }, '$'))),
+            h('tbody', null, d.turns.slice().reverse().map((x) => h('tr', null,
+              h('td', { class: 'r' }, x.idx), h('td', null, x.text, h('span', { class: 'sub' }, `${calls(x.calls)} · ${fmtTime(x.ts)}`)),
+              h('td', { class: 'r' }, fmtK(x.total)), h('td', { class: 'r' }, fmtUsd(x.cost)))))))));
+    }
+
+    // top calls
+    if ((d.top_calls || []).length) {
+      out.push(h('div', { class: 'card' }, h('h3', null, 'Самые дорогие вызовы'),
+        h('table', null, h('thead', null, h('tr', null, h('th', null, 'Вызов'), h('th', { class: 'r w-n' }, 'Промпт'), h('th', { class: 'r w-n' }, 'Вывод'), h('th', { class: 'r w-m' }, '$'))),
+          h('tbody', null, d.top_calls.map((c) => h('tr', null,
+            h('td', null, `шаг ${c.step} · ход ${c.turn}`, h('span', { class: 'sub', title: (c.tools || []).join(', ') }, (c.tools || []).join(', ') || 'без инструментов')),
+            h('td', { class: 'r' }, fmtK(c.prompt)), h('td', { class: 'r' }, fmtK(c.output)), h('td', { class: 'r' }, fmtUsd(c.cost))))))));
+    }
+
+    // subagents
+    if ((d.subagents || []).length) {
+      out.push(h('div', { class: 'card' }, h('h3', null, 'Субагенты'),
+        h('table', null, h('thead', null, h('tr', null, h('th', null, 'Субагент'), h('th', { class: 'r w-n' }, 'Токены'), h('th', { class: 'r w-m' }, '$'))),
+          h('tbody', null, d.subagents.map((a) => h('tr', { class: 'click', title: 'Показать этот разговор', onclick: () => select(a.id) },
+            h('td', null, a.role || '—', h('span', { class: 'sub' }, `${a.type || '?'} · ${a.model || 'inherit'}`)),
+            h('td', { class: 'r' }, a.available ? fmtK(a.total) : (a.denied ? 'нет доступа' : '—')),
+            h('td', { class: 'r' }, a.available ? fmtUsd(a.cost) : '—')))))));
+    }
+
+    // tools
+    const tools = Object.entries(d.tools || {});
+    if (tools.length) {
+      out.push(h('div', { class: 'card' }, h('h3', null, 'Инструменты'),
+        h('div', { class: 'chips' }, tools.map(([name, cnt]) => h('span', { class: 'chip' }, `${name} ×${cnt}`)))));
+    }
+    return out;
+  }
+
+  function renderAll() {
+    const r = state.recent;
+    if (!r) return [h('div', { class: 'empty muted' }, 'Загрузка…')];
+    const out = [];
+    const unpriced = (r.by_model || []).filter((m) => !m.priced && m.tokens > 0);
+    out.push(h('div', { class: 'card' },
+      h('div', { class: 'small muted' }, `За ${r.days} дней (API-эквивалент)`),
+      h('div', { class: 'hero' }, fmtUsd(r.period.cost)),
+      h('div', { class: 'small muted' }, `сегодня ${fmtUsd(r.today.cost)} · ${fmtK(r.period.tokens)} токенов · ${calls(r.period.calls)}`),
+      unpriced.length ? note('warn', `Без цены (не входят в сумму): ${unpriced.map((m) => `${m.model} — ${fmtK(m.tokens)} токенов`).join('; ')}.`) : null,
+      (r.by_model || []).some((m) => m.guessed) ? note('info', 'У части разговоров (например, запущенных через agentapi) модель не записана в транскрипт — они оценены по цене модели по умолчанию.') : null));
+    out.push(limitsCard);
+
+    out.push(h('div', { class: 'card' }, h('h3', null, 'По дням'),
+      chartBox((box) => columns(box, r.by_day.map((x) => ({ value: x.cost, tip: [new Date(x.day + 'T12:00').toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' }), `${fmtK(x.tokens)} токенов · ${calls(x.calls)}`] })),
+        { label: 'Стоимость по дням', fmt: fmtUsd, height: 120,
+          xLabel: (_, i) => i === r.by_day.length - 1 ? 'сегодня' : new Date(r.by_day[i].day + 'T12:00').toLocaleDateString('ru-RU', { weekday: 'short' }) }))));
+
+    if ((r.by_model || []).length) {
+      out.push(h('div', { class: 'card' }, h('h3', null, 'По моделям'),
+        h('table', null, h('thead', null, h('tr', null, h('th', null, 'Модель'), h('th', { class: 'r w-n' }, 'Токены'), h('th', { class: 'r w-m' }, '$'))),
+          h('tbody', null, r.by_model.map((m) => h('tr', null,
+            h('td', null, m.guessed ? 'модель не записана' : m.model,
+              h('span', { class: 'sub' }, calls(m.calls) + (m.guessed ? ` · ≈ по цене ${m.model}` : ''))),
+            h('td', { class: 'r' }, fmtK(m.tokens)), h('td', { class: 'r' }, m.priced ? fmtUsd(m.cost) : 'нет цены')))))));
+    }
+
+    out.push(h('div', { class: 'card' }, h('h3', null, 'Недавние разговоры'),
+      (r.conversations || []).length ? h('table', null,
+        h('thead', null, h('tr', null, h('th', null, 'Разговор'), h('th', { class: 'r w-n' }, 'Контекст'), h('th', { class: 'r w-m' }, '$'))),
+        h('tbody', null, r.conversations.map((c) => h('tr', { class: 'click', title: 'Открыть статистику разговора', onclick: () => { select(c.id); setTab('session'); } },
+          h('td', null, h('div', { class: 'ellipsis', style: 'max-width:100%' }, c.title || c.id), h('div', { class: 'small muted ellipsis' }, `${fmtAgo(c.last_ts)} · ${turnsW(c.turns)} · ${c.model_guessed && (c.models || []).length <= 1 ? 'модель не записана' : (c.models || []).join(', ')}`)),
+          h('td', { class: 'r' }, c.context ? fmtPct(c.context.fraction) : '—'),
+          h('td', { class: 'r' }, fmtUsd(c.cost) + (c.unpriced_models && c.unpriced_models.length ? '*' : '')))))) :
+        h('div', { class: 'muted small' }, 'Разговоров пока нет.'),
+      (r.conversations || []).some((c) => c.unpriced_models && c.unpriced_models.length) ? h('div', { class: 'small muted', style: 'margin-top:6px' }, '* часть вызовов на моделях без цены') : null));
+    return out;
+  }
+
+  function renderPicker() {
+    const sel = document.getElementById('picker');
+    const cur = state.selected;
+    const opts = [h('option', { value: '' }, PANE_CONV ? 'Этот разговор' : 'Последний активный разговор')];
+    for (const c of (state.recent && state.recent.conversations) || []) {
+      if (c.id === PANE_CONV) continue;
+      opts.push(h('option', { value: c.id }, `${(c.title || c.id).slice(0, 60)} · ${fmtAgo(c.last_ts)} · ${fmtUsd(c.cost)}`));
+    }
+    if (cur && !opts.some((o) => o.value === cur)) opts.push(h('option', { value: cur }, `Разговор ${cur.slice(0, 8)}…`));
+    sel.replaceChildren(...opts);
+    sel.value = cur;
+  }
+
+  function renderLive() {
+    const dot = document.getElementById('dot'), txt = document.getElementById('live-text');
+    if (state.error) { dot.className = 'dot'; txt.textContent = 'ошибка'; return; }
+    const last = state.tab === 'session' && state.session && state.session.last_ts;
+    const active = last && Date.now() - new Date(last).getTime() < 90000;
+    dot.className = 'dot' + (active ? ' on' : '');
+    const ago = state.updatedAt ? Math.round((Date.now() - state.updatedAt) / 1000) : null;
+    txt.textContent = active ? 'агент работает' : (ago === null ? 'загрузка…' : `обновлено ${ago < 5 ? 'сейчас' : ago + ' с назад'}`);
+  }
+
+  function render() {
+    resizers.length = 0;
+    hideTip();
+    document.getElementById('tab-session').setAttribute('aria-selected', String(state.tab === 'session'));
+    document.getElementById('tab-all').setAttribute('aria-selected', String(state.tab === 'all'));
+    document.getElementById('picker-row').style.display = state.tab === 'session' ? '' : 'none';
+    renderLimits();  // the "модель разговора" marker depends on the tab and the selected conversation
+    const kids = [];
+    if (state.error) kids.push(h('div', { class: 'card err' }, h('div', { style: 'font-weight:600' }, 'Не удалось получить данные'),
+      h('div', { class: 'small muted' }, state.error), h('div', { class: 'small muted' }, 'Проверьте /doctor в Antigravity: нужен python3 и доступ к ~/.gemini/antigravity/brain.')));
+    kids.push(...(state.tab === 'session' ? renderSession() : renderAll()));
+    view.replaceChildren(...kids);
+    const pu = (state.session && state.session.pricing_updated) || (state.recent && state.recent.pricing_updated) || '?';
+    document.getElementById('foot').textContent = `Оценка по ценам API из pricing.json (обновлён ${pu}), а не ваш реальный счёт. Данные — из транскриптов Antigravity, те же, что у /usage; лимиты — от самого Antigravity.`;
+    renderLive();
+  }
+
+  function select(id) {
+    state.selected = id || '';
+    state.session = null; state.sessionKey = '';
+    renderPicker(); render(); loadSession();
+  }
+  function setTab(tab) {
+    state.tab = tab; state.error = null; render();
+    window.scrollTo(0, 0);
+    (tab === 'session' ? loadSession : loadRecent)();
+  }
+  document.getElementById('picker').addEventListener('change', (e) => select(e.target.value));
+  document.getElementById('tab-session').addEventListener('click', () => setTab('session'));
+  document.getElementById('tab-all').addEventListener('click', () => setTab('all'));
+  let lastW = 0;
+  new ResizeObserver(() => { const w = view.clientWidth; if (Math.abs(w - lastW) > 8) { lastW = w; resizers.forEach((f) => f()); } }).observe(view);
+
+  // ───────── polling: fast while visible, nothing while hidden ─────────
+  async function tick() {
+    if (document.visibilityState !== 'visible' || state.loading) return;
+    state.loading = true;
+    try { await (state.tab === 'session' ? loadSession() : loadRecent()); } finally { state.loading = false; }
+  }
+  setInterval(tick, 3000);
+  setInterval(() => { if (document.visibilityState === 'visible') loadRecent(); }, 20000);
+  setInterval(renderLive, 1000);
+  setInterval(() => { if (document.visibilityState === 'visible') loadLimits(); }, 30000);  // also refreshes the countdowns
+  document.addEventListener('visibilitychange', () => { tick(); if (document.visibilityState === 'visible') loadLimits(); });
+
+  applyTheme();
+  renderPicker();
+  render();
+  loadRecent();
+  loadLimits();
+  tick();
+})();
+</script>
+</body>
+</html>

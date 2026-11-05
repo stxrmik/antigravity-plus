@@ -1,0 +1,14 @@
+{
+  // Antigravity Plus — Claude Code–style workflow kit for Antigravity.
+  "name": "antigravity-plus",
+  "displayName": "Antigravity Plus",
+  "description": "Claude Code–style workflow kit for macOS, Linux and Windows: an agent that sets up projects on its own (creates a git repository with a safe first commit, writes AGENTS.md with /init, records project rules) and changes settings for you (/settings: MCP servers, plugin options) while its own permissions stay yours to change, several agents on one project without overwriting each other, full access on a single grant (the agent runs every command itself), /deploy with checks and rollback, /ui-check (headless Chrome screenshots), /standup, /hooks, secret protection, auto-memory shared with Claude Code (/memory, /remember), /handoff to continue work in a new conversation (recent conversations shown at start), a Stop hook that sends the agent back to unfinished task.md items, automatic checks of every edited file (syntax and the project's linters), commands the agent runs on its own (/review after big changes, /security-review, /handoff), instructions that survive long conversations and context compaction, project rules (/init, CLAUDE.md compatibility with @imports and .claude/rules), git workflow (/commit, /pr, /review, /security-review, /simplify, /fix-issue), /usage cost dashboard plus a live side panel with tokens, context fill and cost, /export, /doctor, subagents (explorer, code-reviewer, security-auditor, debugger, test-writer), a git-context session hook and a guard that asks before destructive commands and before pushing when you said not to.",
+  "version": "0.11.0",
+  "logo": "assets/logo.svg",
+  "author": { "name": "stxrmik" },
+  "suggestedPrompts": [
+    "/init — analyze this repository and create AGENTS.md",
+    "/memory — what do you remember about me and this project?",
+    "/review my uncommitted changes"
+  ]
+}

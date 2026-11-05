@@ -1,0 +1,101 @@
+{
+  "antigravity-plus-session-context": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "python3 hooks/session_start.py",
+        "timeout": 20
+      }
+    ]
+  },
+  "antigravity-plus-instructions": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python3 hooks/instructions.py",
+        "timeout": 10
+      }
+    ]
+  },
+  "antigravity-plus-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 hooks/guard.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 hooks/guard.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 hooks/guard.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "read_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 hooks/guard.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  },
+  "antigravity-plus-finish-tasks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 hooks/stop.py",
+        "timeout": 10
+      }
+    ]
+  },
+  "antigravity-plus-check-edits": {
+    "PostToolUse": [
+      {
+        "matcher": "read_file|write_file|edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 hooks/check_edit.py",
+            "timeout": 45
+          }
+        ]
+      }
+    ]
+  },
+  "antigravity-plus-memory": {
+    "PostToolUse": [
+      {
+        "matcher": "write_file|edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 hooks/memory_sync.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
