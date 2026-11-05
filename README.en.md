@@ -21,7 +21,7 @@ every edit checked · an agent that finishes the job
 
 ---
 
-One plugin: 19 commands, 5 subagents, 6 hooks and working rules. One command installs it; the whole plugin is turned
+One plugin: 20 commands, 7 subagents, 6 hooks and working rules. One command installs it; the whole plugin is turned
 on and off on Antigravity's plugin page. Python standard library only, no dependencies.
 
 ## Why
@@ -32,6 +32,7 @@ on and off on Antigravity's plugin page. Python standard library only, no depend
 | Every conversation starts from scratch | Memory about you and the project (shared with Claude Code), `/handoff` and "continue" |
 | `rm -rf ~`, `git reset --hard`, `cat .env` go through without a question | The guard stops what can't be undone and keeps secrets out of the conversation |
 | Two agents on one project overwrite each other's edits | No writing over a version of a file the agent hasn't seen: it re-reads and redoes the edit itself |
+| The agent starts a subagent and waits, doing nothing | Independent parts go to subagents in one step while the agent does its own part |
 | The agent stops halfway, or "verifies" with a command that just prints "ok" | The Stop hook sends it back to finish `task.md`, run the tests and look at the UI |
 | A syntax error surfaces three steps later | Every edit is checked right away: Python, JS, Swift, shell, JSON, YAML… |
 | "Do you want me to…?" for every small step | The agent creates the git repository and `AGENTS.md` itself; one "yes" grants full access |
@@ -91,6 +92,19 @@ hooks work; `/doctor` does the same inside Antigravity.
 - Before each step the agent sees who else is working on the project and on which files, and can coordinate.
 - `/commit` takes only the agent's own files, and `/deploy` holds a lock so two agents never deploy at once.
 
+### ⚡ Parallel work
+- The agent decides on its own what to hand to subagents: a broad code search to `explorer`, docs and APIs to
+  `researcher`, a separate part of the implementation in its own files to `worker`, tests and review. It launches
+  them in one step and starts its own part right away.
+- While subagents and long commands run in the background, the agent neither idles nor polls them: before each step
+  it sees who is busy with what and keeps working. Results arrive by themselves, and the Stop hook won't let it end
+  a turn with "Waiting…" while work is left.
+- A `task.md` plan with three or more items is the cue to sort out what can run in parallel; three rounds of web
+  search in a row are the cue to hand the research to `researcher`. The agent re-checks a `worker`'s report before
+  building on it.
+- `/parallel` does the same on request, with brief templates; for four or more similar pieces the agent uses
+  Antigravity's built-in `run_workflow`.
+
 ### ✅ Quality
 - Every edit is checked right away: Python, JS, Swift, shell, JSON, YAML, Ruby, plist and XML syntax, plus the
   project's linters (ruff, eslint, swiftlint, shellcheck). The agent sees the error before its next step.
@@ -119,6 +133,7 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 
 | Command | What it does | The agent runs it itself |
 |---|---|---|
+| `/parallel` | split a task into independent parts and hand them to subagents, working in parallel | ✅ when there are 2+ independent parts |
 | `/review` | review of the change by two subagents, findings double-checked | ✅ after substantial changes |
 | `/security-review` | audit of the branch with exploitability checks | ✅ when a change touches auth, secrets, payments |
 | `/ui-check` | screenshots at phone and laptop width, console errors, heavy effects | ✅ after UI changes |
@@ -139,8 +154,9 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 | `/standup` | what got done today or this week across projects | on request |
 | `/export` | the conversation as Markdown, secrets hidden | on request |
 
-🔑 — on your request or with full access. Subagents: `explorer` (fast search on Flash), `code-reviewer`,
-`security-auditor`, `debugger`, `test-writer`.
+🔑 — on your request or with full access. Subagents: `explorer` (fast search on Flash), `researcher` (docs and APIs,
+on Flash), `worker` (a part of the implementation in its own files), `code-reviewer`, `security-auditor`,
+`debugger`, `test-writer`.
 
 ## How it works
 
@@ -148,7 +164,7 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 flowchart TD
     A([New conversation]) -->|SessionStart| B[git, project rules, memory, recent conversations]
     B --> C[Agent step]
-    C -->|PreInvocation| D[your instructions, other agents, errors in recent edits]
+    C -->|PreInvocation| D[your instructions, other agents, edit errors, background work]
     D --> E{{Tool call}}
     E -->|PreToolUse · guard| F{Allowed?}
     F -->|dangerous| G[ask you]
@@ -164,10 +180,10 @@ flowchart TD
 | Event | Hook | What it does |
 |---|---|---|
 | SessionStart | `session_start.py` | git context, project rules (and `CLAUDE.md`), memory, recent conversations, project setup hints |
-| PreInvocation | `instructions.py` | your messages after a new message, after compaction and every ~30 steps; edit errors; other agents |
+| PreInvocation | `instructions.py` | your messages after a new message, after compaction and every ~30 steps; edit errors; other agents; what runs in the background and what to do meanwhile |
 | PreToolUse | `guard.py` | dangerous commands, secrets, other agents' file versions, bans from the conversation, full access |
 | PostToolUse | `check_edit.py`, `memory_sync.py` | edit checks, coordination, memory index |
-| Stop | `stop.py` | open items, syntax errors, verification, review, UI, project setup |
+| Stop | `stop.py` | open items (including those it can do while subagents are busy), syntax errors, verification, review, UI, project setup |
 
 ## Details
 
@@ -332,6 +348,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 | Reminder to verify work | "don't remind me about tests" | `auto-verify` |
 | Secret protection | "don't protect secrets" (asks to confirm) | `protect-secrets` |
 | Setting up projects on its own | "don't set up projects on your own" | `auto-setup` |
+| Parallel work hints | "stop the subagent hints" | `parallel-hints` |
 
 ## Platforms and compatibility
 
@@ -363,11 +380,11 @@ antigravity-plus/
 ├── plugin.json, hooks.json, assets/logo.svg
 ├── hooks/       session_start  instructions  guard  check_edit  memory_sync  stop
 │                conversation (the user's messages, full access)  checks (edit checks, secrets)
-│                coord (several agents)  compat (macOS / Linux / Windows)
+│                coord (several agents)  parallel (background work)  compat (macOS / Linux / Windows)
 ├── rules/AGENTS.md                 # always-on working rules
-├── agents/      explorer  code-reviewer  security-auditor  debugger  test-writer
+├── agents/      explorer  researcher  worker  code-reviewer  security-auditor  debugger  test-writer
 ├── sidecars/usage/                 # the usage side panel
-└── skills/      19 commands: init remember memory handoff review commit pr … settings git-init doctor
+└── skills/      20 commands: init remember memory handoff parallel review commit pr … settings git-init doctor
 install.py, install.sh, install.cmd # installer for every OS
 tests/                              # offline tests; CI: .github/workflows/tests.yml
 ```

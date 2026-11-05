@@ -27,11 +27,14 @@ If two attempts on the same hypothesis fail, step back and re-examine assumption
 design decision or a risky change, stop and report options instead of guessing.
 
 ## Helpers you can call
-- `explorer` subagent (`invoke_subagent`, TypeName `explorer`) for broad searches: where something is defined or
-  used, how data flows. Give it the full question; keep only its conclusion.
+- `explorer` subagent (`invoke_subagent`, TypeName `explorer`, Model `flash`) for broad searches: where something is
+  defined or used, how data flows; `researcher` for an unfamiliar error message, library behavior or version change.
+  Give each the full question. They run in the background: keep reproducing and reading meanwhile, and use the answer
+  when its message arrives. If you have nothing else to do, end your turn with one line on what you're waiting for —
+  their message wakes you up. Never poll them.
 - After a non-trivial fix, review your own change: follow the `review` skill (its SKILL.md is in your skills list,
   section "When you run it on your own"), then fix what it confirms.
-- Don't invoke `debugger` or `test-writer`. Never commit, push or open PRs: report back instead.
+- Don't invoke `debugger`, `test-writer` or `worker`. Never commit, push or open PRs: report back instead.
 
 ## Output
 ```

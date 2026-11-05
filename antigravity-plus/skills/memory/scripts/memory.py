@@ -18,7 +18,7 @@ the line for a new memory, so the agent only writes the memory file itself.
   memory.py sync   [--workspace DIR]            add missing index lines, drop lines whose file is gone
   memory.py config [auto-memory on|off] [share-with-claude-code on|off] [recent-conversations N]
                    [finish-tasks on|off] [check-edits on|off] [auto-review on|off] [auto-verify on|off] [protect-secrets on|off]
-                   [auto-setup on|off]
+                   [auto-setup on|off] [parallel-hints on|off]
                    (settings of the whole plugin live here)
 
 Also imported by the hooks (session_start.py, guard.py, memory_sync.py). Stdlib only, Python 3.8+.
@@ -49,7 +49,8 @@ PLUGIN = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__))
 INDEX = "MEMORY.md"
 TYPES = ("user", "feedback", "project", "reference")
 DEFAULTS = {"autoMemory": True, "shareWithClaudeCode": True, "recentConversations": 3, "finishTasks": True,
-            "checkEdits": True, "autoReview": True, "autoVerify": True, "protectSecrets": True, "autoSetup": True}
+            "checkEdits": True, "autoReview": True, "autoVerify": True, "protectSecrets": True, "autoSetup": True,
+            "parallelHints": True}
 
 MAX_FILE = 64_000            # bytes read per memory file
 INDEX_LINES = 200            # like Claude Code: only the head of MEMORY.md goes into the conversation
@@ -566,7 +567,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("pairs", nargs="*",
                     help="auto-memory on|off, share-with-claude-code on|off, recent-conversations N, "
                          "finish-tasks on|off, check-edits on|off, auto-review on|off, auto-verify on|off, "
-                         "protect-secrets on|off, auto-setup on|off")
+                         "protect-secrets on|off, auto-setup on|off, parallel-hints on|off")
     a = ap.parse_args(argv)
     ws = os.path.abspath(os.path.expanduser(getattr(a, "workspace", os.getcwd())))
 
@@ -591,7 +592,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         keys = {"auto-memory": "autoMemory", "share-with-claude-code": "shareWithClaudeCode",
                 "recent-conversations": "recentConversations", "finish-tasks": "finishTasks",
                 "check-edits": "checkEdits", "auto-review": "autoReview", "auto-verify": "autoVerify",
-                "protect-secrets": "protectSecrets", "auto-setup": "autoSetup"}
+                "protect-secrets": "protectSecrets", "auto-setup": "autoSetup", "parallel-hints": "parallelHints"}
         p = a.pairs
         if len(p) % 2:
             ap.error("config takes pairs: <key> <value>")
@@ -605,7 +606,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 ap.error(f"bad setting: {k} {v} (auto-memory on|off, share-with-claude-code on|off, "
                          "recent-conversations N, finish-tasks on|off, check-edits on|off, auto-review on|off, "
-                         "auto-verify on|off, protect-secrets on|off, auto-setup on|off)")
+                         "auto-verify on|off, protect-secrets on|off, auto-setup on|off, parallel-hints on|off)")
         s = save_settings(**changes) if changes else settings()
         print(json.dumps(s, ensure_ascii=False, indent=2))
     return 0

@@ -45,6 +45,11 @@ Invoke them by `TypeName` (`code-reviewer`, `security-auditor`; some builds list
 unavailable, use `research` and paste the corresponding
 agent instructions from `<plugin_dir>/agents/<name>.md` into the prompt.
 
+Launch them all in one step. They run in the background and message you when done, so don't sit idle or poll them:
+meanwhile run the project's checks yourself (tests, type-check, build; `/ui-check` for web UI) and read the riskiest
+parts of the diff. When everything left needs their findings, end your turn with one line, e.g. «Ревью идёт:
+code-reviewer, security-auditor» — their message wakes you up.
+
 Required finding format:
 ```
 [SEVERITY] file:line — title
@@ -68,6 +73,7 @@ guards, tests). Drop false positives and duplicates. Drop pure style nits unless
 ## When you run it on your own
 After a substantial change of your own (several files or tricky logic), before you report the work done:
 - Say it in one line first, e.g. «Запускаю /review: изменено 5 файлов».
-- Run `code-reviewer`; add `security-auditor` only for security-sensitive code (see step 3).
+- Run `code-reviewer`; add `security-auditor` only for security-sensitive code (see step 3). Run the project's
+  checks while they review.
 - Fix the confirmed CRITICAL/HIGH findings that your change introduced right away: that's finishing your own task, not new scope. Then re-run the project's checks.
 - In your final report, add one line on what the review found and what you fixed. List anything you didn't fix (pre-existing issues, judgment calls) for the user.

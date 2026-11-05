@@ -38,9 +38,10 @@ is noise — leave it out.
 
 2. **Dig deeper where the scan is thin.** Read the key entry points, a representative module, one or
    two tests, and CI config to learn: how to run a **single** test, real architecture boundaries, code
-   generation steps, env/setup requirements, non-obvious conventions. For large repos, delegate this
-   exploration to the `explorer` subagent (fast, read-only; fall back to the built-in `research`)
-   and ask for a structured summary.
+   generation steps, env/setup requirements, non-obvious conventions. For large repos, launch 2–3
+   `explorer` subagents in one step, one per area (e.g. backend, frontend, build/CI; Model `flash`; fall
+   back to the built-in `research`), ask each for a structured summary, and meanwhile read the README,
+   the entry points and CI config yourself.
 
 3. **Merge, don't clobber.**
    - If `AGENTS.md` exists: improve it in place — keep correct content, fix stale commands, fill gaps. Show the diff summary.

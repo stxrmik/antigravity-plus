@@ -21,8 +21,8 @@ push, open a PR or comment on the issue — offer those at the end.
    behavior and acceptance criteria in 2–4 lines.
 2. **Prepare a branch.** If there are uncommitted changes, ask before touching anything. If on the
    default branch: `git switch -c fix/<n>-<short-slug>`.
-3. **Locate** the relevant code (delegate broad searches to the `explorer` subagent). Read the code paths
-   and the existing tests around them.
+3. **Locate** the relevant code (delegate broad searches to the `explorer` subagent and keep reading what
+   you already know meanwhile). Read the code paths and the existing tests around them.
 4. **Reproduce** — ideally as a failing test in the project's framework; otherwise a minimal script or
    command. Record the exact command and the failing output. If you can't reproduce, report what you
    tried and ask for details instead of guessing a fix.

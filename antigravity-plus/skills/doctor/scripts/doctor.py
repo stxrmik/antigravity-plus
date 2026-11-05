@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from typing import Dict, List, Optional, Tuple
 
@@ -249,6 +250,23 @@ def hook_selftest() -> List[str]:
                                  "lastUserInput": "Делай всё внутри Docker"})
         ok = code == 0 and "user_instructions" in res and "Docker" in res
         out.append(f"{OK if ok else BAD} instructions (PreInvocation): напоминает агенту указания пользователя"
+                   + ("" if ok else f" — {res[:160]!r}"))
+        _cleanup_selftest(tp)
+    if os.path.isfile(instr) and memstore and not memstore.settings().get("parallelHints", True):
+        out.append(f"{WARN} parallel: подсказки о параллельной работе выключены (`memory.py config parallel-hints on`)")
+    elif os.path.isfile(instr):  # parallel work: right after a subagent starts, the agent hears it shouldn't sit and wait
+        tp = _fake_transcript(["Найди, где считается цена"])
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with open(tp, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"step_index": 90, "type": "PLANNER_RESPONSE", "created_at": now, "content": "",
+                                "tool_calls": [{"name": "invoke_subagent", "args": {"TypeName": "explorer",
+                                                                                    "Role": "Price search"}}]}) + "\n")
+            f.write(json.dumps({"step_index": 91, "type": "GENERIC", "created_at": now,
+                                "content": "Created At: now\nCreated the following subagent:\n"
+                                           '{\n  "conversationId":  "doctor-selftest-sub"\n}\n'}) + "\n")
+        code, res = call(instr, {"conversationId": SELFTEST_ID, "transcriptPath": tp})
+        ok = code == 0 and "background_work" in res and "explorer" in res
+        out.append(f"{OK if ok else BAD} parallel (PreInvocation): пока субагенты работают, агент продолжает свою часть"
                    + ("" if ok else f" — {res[:160]!r}"))
         _cleanup_selftest(tp)
     if os.path.isfile(msync):

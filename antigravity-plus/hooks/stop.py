@@ -5,7 +5,7 @@ When the agent ends its turn normally (terminationReason NO_TOOL_CALL) while the
 conversation's task.md checklist still has open items ([ ] or [/]), the hook sends it back with the list: continue
 if the items are part of what the user asked and nothing blocks you; otherwise end again, say why they are open
 and mark them (e.g. «— ждёт вашего решения»), which this hook then leaves alone. It stays quiet when:
-  * the turn ended for another reason (cancel, error, limits) or background tasks are still running;
+  * the turn ended for another reason (cancel, error, limits);
   * the agent's last message asks the user something or waits for a decision, approval or review;
   * task.md wasn't updated since the user's last message (an old checklist), unless the user said «продолжай»;
   * it already sent the agent back for the same open items, or MAX_PER_TURN times in this turn;
@@ -19,6 +19,10 @@ them with ui_check.py screenshots, with the exact command (autoVerify; `memory.p
 And once per conversation, when the main agent changed code in a project without a git repository or without
 project rules — or offered that setup to the user instead of doing it — to set it up itself with /git-init and
 /init (autoSetup; `memory.py config auto-setup off`).
+While the main agent's own subagents or background commands still run (hooks/parallel.py) only the open items
+count: it is sent back once with what still runs and the items not handed to a subagent («— explorer»), to do those
+meanwhile; the review, verification and setup reminders wait until that work has reported back (parallelHints;
+`memory.py config parallel-hints off` restores the old silence while background tasks run).
 
 Contract: JSON on stdin (conversationId, transcriptPath, artifactDirectoryPath, terminationReason, fullyIdle,
 executionNum, …) → {"decision": "continue", "reason": "…"} or {}. Never fails loudly. Stdlib only, Python 3.8+.
@@ -36,6 +40,7 @@ from typing import List, Optional, Set, Tuple
 
 import compat
 import conversation as conv
+import parallel
 
 PLUGIN = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 MAX_PER_TURN = 2
@@ -78,6 +83,12 @@ ANNOUNCE = re.compile(r"^\W*(сейчас|теперь|далее|приступ
                       r"let me|i'?ll|i will|now i|starting|running|creating|initializing|next,? i)\b", re.I)
 ANNOUNCE_MAX = 300
 CONTINUE = re.compile(r"^\W*(продолж|дальше|доделай|давай дальше|go on|continue|keep going|carry on)", re.I)
+# A task.md item handed to a subagent: «Найти обработчики — explorer», «… (researcher)».
+DELEGATED = re.compile(r"(?:[—–(]|\s-|→)\s*(explorer|researcher|worker|code-reviewer|security-auditor|debugger|"
+                       r"test-writer|субагент\w*|subagent)\b", re.I)
+# «Жду ответа researcher», «жду результатов от explorer»: waiting for its own subagents, not for the user.
+AGENT_WAIT = re.compile(r"\bжд(у|ём|ем)\s+(ответ\w*|результат\w*|заверш\w*|отч[её]т\w*)(\s+(от|у))?\s+"
+                        r"(?!(вас|тебя|ваш\w*|тво\w*)\b)[\w`«»\"'-]+", re.I)
 
 
 def open_items(text: str) -> List[Tuple[str, str]]:
@@ -305,14 +316,49 @@ def test_commands(payload: dict) -> List[str]:
     return []
 
 
+def first_time(st: dict, key: List[str]) -> bool:
+    """False when the agent already decided to stop with exactly this left (since the user's last message)."""
+    sig = hashlib.sha1("\n".join(key).encode()).hexdigest()[:12]
+    seen = st.get("stop") or {}
+    if seen.get("users") != len(st["users"]):
+        seen = {"users": len(st["users"]), "sigs": []}
+    if sig in seen["sigs"]:
+        return False
+    seen["sigs"].append(sig)
+    st["stop"] = seen
+    return True
+
+
+def waiting_on_background(payload: dict, st: dict, run: List[dict]) -> Optional[str]:
+    """The main agent ended its turn while its own subagents or background commands still run. Waiting is fine when
+    everything left needs their results; open task.md items it kept for itself are not."""
+    if not st["users"] or not setting("finishTasks"):
+        return None
+    items = [(mark, text) for mark, text in task_items(payload, st) if not DELEGATED.search(text)]
+    tp = conv.transcript_path(payload)
+    if not items or handing_over(AGENT_WAIT.sub(" ", last_answer(tp) if tp else "")):
+        return None
+    if not first_time(st, ["background|" + text for _mark, text in items]):
+        return None
+    conv.store(payload["conversationId"], st)
+    return parallel.stop_message(run, items, SHOWN)
+
+
 def decide(payload: dict) -> Optional[str]:
-    if payload.get("terminationReason") != "NO_TOOL_CALL" or payload.get("fullyIdle") is False:
+    if payload.get("terminationReason") != "NO_TOOL_CALL":
         return None
     if int(payload.get("executionNum") or 0) >= MAX_PER_TURN:
         return None
     st = conv.load(payload)
     if not st:
         return None
+    hints = setting("parallelHints")
+    run = parallel.running(st) if hints else []
+    work = parallel.busy(run)
+    if work or (payload.get("fullyIdle") is False and hints and len(work) == len(run)):
+        return waiting_on_background(payload, st, work)  # its own subagents/commands, or background tasks we didn't see start
+    if payload.get("fullyIdle") is False:
+        return None  # only its dev server or watcher runs, or parallel hints are off: as before
     broken = broken_files(payload)
     items = task_items(payload, st) if st["users"] and setting("finishTasks") else []  # subagents: no task.md
     tp = conv.transcript_path(payload)
@@ -340,14 +386,8 @@ def decide(payload: dict) -> Optional[str]:
     key = ([f"{path}|{p['msg']}" for path, p in broken] + [text for _mark, text in items]
            + [f"review|{p}" for p in review] + [f"verify|{p}" for p in unverified] + [f"look|{p}" for p in unseen]
            + [f"setup|{s}" for s in setup] + (["announced|" + answer.strip()[:80]] if announced else []))
-    sig = hashlib.sha1("\n".join(key).encode()).hexdigest()[:12]
-    seen = st.get("stop") or {}
-    if seen.get("users") != len(st["users"]):
-        seen = {"users": len(st["users"]), "sigs": []}
-    if sig in seen["sigs"]:
+    if not first_time(st, key):
         return None  # it already decided to stop with exactly this left
-    seen["sigs"].append(sig)
-    st["stop"] = seen
     if setup:
         st["setup"] = sorted(set(st.get("setup") or []) | set(setup))
     conv.store(payload["conversationId"], st)

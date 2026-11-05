@@ -6,7 +6,9 @@ messages in ~/.gemini/antigravity-plus/state/<conversationId>.json. Shared by:
   * hooks/instructions.py (PreInvocation) — re-shows the user's instructions so they survive long turns and
     context compaction;
   * hooks/guard.py (PreToolUse) — asks before pushing/deploying/committing when the user said not to.
-Also detects standing restrictions ("не пушь", "don't commit") and their lifting ("пушь", "commit it").
+Also detects standing restrictions ("не пушь", "don't commit") and their lifting ("пушь", "commit it"), and tracks
+the background work the agent started — subagents, commands that went to the background, timers — what reported
+back and how the agent waits, for hooks/parallel.py.
 Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
@@ -27,6 +29,21 @@ STATE_TTL_DAYS = 14
 
 HEAD = re.compile(rb'"type":\s*"(USER_INPUT|CHECKPOINT|PLANNER_RESPONSE)"')
 STEP = re.compile(rb'"step_index":\s*(\d+)')
+# Background work (hooks/parallel.py): invoke_subagent results, commands and timers sent to the background, messages
+# back from them, and the ways agents wait for them.
+BG_HEAD = re.compile(rb'"type":\s*"(PLANNER_RESPONSE|GENERIC|SYSTEM_MESSAGE)"')
+CREATED = b"Created the following subagent"
+BG_STARTED = b"running as a background task"
+BG_TASK = re.compile(r"running as a background task with task id:\s*(\S+)\s*\n\s*Task Description:\s*([^\n]*)")
+AGENT_ID = re.compile(r'"conversationId":\s*"([\w-]{8,80})"')
+REPORT = re.compile(rb"\[Message\] timestamp=(\S+) sender=([\w./:-]+)")
+GONE_IDLE = re.compile(rb"Subagent ([\w-]{8,80}) has gone idle")
+STATUS_CHECK = re.compile(r"\b(status|progress|done yet|are you done|finished yet|ready yet|answer now|provide (your|the) "
+                          r"(answer|result|report)|how(?:'s| is) it going)\b|как\s+(дела|успехи|прогресс)|готов[оа]?\s*\?|"
+                          r"\bстатус|\bну\s+что\b", re.I)
+WAIT_CMD = re.compile(r"^\s*(sleep\s+\d|timeout\s+(/t\s+)?\d|start-sleep\b|echo\s+[\"']?(waiting|wait\b|жду))", re.I)
+POLL_TIMER = 180          # schedule timers shorter than this, set while work is running, are polling
+BG_KEEP = 60              # finished entries kept in the state
 REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
 TAGS = re.compile(r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|[A-Z_]+_METADATA)>.*?</\1>", re.S)
 
@@ -131,6 +148,12 @@ def load(payload: dict, save: bool = True) -> Optional[dict]:
         sm = STEP.search(raw[:120])
         if sm:
             st["last_step"] = max(st["last_step"], int(sm.group(1)))
+        bm = BG_HEAD.search(raw[:400])
+        if bm:
+            try:
+                track_background(st, bm.group(1), raw)
+            except (ValueError, TypeError, AttributeError, KeyError):
+                pass
         hm = HEAD.search(raw[:400])
         if not hm or (hm.group(1) == b"PLANNER_RESPONSE" and b'"tool_calls"' in raw):
             continue  # agent steps matter only as the text the user answered
@@ -144,6 +167,7 @@ def load(payload: dict, save: bool = True) -> Optional[dict]:
             if text:
                 st["users"].append({"step": step, "ts": d.get("created_at", ""), "text": text,
                                     "prev_agent": st.get("last_agent", "")})
+                st.setdefault("calls", {})["search_run"] = 0
         elif d.get("type") == "CHECKPOINT":
             st["checkpoints"].append(step)
         elif d.get("type") == "PLANNER_RESPONSE" and (d.get("content") or "").strip():
@@ -152,6 +176,106 @@ def load(payload: dict, save: bool = True) -> Optional[dict]:
     if save:
         store(cid, st)
     return st
+
+
+def track_background(st: dict, kind: bytes, raw: bytes) -> None:
+    """Keep st["bg"] = {id: {"k": "agent"|"cmd"|"timer", "t": type, "r": role or description, "s": step, "ts": started,
+    "st": "run"|"done"|"killed", "end": ts}} and st["calls"] = {"search_run": web-search-only steps in a row,
+    "poll_step": the last step that only checked on running work}."""
+    bg = st.setdefault("bg", {})
+    calls = st.setdefault("calls", {})
+    if kind == b"SYSTEM_MESSAGE":
+        for m in REPORT.finditer(raw):
+            it = bg.get(m.group(2).decode())
+            if it and it.get("st") == "run":
+                it.update(st="done", end=m.group(1).decode())
+        for m in GONE_IDLE.finditer(raw):
+            it = bg.get(m.group(1).decode())
+            if it and it.get("st") == "run":
+                it.update(st="done", end="")
+        return
+    if kind == b"GENERIC":
+        if CREATED not in raw and BG_STARTED not in raw:
+            return
+        d = json.loads(raw)
+        content = d.get("content") or ""
+        head = content[:300]  # the tool's own result starts with it; deeper down it's a file or log being read
+        base = {"s": d.get("step_index", st["last_step"]), "ts": d.get("created_at", ""), "st": "run"}
+        if CREATED.decode() in head:
+            pending = st.get("bg_pending") or []
+            for cid in AGENT_ID.findall(content[:3000]):
+                spec = pending.pop(0) if pending else {}
+                bg[cid] = dict(base, k="agent", t=spec.get("t", ""), r=spec.get("r", ""))
+            st["bg_pending"] = pending
+        m = BG_TASK.search(content[:800]) if BG_STARTED.decode() in head else None
+        if m:
+            desc = m.group(2).strip()
+            bg[m.group(1)] = dict(base, k="timer" if desc.startswith("Timer:") else "cmd", t="", r=desc[:120])
+        _prune_bg(bg)
+        return
+    if b'"tool_calls"' not in raw:
+        return
+    d = json.loads(raw)
+    tcs = [c for c in d.get("tool_calls") or [] if isinstance(c, dict)]
+    step = d.get("step_index", st["last_step"])
+    names = [str(c.get("name") or "") for c in tcs]
+    pending: List[dict] = []
+    polling = bool(tcs) and any(it.get("st") == "run" and it.get("k") in ("agent", "cmd") for it in bg.values())
+    for name, c in zip(names, tcs):
+        a = c.get("args") if isinstance(c.get("args"), dict) else {}
+        action = str(a.get("Action") or "list").lower()
+        if name == "invoke_subagent":
+            specs = a.get("Subagents") if isinstance(a.get("Subagents"), list) else [a]
+            pending += [{"t": str(s.get("TypeName") or ""), "r": str(s.get("Role") or "")[:80]}
+                        for s in specs if isinstance(s, dict)]
+            polling = False
+        elif name == "send_message":
+            it = bg.get(str(a.get("Recipient") or ""))
+            if it and it.get("st") == "run" and STATUS_CHECK.search(str(a.get("Message") or "")):
+                continue  # «are you done yet?» is polling
+            polling = False
+            if it and it.get("k") == "agent" and it.get("st") != "run":
+                it.update(st="run", s=step, ts=d.get("created_at", ""), end="")  # follow-up work for it
+        elif name == "manage_subagents":
+            if action in ("kill", "kill_all"):
+                polling = False
+                ids = a.get("ConversationId")
+                ids = [str(i) for i in ids] if isinstance(ids, list) else [str(ids or "")]
+                for cid, it in bg.items():
+                    if it.get("k") == "agent" and it.get("st") == "run" and (action == "kill_all" or cid in ids):
+                        it["st"] = "killed"
+        elif name == "manage_task":
+            if action == "kill":
+                polling = False
+                it = bg.get(str(a.get("TaskId") or ""))
+                if it:
+                    it["st"] = "killed"
+            elif action not in ("list", "status"):
+                polling = False
+        elif name == "schedule":
+            try:
+                secs = float(a.get("DurationSeconds") or 0)
+            except (TypeError, ValueError):
+                secs = 0.0
+            if not 0 < secs < POLL_TIMER:
+                polling = False
+        elif name == "read_file":
+            path = str(a.get("Path") or "").replace("\\", "/")
+            if not ("/antigravity/brain/" in path and "transcript" in path.rsplit("/", 1)[-1]):
+                polling = False  # reading a subagent's transcript to see how it's doing is polling
+        elif not (name == "run_command" and WAIT_CMD.search(str(a.get("CommandLine") or ""))):
+            polling = False
+    st["bg_pending"] = pending
+    if polling:
+        calls["poll_step"] = step
+    calls["search_run"] = calls.get("search_run", 0) + 1 if tcs and all(n == "search_web" for n in names) else 0
+
+
+def _prune_bg(bg: dict) -> None:
+    """Keep running entries and the BG_KEEP most recent finished ones."""
+    done = sorted((it.get("s", 0), k) for k, it in bg.items() if it.get("st") != "run")
+    for _s, k in done[: max(0, len(done) - BG_KEEP)]:
+        bg.pop(k, None)
 
 
 def store(cid: str, st: dict) -> None:

@@ -32,7 +32,8 @@ Skip pure docs/tests/formatting changes.
 Invoke the **`security-auditor`** subagent (it may be listed as `antigravity-plus:security-auditor`) with:
 the diff (or how to re-run the command above), the changed-file list, the attack-surface notes from
 step 2, the project's `AGENTS.md` conventions, and the intent of the change. For large diffs
-(> ~800 changed lines) split by area and run one auditor per area in parallel.
+(> ~800 changed lines) split by area and run one auditor per area in parallel. The auditor runs in the
+background: meanwhile trace the riskiest sink from step 2 yourself instead of waiting, and don't poll it.
 If the subagent is unavailable, do the audit yourself following
 `<skill_dir>/../../agents/security-auditor.md`.
 

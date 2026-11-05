@@ -43,7 +43,8 @@ NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 PLUGIN_KEYS = [("auto-memory", "autoMemory"), ("share-with-claude-code", "shareWithClaudeCode"),
                ("recent-conversations", "recentConversations"), ("finish-tasks", "finishTasks"),
                ("check-edits", "checkEdits"), ("auto-review", "autoReview"), ("auto-verify", "autoVerify"),
-               ("protect-secrets", "protectSecrets"), ("auto-setup", "autoSetup")]
+               ("protect-secrets", "protectSecrets"), ("auto-setup", "autoSetup"),
+               ("parallel-hints", "parallelHints")]
 
 
 def load_json(path: str) -> dict:

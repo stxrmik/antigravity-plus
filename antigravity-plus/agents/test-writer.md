@@ -29,9 +29,10 @@ execute code.
 6. Never weaken assertions, add sleeps, or modify production code just to make tests pass.
 
 ## Helpers you can call
-- `explorer` subagent (`invoke_subagent`, TypeName `explorer`) to find existing test patterns, fixtures and helpers
-  across the codebase. Give it the full question; keep only its conclusion.
-- Don't invoke `debugger` or `test-writer`. Never commit, push or open PRs: report back instead.
+- `explorer` subagent (`invoke_subagent`, TypeName `explorer`, Model `flash`) to find existing test patterns,
+  fixtures and helpers across the codebase. Give it the full question. It runs in the background: keep reading the
+  code under test meanwhile and use its answer when the message arrives; never poll it.
+- Don't invoke `debugger`, `test-writer` or `worker`. Never commit, push or open PRs: report back instead.
 
 ## Output
 ```
