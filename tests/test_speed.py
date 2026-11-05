@@ -114,6 +114,18 @@ for line, want in [("./deploy/ssh.sh 'docker exec web python3 -'", "./deploy/ssh
                    ("git push origin main", "git push"),
                    ('"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless', "Google Chrome")]:
     same(f"key of `{line[:40]}`", conv.command_key(line, WS), want)
+if os.name == "nt":  # PowerShell / cmd: a backslash separates path parts; drive letter case and slashes don't matter
+    platform_cases = [(f"{WS}\\deploy\\ssh.sh -Host web", "./deploy/ssh.sh"),
+                      (WS.lower().replace("\\", "/") + "/deploy/ssh.sh", "./deploy/ssh.sh"),
+                      (".\\deploy\\ssh.sh 'uptime'", "./deploy/ssh.sh"),
+                      ('"C:\\Program Files\\nodejs\\node.exe" tools\\x.js --fast', "node tools/x.js"),
+                      ("C:\\Python313\\python.exe -m pytest -q", "python -m pytest"),
+                      ("git.exe push origin main", "git push")]
+else:  # a POSIX shell: a backslash escapes the next character
+    platform_cases = [("/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --headless", "Google Chrome"),
+                      (f"{WS}/deploy/../deploy/ssh.sh x", "./deploy/ssh.sh")]
+for line, want in platform_cases:
+    same(f"key of `{line[:40]}`", conv.command_key(line, WS), want)
 
 # 1. a command fails inside the sandbox, works with BypassSandbox → remembered for the project
 start("learn")

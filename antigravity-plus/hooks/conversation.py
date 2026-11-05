@@ -60,6 +60,8 @@ SBX_WINDOW = 4            # commands within which a retry outside the sandbox co
 SUBCOMMANDS = {"git", "npm", "pnpm", "yarn", "bun", "go", "cargo", "make", "pip", "pip3", "uv", "poetry", "brew", "gh",
                "swift", "flutter", "dotnet", "composer", "bundle", "rails", "kubectl", "terraform"}
 SCRIPTED = re.compile(r"(python[\d.]*|py|node|deno|ruby|perl|php|bash|sh|zsh|pwsh|powershell|osascript|npx|uvx)")
+ABSOLUTE = re.compile(r"[/\\~]|[A-Za-z]:[\\/]")  # /usr/bin/x, ~/bin/x, C:\x, C:/x, \\server\share — on any OS
+SEP = re.compile(r"[\\/]")
 REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
 TAGS = re.compile(r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|[A-Z_]+_METADATA)>.*?</\1>", re.S)
 
@@ -294,23 +296,25 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
 
 def command_key(cmdline: str, ws: str = "") -> str:
     """What a command runs, stable across retries: `./deploy/ssh.sh`, `docker`, `git push`, `python3 -m pytest`,
-    `python3 ./tools/x.py`. A project script is shown relative to the workspace, a system binary by its name."""
+    `python3 ./tools/x.py`. A project script is shown relative to the workspace, a system binary by its name. On
+    Windows a path may use backslashes, forward slashes or another letter case and still gets the same key."""
     s = re.sub(r"^\s*(cd\s+(\"[^\"]*\"|'[^']*'|\S+)\s*(&&|;)\s*)+", "", str(cmdline or ""))
     s = re.sub(r"^\s*((sudo|env|time|nohup|command|exec)\s+|[A-Za-z_]\w*=(\"[^\"]*\"|'[^']*'|\S*)\s+)+", "", s)
-    try:
-        toks = shlex.split(s[:400])
-    except ValueError:
-        toks = s.split()
+    toks = _words(s[:400])
     if not toks:
         return ""
 
     def place(path: str) -> str:
-        if ws and os.path.isabs(path) and path.startswith(ws.rstrip("/\\") + os.sep):
-            return "./" + os.path.relpath(path, ws).replace("\\", "/")
-        return os.path.basename(path.rstrip("/\\")) if os.path.isabs(path) or path.startswith("~") else path
+        if not ABSOLUTE.match(path):
+            return path.replace("\\", "/") if os.name == "nt" else path
+        if ws and path[0] != "~":
+            full, root = os.path.normpath(path), os.path.normpath(ws)
+            if os.path.normcase(full).startswith(os.path.normcase(root).rstrip("/\\") + os.sep):
+                return "./" + os.path.relpath(full, root).replace("\\", "/")
+        return SEP.split(path.rstrip("/\\"))[-1]
 
-    prog = place(toks[0])
-    name = re.sub(r"\.exe$", "", os.path.basename(prog).lower())
+    prog = re.sub(r"\.exe$", "", place(toks[0]), flags=re.I)
+    name = SEP.split(prog)[-1].lower()
     rest = toks[1:5]
     if name in SUBCOMMANDS:
         words = [t for t in rest if not t.startswith("-")]
@@ -324,6 +328,23 @@ def command_key(cmdline: str, ws: str = "") -> str:
         script = next((t for t in rest if not t.startswith("-")), "")
         return f"{prog} {place(script)}".strip()
     return prog
+
+
+def _words(s: str, limit: int = 6) -> List[str]:
+    """The first words of a command line. A POSIX shell treats a backslash as an escape; on Windows (PowerShell, cmd)
+    it separates the parts of a path, and shlex keeps the quotes around a word, so they are stripped here."""
+    posix = os.name != "nt"
+    lex = shlex.shlex(s, posix=posix)
+    lex.whitespace_split, lex.commenters = True, ""
+    words: List[str] = []
+    try:
+        for w in lex:
+            words.append(w[1:-1] if not posix and len(w) > 1 and w[0] == w[-1] and w[0] in "\"'" else w)
+            if len(words) == limit:
+                break
+    except ValueError:  # an unclosed quote further on: the words before it are enough
+        pass
+    return words or [w.strip("\"'") for w in s.split()[:limit]]
 
 
 def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
