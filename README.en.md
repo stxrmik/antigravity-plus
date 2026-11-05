@@ -145,19 +145,20 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 ## How it works
 
 ```mermaid
-flowchart LR
-    A([New conversation]) -->|SessionStart| B[git, rules, memory,<br/>recent conversations]
-    B --> C{{Agent step}}
-    C -->|PreInvocation| D[your instructions, other agents,<br/>errors in recent edits]
-    D --> E[tool call]
-    E -->|PreToolUse: guard| F{dangerous?}
-    F -->|yes| G[ask you]
-    F -->|no| H[run it]
-    H -->|PostToolUse| I[check the edit,<br/>coordination, memory index]
-    I --> C
-    C -->|turn ends| J{Stop: all done?}
-    J -->|no| C
-    J -->|yes| K([answer to you])
+flowchart TD
+    A([New conversation]) -->|SessionStart| B[git, project rules, memory, recent conversations]
+    B --> C[Agent step]
+    C -->|PreInvocation| D[your instructions, other agents, errors in recent edits]
+    D --> E{{Tool call}}
+    E -->|PreToolUse · guard| F{Allowed?}
+    F -->|dangerous| G[ask you]
+    F -->|someone else's version| H[refuse: re-read and redo]
+    F -->|yes| I[run it]
+    I -->|PostToolUse| J[check the edit, coordination, memory index]
+    J --> C
+    C -->|turn ends| K{Stop: all done?}
+    K -->|no: open items, errors, checks| C
+    K -->|yes| L([Answer to you])
 ```
 
 | Event | Hook | What it does |
