@@ -11,8 +11,8 @@ conversation). It fires only when that helps:
   * a long turn: LONG_TURN+ steps since the user last wrote, at most every REFRESH steps.
 Subagents (no user messages in their transcript) get nothing of that. Everyone, subagents included, also gets the
 problems hooks/check_edit.py found in files written since the previous step, the other agents working in the
-project (hooks/coord.py), and hints that keep it working while its subagents and background commands run
-(hooks/parallel.py).
+project (hooks/coord.py), hints that keep it working while its subagents and background commands run
+(hooks/parallel.py), and hints on the sandbox, the context budget and loops of failing commands (hooks/speed.py).
 
 Contract: JSON on stdin (conversationId, transcriptPath, lastUserInput, invocationNum, …) →
 {"injectSteps": [{"ephemeralMessage": "…"}]} or {}. Never fails loudly. Stdlib only, Python 3.8+.
@@ -165,13 +165,23 @@ def parallel_work(payload: dict) -> Optional[str]:
     return msg
 
 
+def speed_work(payload: dict) -> Optional[str]:
+    """Sandbox memory, the context budget and loops of failing commands (subagents included)."""
+    import speed
+    st = conv.load(payload)
+    msg = speed.message(payload, st)
+    if st is not None and isinstance(payload.get("conversationId"), str):
+        conv.store(payload["conversationId"], st)
+    return msg
+
+
 def main() -> None:
     steps = []
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         payload = None
-    for part in (decide, edit_checks, other_agents, parallel_work) if isinstance(payload, dict) else ():
+    for part in (decide, edit_checks, other_agents, parallel_work, speed_work) if isinstance(payload, dict) else ():
         try:
             msg = part(payload)
         except Exception as e:  # a hook must never break the conversation

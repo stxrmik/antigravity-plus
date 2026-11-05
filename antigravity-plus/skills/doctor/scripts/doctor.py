@@ -269,6 +269,21 @@ def hook_selftest() -> List[str]:
         out.append(f"{OK if ok else BAD} parallel (PreInvocation): пока субагенты работают, агент продолжает свою часть"
                    + ("" if ok else f" — {res[:160]!r}"))
         _cleanup_selftest(tp)
+    if os.path.isfile(instr) and memstore and not memstore.settings().get("speedHints", True):
+        out.append(f"{WARN} speed: подсказки о песочнице, контексте и циклах ошибок выключены (`memory.py config speed-hints on`)")
+    elif os.path.isfile(instr):  # three failing commands in a row: the agent hears it should change the approach
+        tp = _fake_transcript(["Обнови сервер"])
+        with open(tp, "a", encoding="utf-8") as f:
+            for i in range(3):
+                f.write(json.dumps({"step_index": 90 + 2 * i, "type": "PLANNER_RESPONSE", "content": "", "tool_calls": [
+                    {"name": "run_command", "args": {"CommandLine": f"python3 -c 'broken {i}'"}}]}) + "\n")
+                f.write(json.dumps({"step_index": 91 + 2 * i, "type": "GENERIC", "content":
+                                    "Created At: x\nCompleted At: x\nCommand exited with code 1.\n\nCommand output:\nSyntaxError"}) + "\n")
+        code, res = call(instr, {"conversationId": SELFTEST_ID, "transcriptPath": tp})
+        ok = code == 0 and "error_loop" in res
+        out.append(f"{OK if ok else BAD} speed (PreInvocation): после трёх неудачных команд подряд агент меняет подход"
+                   + ("" if ok else f" — {res[:160]!r}"))
+        _cleanup_selftest(tp)
     if os.path.isfile(msync):
         code, res = call(msync, {"toolCall": {"name": "write_file", "args": {"Path": "/tmp/agp-not-memory.md"}}})
         ok = code == 0 and res.strip() == "{}"

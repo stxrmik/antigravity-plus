@@ -8,7 +8,8 @@ messages in ~/.gemini/antigravity-plus/state/<conversationId>.json. Shared by:
   * hooks/guard.py (PreToolUse) — asks before pushing/deploying/committing when the user said not to.
 Also detects standing restrictions ("не пушь", "don't commit") and their lifting ("пушь", "commit it"), and tracks
 the background work the agent started — subagents, commands that went to the background, timers — what reported
-back and how the agent waits, for hooks/parallel.py.
+back and how the agent waits, for hooks/parallel.py; and how its steps go — the context size, command results
+(sandbox failures and their retries outside it, failures in a row), very large reads — for hooks/speed.py.
 Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import time
 from typing import Dict, List, Optional
 from urllib.parse import unquote, urlparse
@@ -44,6 +46,20 @@ STATUS_CHECK = re.compile(r"\b(status|progress|done yet|are you done|finished ye
 WAIT_CMD = re.compile(r"^\s*(sleep\s+\d|timeout\s+(/t\s+)?\d|start-sleep\b|echo\s+[\"']?(waiting|wait\b|жду))", re.I)
 POLL_TIMER = 180          # schedule timers shorter than this, set while work is running, are polling
 BG_KEEP = 60              # finished entries kept in the state
+# How the steps go (hooks/speed.py).
+TOKENS = re.compile(rb'"(input_tokens|cache_read_tokens)":\s*(\d+)')
+EXIT = re.compile(r"Command exited with code (-?\d+)")
+SANDBOX_NOTE = "There were sandbox errors"
+SANDBOX_DENIED = re.compile(r"operation not permitted|permission denied|not permitted|could not resolve host|"
+                            r"nodename nor servname|network is unreachable|read-only file system|sandbox-exec", re.I)
+NO_MATCH = re.compile(r"^(rg|grep|egrep|fgrep|git\s+grep|test|\[|diff|cmp|which|command\s+-v|pgrep)\b")
+SHOWING = re.compile(rb"Showing lines (\d+)-(\d+) of (\d+)")
+BIG_OUTPUT = 30_000       # chars of one tool result that are worth a word (~8k tokens)
+BIG_LINES = 600           # a whole file this long, read without a range
+SBX_WINDOW = 4            # commands within which a retry outside the sandbox counts as the fix
+SUBCOMMANDS = {"git", "npm", "pnpm", "yarn", "bun", "go", "cargo", "make", "pip", "pip3", "uv", "poetry", "brew", "gh",
+               "swift", "flutter", "dotnet", "composer", "bundle", "rails", "kubectl", "terraform"}
+SCRIPTED = re.compile(r"(python[\d.]*|py|node|deno|ruby|perl|php|bash|sh|zsh|pwsh|powershell|osascript|npx|uvx)")
 REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
 TAGS = re.compile(r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|[A-Z_]+_METADATA)>.*?</\1>", re.S)
 
@@ -144,6 +160,7 @@ def load(payload: dict, save: bool = True) -> Optional[dict]:
     end = chunk.rfind(b"\n")
     if end < 0:
         return st
+    ws = next((os.path.realpath(to_path(w)) for w in payload.get("workspacePaths") or [] if isinstance(w, str) and w), "")
     for raw in chunk[:end].split(b"\n"):
         sm = STEP.search(raw[:120])
         if sm:
@@ -153,6 +170,10 @@ def load(payload: dict, save: bool = True) -> Optional[dict]:
             try:
                 track_background(st, bm.group(1), raw)
             except (ValueError, TypeError, AttributeError, KeyError):
+                pass
+            try:
+                track_steps(st, bm.group(1), raw, ws)
+            except (ValueError, TypeError, AttributeError, KeyError, IndexError):
                 pass
         hm = HEAD.search(raw[:400])
         if not hm or (hm.group(1) == b"PLANNER_RESPONSE" and b'"tool_calls"' in raw):
@@ -269,6 +290,126 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
     if polling:
         calls["poll_step"] = step
     calls["search_run"] = calls.get("search_run", 0) + 1 if tcs and all(n == "search_web" for n in names) else 0
+
+
+def command_key(cmdline: str, ws: str = "") -> str:
+    """What a command runs, stable across retries: `./deploy/ssh.sh`, `docker`, `git push`, `python3 -m pytest`,
+    `python3 ./tools/x.py`. A project script is shown relative to the workspace, a system binary by its name."""
+    s = re.sub(r"^\s*(cd\s+(\"[^\"]*\"|'[^']*'|\S+)\s*(&&|;)\s*)+", "", str(cmdline or ""))
+    s = re.sub(r"^\s*((sudo|env|time|nohup|command|exec)\s+|[A-Za-z_]\w*=(\"[^\"]*\"|'[^']*'|\S*)\s+)+", "", s)
+    try:
+        toks = shlex.split(s[:400])
+    except ValueError:
+        toks = s.split()
+    if not toks:
+        return ""
+
+    def place(path: str) -> str:
+        if ws and os.path.isabs(path) and path.startswith(ws.rstrip("/\\") + os.sep):
+            return "./" + os.path.relpath(path, ws).replace("\\", "/")
+        return os.path.basename(path.rstrip("/\\")) if os.path.isabs(path) or path.startswith("~") else path
+
+    prog = place(toks[0])
+    name = re.sub(r"\.exe$", "", os.path.basename(prog).lower())
+    rest = toks[1:5]
+    if name in SUBCOMMANDS:
+        words = [t for t in rest if not t.startswith("-")]
+        sub = " ".join(words[:2]) if words[:1] == ["run"] and name in ("npm", "pnpm", "yarn", "bun") else "".join(words[:1])
+        return f"{prog} {sub}".strip()
+    if SCRIPTED.fullmatch(name):
+        if rest[:1] == ["-m"] and len(rest) > 1:
+            return f"{prog} -m {rest[1]}"
+        if rest[:1] in (["-c"], ["-e"]):
+            return f"{prog} {rest[0]}"
+        script = next((t for t in rest if not t.startswith("-")), "")
+        return f"{prog} {place(script)}".strip()
+    return prog
+
+
+def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
+    """Keep st["calls"] up to date with how the steps go (hooks/speed.py):
+    ctx — tokens the latest model call carried (input + cache reads); fail_run / fail_last / fail_step — commands or
+    edits failing in a row (a success that changes something resets it; a grep without matches isn't a failure);
+    sbx — {command key: index} of commands that failed inside the terminal sandbox; sbx_fail — the latest such failure;
+    sbx_new — keys that then worked with BypassSandbox (to remember for the project); sbx_ok — keys that worked inside
+    the sandbox; big — the latest very large tool result (a whole long file, a huge output)."""
+    calls = st.setdefault("calls", {})
+    if kind == b"PLANNER_RESPONSE":
+        tokens = dict((k.decode(), int(v)) for k, v in TOKENS.findall(raw[:600] + raw[-600:]))
+        if tokens:
+            calls["ctx"] = tokens.get("input_tokens", 0) + tokens.get("cache_read_tokens", 0)
+        if b'"tool_calls"' not in raw:
+            st["calls_pending"] = []
+            return
+        d = json.loads(raw)
+        pending = []
+        for c in d.get("tool_calls") or []:
+            a = c.get("args") if isinstance(c, dict) and isinstance(c.get("args"), dict) else {}
+            entry = {"n": str(c.get("name") or "") if isinstance(c, dict) else ""}
+            if entry["n"] == "run_command":
+                entry.update(cmd=str(a.get("CommandLine") or "")[:400], bp=bool(a.get("BypassSandbox")))
+            elif entry["n"] == "read_file":
+                entry.update(path=str(a.get("Path") or ""), rng=bool(a.get("StartLine") or a.get("EndLine")))
+            pending.append(entry)
+        st["calls_pending"] = pending
+        return
+    if kind != b"GENERIC":
+        return
+    pending = st.get("calls_pending") or []
+    call = pending.pop(0) if pending else {}
+    step = st["last_step"]
+    name = call.get("n")
+    if name == "run_command" and b"Command exited with code" in raw[:2000]:
+        content = json.loads(raw).get("content") or ""
+        m = EXIT.search(content[:800])
+        if not m:
+            return
+        cmd, code = call.get("cmd", ""), int(m.group(1))
+        key = command_key(cmd, ws)
+        calls["n_cmd"] = n = calls.get("n_cmd", 0) + 1
+        sbx = calls.setdefault("sbx", {})
+        out = content[m.end():].split("Command output:", 1)[-1]  # the command's own output, not Antigravity's note
+        if code == 0:
+            calls["fail_run"] = 0
+            if key and call.get("bp") and key in sbx and n - sbx[key] <= SBX_WINDOW:
+                calls.setdefault("sbx_new", []).append({"key": key, "cmd": cmd[:160]})
+                sbx.pop(key, None)
+            elif key and not call.get("bp"):
+                ok = calls.setdefault("sbx_ok", [])
+                if key not in ok:
+                    ok.append(key)
+                    del ok[:-20]
+        elif SANDBOX_NOTE in content[:1500] and not call.get("bp") and SANDBOX_DENIED.search(out[:6000]):
+            if key:
+                sbx[key] = n
+                calls["sbx_fail"] = {"key": key, "step": step}
+        elif not (code == 1 and NO_MATCH.match(cmd.strip()) and len(out.strip()) < 300):
+            _failed(calls, cmd[:120], step)
+        if len(content) > BIG_OUTPUT:
+            calls["big"] = {"step": step, "what": f"the output of `{cmd[:60]}`", "chars": len(content)}
+    elif name == "read_file":
+        m = SHOWING.search(raw[:4000])
+        if m and int(m.group(1)) == 1 and m.group(2) == m.group(3) and not call.get("rng") and int(m.group(3)) >= BIG_LINES:
+            calls["big"] = {"step": step, "what": f"the whole {os.path.basename(call.get('path', '')) or 'file'} "
+                                                  f"({int(m.group(3))} lines)", "chars": len(raw)}
+        elif len(raw) > BIG_OUTPUT and not call.get("rng"):  # a range was a deliberate choice
+            calls["big"] = {"step": step, "what": f"{len(raw) // 1000}k characters of "
+                                                  f"{os.path.basename(call.get('path', '')) or 'a file'}", "chars": len(raw)}
+    elif name in ("edit_file", "write_file"):
+        head = raw[:1500]
+        if b"Encountered error" in head or b"target content not found" in head or b'"status":"ERROR"' in head:
+            _failed(calls, f"{name} failed", step)
+        else:
+            calls["fail_run"] = 0  # a change went in: progress, not a loop
+
+
+def _failed(calls: dict, what: str, step: int) -> None:
+    """One more failure in a row; a new run of failures gets a new number (hooks/speed.py hints once per level)."""
+    if not calls.get("fail_run"):
+        calls["fail_id"] = calls.get("fail_id", 0) + 1
+    calls["fail_run"] = calls.get("fail_run", 0) + 1
+    calls["fail_last"] = what
+    calls["fail_step"] = step
 
 
 def _prune_bg(bg: dict) -> None:

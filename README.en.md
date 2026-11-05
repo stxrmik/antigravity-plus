@@ -33,6 +33,7 @@ on and off on Antigravity's plugin page. Python standard library only, no depend
 | `rm -rf ~`, `git reset --hard`, `cat .env` go through without a question | The guard stops what can't be undone and keeps secrets out of the conversation |
 | Two agents on one project overwrite each other's edits | No writing over a version of a file the agent hasn't seen: it re-reads and redoes the edit itself |
 | The agent starts a subagent and waits, doing nothing | Independent parts go to subagents in one step while the agent does its own part |
+| The same command fails in the sandbox again and again, the context keeps growing, the agent loops on one error | Such commands are remembered per project, the context is kept in check, after three failures in a row the agent changes its approach |
 | The agent stops halfway, or "verifies" with a command that just prints "ok" | The Stop hook sends it back to finish `task.md`, run the tests and look at the UI |
 | A syntax error surfaces three steps later | Every edit is checked right away: Python, JS, Swift, shell, JSON, YAML… |
 | "Do you want me to…?" for every small step | The agent creates the git repository and `AGENTS.md` itself; one "yes" grants full access |
@@ -104,6 +105,16 @@ hooks work; `/doctor` does the same inside Antigravity.
   building on it.
 - `/parallel` does the same on request, with brief templates; for four or more similar pieces the agent uses
   Antigravity's built-in `run_workflow`.
+
+### 🏎️ Speed and context
+- A command that failed in Antigravity's terminal sandbox and worked with `BypassSandbox` is remembered for the
+  project: in new conversations the agent runs it outside the sandbox right away, without a wasted run. A command
+  that works inside the sandbox twice is forgotten; with the sandbox off, the list isn't shown.
+- When the conversation's context reaches 150k tokens, the agent is told to keep it lean: search with `rg -n`, read
+  only the lines it needs, trim long output. Around 220k it hears that compaction is near and it's time to offer
+  `/handoff`. After it reads a whole large file: a tip to read ranges (once per message).
+- After three failed commands or edits in a row the agent stops, reads the error and changes its approach; code for
+  a server or a container goes in a file piped to stdin, not into `python3 -c` with nested quotes.
 
 ### ✅ Quality
 - Every edit is checked right away: Python, JS, Swift, shell, JSON, YAML, Ruby, plist and XML syntax, plus the
@@ -179,8 +190,8 @@ flowchart TD
 
 | Event | Hook | What it does |
 |---|---|---|
-| SessionStart | `session_start.py` | git context, project rules (and `CLAUDE.md`), memory, recent conversations, project setup hints |
-| PreInvocation | `instructions.py` | your messages after a new message, after compaction and every ~30 steps; edit errors; other agents; what runs in the background and what to do meanwhile |
+| SessionStart | `session_start.py` | git context, project rules (and `CLAUDE.md`), memory, recent conversations, project setup hints, commands that need to run outside the sandbox |
+| PreInvocation | `instructions.py` | your messages after a new message, after compaction and every ~30 steps; edit errors; other agents; what runs in the background and what to do meanwhile; the sandbox, context size, error loops |
 | PreToolUse | `guard.py` | dangerous commands, secrets, other agents' file versions, bans from the conversation, full access |
 | PostToolUse | `check_edit.py`, `memory_sync.py` | edit checks, coordination, memory index |
 | Stop | `stop.py` | open items (including those it can do while subagents are busy), syntax errors, verification, review, UI, project setup |
@@ -349,6 +360,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 | Secret protection | "don't protect secrets" (asks to confirm) | `protect-secrets` |
 | Setting up projects on its own | "don't set up projects on your own" | `auto-setup` |
 | Parallel work hints | "stop the subagent hints" | `parallel-hints` |
+| Sandbox memory, context and error-loop hints | "stop the context hints" | `speed-hints` |
 
 ## Platforms and compatibility
 
@@ -380,7 +392,8 @@ antigravity-plus/
 ├── plugin.json, hooks.json, assets/logo.svg
 ├── hooks/       session_start  instructions  guard  check_edit  memory_sync  stop
 │                conversation (the user's messages, full access)  checks (edit checks, secrets)
-│                coord (several agents)  parallel (background work)  compat (macOS / Linux / Windows)
+│                coord (several agents)  parallel (background work)  speed (sandbox, context, error loops)
+│                compat (macOS / Linux / Windows)
 ├── rules/AGENTS.md                 # always-on working rules
 ├── agents/      explorer  researcher  worker  code-reviewer  security-auditor  debugger  test-writer
 ├── sidecars/usage/                 # the usage side panel

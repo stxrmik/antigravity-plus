@@ -7,6 +7,7 @@ Injects a compact snapshot at the start of every conversation, like Claude Code'
   * project setup the main agent does on its own (autoSetup): create a git repository with /git-init before the
     first change, and run /init when real work starts in a project without rules — with the exact commands;
   * memory: personal and project auto-memory (skills/memory/scripts/memory.py — shared with Claude Code);
+  * terminal sandbox: the commands this project needed BypassSandbox for, while the sandbox is on (hooks/speed.py);
   * Claude Code bridge (Antigravity doesn't load these natively): CLAUDE.md / CLAUDE.local.md with their
     @path imports, .claude/rules (always-on inlined, path-scoped listed), ~/.claude/CLAUDE.md, and pointers to
     .claude/commands, .claude/skills and .claude/agents.
@@ -439,6 +440,11 @@ def build(payload: dict) -> str:
         head.extend(git_block(ws))
         summary, claude = project_files(ws, top)
         head.extend(summary)
+        try:
+            import speed
+            head.extend(speed.sandbox_lines(os.path.realpath(ws)))
+        except Exception as e:  # the session context must come through anyway
+            print(f"session_start: sandbox: {e}", file=sys.stderr)
         if not sub:
             head.extend(setup_hints(ws, top))
         since = conv._project_grant(os.path.realpath(ws), None)

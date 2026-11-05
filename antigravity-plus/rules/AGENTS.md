@@ -58,6 +58,12 @@ Ask first only when:
 - Reproduce first, then find the root cause, then fix. Don't paper over symptoms (no blanket try/except, no disabling tests, no loosening types to silence errors).
 - After two failed attempts at the same approach, stop, re-read the evidence and change strategy.
 
+## Speed and context
+Every step re-reads the whole conversation, and every failed command costs a whole step.
+- Read what you need: find it with `rg -n`, then read that range (StartLine/EndLine). Read a whole file only when you need all of it; trim long command output (`| tail -40`, `| grep`).
+- A command that fails with «There were sandbox errors» and «operation not permitted» → re-run it with `BypassSandbox: true` instead of retrying inside. The session context lists the commands this project already needed it for: set it from the start for those.
+- Code for a server or a container goes into a file piped to stdin (`ssh host 'python3 -' < script.py`), not into `python3 -c` with nested quotes.
+
 ## Memory
 You have a persistent memory that survives between conversations (Antigravity Plus auto-memory). The "Memory" section of the session context lists what is saved and the exact folders:
 - **Personal** — `~/.gemini/antigravity-plus/memory/personal/`: who the user is and how they like to work; applies in every project.
