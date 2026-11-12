@@ -376,7 +376,8 @@ def references(answer: str, ev: dict, ws: str, art: str = "") -> List[str]:
                 continue
             done.add(raw)
             name = os.path.basename(path.rstrip("/\\"))
-            shown = os.path.relpath(path, ws) if ws and path.startswith(ws + os.sep) else raw
+            # as the agent writes paths, with «/» on every system (Windows: `app\missing.py` didn't match its report)
+            shown = os.path.relpath(path, ws).replace(os.sep, "/") if ws and path.startswith(ws + os.sep) else raw
             if not os.path.exists(path) and art and not os.path.isabs(bare) and not bare.startswith(("~", "file:")):
                 path = os.path.join(art, bare) if os.path.exists(os.path.join(art, bare)) else path
             if not os.path.exists(path):
