@@ -398,6 +398,17 @@ def recent_section(ws: str, top: Optional[str], cid: Optional[str]) -> List[str]
         return []
 
 
+def mobile_section(ws: str) -> List[str]:
+    """A mobile app in the workspace: the commands that run it on a simulator or an emulator (skill /mobile)."""
+    try:
+        sys.path.insert(0, os.path.join(PLUGIN, "skills", "mobile", "scripts"))
+        import mobile
+        return mobile.session_lines(ws)
+    except Exception as e:  # optional, like memory
+        print(f"session_start: mobile: {e}", file=sys.stderr)
+        return []
+
+
 def is_subagent(payload: dict) -> bool:
     """A subagent's transcript has no user message: its first step is this hook's own message, while a
     conversation the user started already holds the user's request as step 0 when the hook runs."""
@@ -445,6 +456,7 @@ def build(payload: dict) -> str:
             head.extend(speed.sandbox_lines(os.path.realpath(ws)))
         except Exception as e:  # the session context must come through anyway
             print(f"session_start: sandbox: {e}", file=sys.stderr)
+        head.extend(mobile_section(ws))
         if not sub:
             head.extend(setup_hints(ws, top))
         since = conv._project_grant(os.path.realpath(ws), None)

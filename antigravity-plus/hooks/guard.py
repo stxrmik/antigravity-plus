@@ -10,12 +10,17 @@ Stops and asks the user (decision "force_ask", which ignores cached "always allo
     into what decides what the agent may do: Antigravity's settings and projects, MCP servers, installed plugins
     (this guard among them), Antigravity Plus's own settings; also connecting an MCP server (/settings) and turning
     secret protection off — the agent changes these only on the user's explicit request, and the user confirms;
+  * run_command that only prints success and checks nothing (`echo "tests passed"`, hooks/facts.py) — refused
+    ("deny"), so the agent runs the real check or says it couldn't;
   * write_file / edit_file over a file that changed since this agent last read or wrote it (hooks/coord.py) —
     refused ("deny") with who changed it, so the agent re-reads and retries without bothering the user;
   * push / deploy / upload to a server, or git commit — only when the user said not to in this conversation
     ("ничего не пушь", "don't commit") and hasn't lifted it since ("пушь"); see hooks/conversation.py.
 Writes of memory files (skills/memory/scripts/memory.py) get "auto_approve", so auto-memory never stops for a
-permission prompt. Under full access (one grant from the user, hooks/conversation.py) every command and edit not
+permission prompt — unless the text looks like a secret (a token, a private key, a password in a URL): memory goes
+into every later conversation, so that write is refused and the agent writes where the secret is kept instead
+(protectSecrets). A new file in the memory format written anywhere else (weak models shorten the long path to
+`<project>/memory/…`) is refused with the exact folder it belongs in. Under full access (one grant from the user, hooks/conversation.py) every command and edit not
 listed above gets "auto_approve" too; the destructive ones and the user's explicit bans still stop.
 
 Everything else gets "allow", which in Antigravity means "no objection — delegate to the next hook or the
@@ -41,6 +46,11 @@ import checks
 import compat
 import conversation as conv
 import coord
+
+try:
+    import facts
+except Exception:  # the fake-check rule is optional; the guard must work without it
+    facts = None
 
 PLUGIN = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.join(PLUGIN, "skills", "memory", "scripts"))
@@ -103,6 +113,13 @@ SEGMENT_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
         r"\bsecurity\s+(find-(generic|internet)-password\b.*\s-[a-zA-Z]*w|dump-keychain)\b"
         r"|\b(cat|less|more|head|tail|cp|scp|base64|xxd|pbcopy)\b[^|;&]*\.ssh/id_[a-z0-9_]+(?!\.pub)(\s|$|['\"])"),
      "команда читает пароли из Keychain или приватный SSH-ключ."),
+    ("simulator-wipe", re.compile(r"\bsimctl\s+(erase|delete)\s+(?!unavailable\b)\S|\bemulator(\.exe)?\b.*\s-wipe-data\b"
+                                  r"|\bavdmanager(\.bat)?\s+delete\b", I),
+     "команда сотрёт симулятор или эмулятор вместе с установленными приложениями и их данными."),
+    ("real-device", re.compile(
+        r"\badb(\.exe)?\s+(-d\b|-s\s+(?!emulator-|localhost:|127\.0\.0\.1:)\S+)\s.*\b(install(-multiple)?|uninstall|push|reboot|root|"
+        r"remount|sideload|shell\s+.*\b(rm|pm\s+(clear|uninstall)|wipe|settings\s+put|reboot|svc)\b)", I),
+     "команда меняет настоящий телефон, подключённый к компьютеру, а не эмулятор."),
     ("kill-all", re.compile(r"\bkill\s+-9\s+-1\b"),
      "`kill -9 -1` завершит все ваши процессы."),
     # Windows (PowerShell / cmd) and Linux
@@ -584,6 +601,26 @@ def protect_secrets() -> bool:
         return True
 
 
+def memory_elsewhere(payload: dict, path: str, content: str) -> Optional[str]:
+    """A new file in the memory format (frontmatter with name, description and metadata.type) outside the memory
+    folders: no later conversation would ever see it. The reason names the exact folder to write it to."""
+    if not memstore or not content or not path or os.path.exists(path):
+        return None
+    meta, _body = memstore.parse_frontmatter(content[:4000])
+    if meta.get("type") not in memstore.TYPES or not meta.get("name") or not meta.get("description"):
+        return None
+    ws = next((conv.to_path(w) for w in payload.get("workspacePaths") or [] if isinstance(w, str) and w), "")
+    personal, project = memstore.PERSONAL, (memstore.project_dir(ws)[0] if ws else "")
+    first, other = ((personal, project) if meta["type"] in ("user", "feedback") or not project else (project, personal))
+    name = os.path.basename(path)
+    alt = ""
+    if other:
+        when = "о пользователе и его работе" if other == personal else "только об этом проекте"
+        alt = f" (или в \"{os.path.join(other, name)}\", если она {when})"
+    return ("🛡️ Antigravity Plus: это запись памяти, но путь не в папке памяти — её не увидит ни один следующий "
+            f"разговор. Запишите тот же текст сюда: write_file \"{os.path.join(first, name)}\"{alt}.")
+
+
 def decide(payload: dict) -> dict:
     call = payload.get("toolCall") or {}
     tool = call.get("name") or ""
@@ -610,12 +647,28 @@ def decide(payload: dict) -> dict:
         if secret:  # refuse rather than ask: the agent can do the same without printing the value
             log(payload, tool, secret[0], subject)
             return {"decision": "deny", "reason": f"🛡️ Antigravity Plus: {secret[1]}"}
+        fake = facts.fake_check(subject) if not hit and facts else None
+        if fake:  # `echo "tests passed"` checks nothing: refuse, the agent runs the real check
+            log(payload, tool, "fake-check", subject)
+            return {"decision": "deny", "reason": fake}
         if not hit and outward_kinds(subject):
             hit = restriction(conv.with_current(st, payload), subject)
     elif tool in ("write_file", "edit_file"):
         subject = unwrap(args.get("Path") or args.get("TargetFile") or args.get("path") or "")
         if memstore and memstore.memory_dir_of(subject):
+            body = unwrap(args.get("Content") if tool == "write_file" else args.get("Replacement"))
+            found = checks.find_secrets(body) if body and protect_secrets() else []
+            if found:  # memory goes into every later conversation: refuse, the agent rewrites it without the value
+                log(payload, tool, "memory-secret", subject)
+                return {"decision": "deny", "reason": f"🛡️ Antigravity Plus: в записи памяти похоже на секрет ({found[0][1]}, "
+                                                      f"строка {found[0][0]}). Память попадает в каждый следующий разговор — "
+                                                      "секретам там не место. Запишите, где он хранится (например «пароль "
+                                                      "панели — ADMIN_PASSWORD в /opt/app/.env»), без самого значения."}
             return AUTO
+        misplaced = memory_elsewhere(payload, subject, unwrap(args.get("Content"))) if tool == "write_file" else None
+        if misplaced:  # a memory written into the project (weak models shorten the long path): say where it goes
+            log(payload, tool, "memory-elsewhere", subject)
+            return {"decision": "deny", "reason": misplaced}
         stale = coord.check_write(payload, subject, unwrap(args.get("Content")) if tool == "write_file" and "Content" in args else None)
         if stale:  # refuse rather than ask: the agent re-reads the file and retries on its own
             log(payload, tool, "stale-write", subject)

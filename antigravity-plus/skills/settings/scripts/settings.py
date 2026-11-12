@@ -44,7 +44,8 @@ PLUGIN_KEYS = [("auto-memory", "autoMemory"), ("share-with-claude-code", "shareW
                ("recent-conversations", "recentConversations"), ("finish-tasks", "finishTasks"),
                ("check-edits", "checkEdits"), ("auto-review", "autoReview"), ("auto-verify", "autoVerify"),
                ("protect-secrets", "protectSecrets"), ("auto-setup", "autoSetup"),
-               ("parallel-hints", "parallelHints"), ("speed-hints", "speedHints")]
+               ("parallel-hints", "parallelHints"), ("speed-hints", "speedHints"), ("fact-checks", "factChecks"),
+               ("objective-answers", "objectiveAnswers")]
 
 
 def load_json(path: str) -> dict:

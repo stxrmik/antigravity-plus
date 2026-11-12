@@ -33,6 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 sys.path.insert(0, os.path.join(PLUGIN, "hooks"))
 sys.path.insert(0, os.path.join(PLUGIN, "skills", "memory", "scripts"))
+import compat  # noqa: E402
 import conversation as conv  # noqa: E402
 import memory as memstore  # noqa: E402
 

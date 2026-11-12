@@ -15,10 +15,22 @@ re-checked at this moment), with the same exceptions; that part works for subage
 changed REVIEW_MIN_FILES+ code files in this turn without running /review (or its subagents), it reminds it once to
 review its change before reporting done (autoReview; `memory.py config auto-review off`), and when it changed code
 without running tests, a build or the program afterwards, to verify it — a changed web page or styles by looking at
-them with ui_check.py screenshots, with the exact command (autoVerify; `memory.py config auto-verify off`).
+them with ui_check.py screenshots, and a changed screen of a mobile app (SwiftUI, UIKit, Compose, layouts, Flutter,
+React Native) by running it on a simulator or an emulator with mobile.py, with the exact command (autoVerify;
+`memory.py config auto-verify off`).
 And once per conversation, when the main agent changed code in a project without a git repository or without
 project rules — or offered that setup to the user instead of doing it — to set it up itself with /git-init and
 /init (autoSetup; `memory.py config auto-setup off`).
+When nothing of that is left, the final report is held against the conversation (hooks/facts.py; factChecks,
+`memory.py config fact-checks off`): «тесты проходят», «задеплоил», file links, line references, links and — in
+an answer to a question — versions and prices with nothing to back them send the agent back once to check them
+or correct the report; subagents' reports too. Then the main agent is sent back once when it agreed with the user's
+objection or guess at a cause («Вы правы», «приношу извинения») without looking at anything in this turn, to check
+first and answer on what it finds (hooks/objective.py; objectiveAnswers, `memory.py config objective-answers off`).
+Then it is sent back once to save what a future conversation would need — a
+lasting thing the user said, what it worked out about servers and deploys, a failure it got past, or after a long
+stretch of work — or when it says «💾 Запомнил» without writing a memory file (hooks/memory_hints.py; autoMemory,
+`memory.py config auto-memory off`).
 While the main agent's own subagents or background commands still run (hooks/parallel.py) only the open items
 count: it is sent back once with what still runs and the items not handed to a subagent («— explorer»), to do those
 meanwhile; the review, verification and setup reminders wait until that work has reported back (parallelHints;
@@ -51,6 +63,15 @@ CODE_EXT = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".mts", ".cts",
 WEB_EXT = (".html", ".htm", ".css", ".scss", ".sass", ".less", ".jsx", ".tsx", ".vue", ".svelte")
 PAGE_EXT = (".html", ".htm", ".css", ".scss", ".sass", ".less")  # only looking checks these; components also have tests
 UI_CHECK = os.path.join(PLUGIN, "skills", "ui-check", "scripts", "ui_check.py")
+MOBILE = os.path.join(PLUGIN, "skills", "mobile", "scripts", "mobile.py")
+# Files that are a mobile screen by themselves, and what marks one in code.
+MOBILE_LAYOUT = re.compile(r"\.(storyboard|xib)$|[/\\]res[/\\](layout|values|drawable|menu|navigation|color|font|anim)"
+                           r"[\w-]*[/\\][^/\\]+\.xml$", re.I)
+MOBILE_CODE = {".swift": re.compile(r"\bimport\s+(SwiftUI|UIKit)\b"),
+               ".kt": re.compile(r"@Composable\b|androidx\.compose\.|\bsetContentView\(|:\s*(\w+\.)?(Fragment|\w*Activity)\("),
+               ".dart": re.compile(r"package:flutter/"),
+               ".tsx": re.compile(r"""from\s+['"](react-native|expo[\w/-]*|@react-navigation/[\w-]+)['"]"""),
+               ".jsx": re.compile(r"""from\s+['"](react-native|expo[\w/-]*|@react-navigation/[\w-]+)['"]""")}
 GIT_INIT = os.path.join(PLUGIN, "skills", "git-init", "scripts", "repo_init.py")
 INIT_SKILL = os.path.join(PLUGIN, "skills", "init", "SKILL.md")
 RULE_FILES = ("AGENTS.md", "GEMINI.md", "CLAUDE.md")
@@ -82,6 +103,17 @@ ANNOUNCE = re.compile(r"^\W*(сейчас|теперь|далее|приступ
                       r"проверяю|проверю|устанавливаю|установлю|выполняю|выполню|делаю|сделаю|займусь|перехожу|"
                       r"let me|i'?ll|i will|now i|starting|running|creating|initializing|next,? i)\b", re.I)
 ANNOUNCE_MAX = 300
+# The last sentence of a longer message that says, in the first person, what the agent is about to do («Исправляем
+# расчёт скидки в calc.py.», «Сейчас внесу правку.»). Seen live after a correct diagnosis: the fix never came.
+ANNOUNCE_LAST = re.compile(
+    r"^\W*(?:(?:сейчас|теперь|далее|затем)\s+)?(?:исправля(?:ю|ем)|исправ(?:лю|им)|чин(?:ю|им)|почин(?:ю|им)|вношу|вносим|"
+    r"внес(?:у|[её]м)|переделыва(?:ю|ем)|передела(?:ю|ем)|переписыва(?:ю|ем)|перепиш(?:у|ем)|добавля(?:ю|ем)|добав(?:лю|им)|"
+    r"обновля(?:ю|ем)|обнов(?:лю|им)|меня(?:ю|ем)|измен(?:ю|им)|заменя(?:ю|ем)|замен(?:ю|им)|приступа(?:ю|ем)|начина(?:ю|ем)|"
+    r"запуска(?:ю|ем)|запущу|запустим|перехо(?:жу|дим)\s+к|займусь|займ[её]мся|реализу(?:ю|ем)|применя(?:ю|ем)|примен(?:ю|им)|"
+    r"удаля(?:ю|ем)|удал(?:ю|им)|созда(?:ю|[её]м|м|дим)|напиш(?:у|ем)|выполня(?:ю|ем)|выполн(?:ю|им)|сдела(?:ю|ем)|"
+    r"провер(?:ю|им))\b"
+    r"|^\W*(?:let me|i'?ll|i will|i'?m going to|i am going to|now i'?ll|next,? i'?ll)\b", re.I)
+ANNOUNCE_QUOTE = 240
 CONTINUE = re.compile(r"^\W*(продолж|дальше|доделай|давай дальше|go on|continue|keep going|carry on)", re.I)
 # A task.md item handed to a subagent: «Найти обработчики — explorer», «… (researcher)».
 DELEGATED = re.compile(r"(?:[—–(]|\s-|→)\s*(explorer|researcher|worker|code-reviewer|security-auditor|debugger|"
@@ -154,13 +186,25 @@ def only_setup_questions(answer: str) -> bool:
     return bool(asks) and all(SETUP_TOPIC.search(raw) for raw in asks)
 
 
-def announced_only(answer: str) -> bool:
-    """The agent ended its turn with a short message that announces an action it didn't take."""
+def announcement(answer: str) -> str:
+    """What the agent said it would do and then didn't: a short message that only announces an action («Сейчас запущу
+    тесты.»), or the last sentence of a longer one («…Исправляем расчёт скидки в calc.py.»). "" when there is none."""
     text = answer.strip()
-    if not text or len(text) > ANNOUNCE_MAX:
-        return False
-    last = sentences(text)[-1][1].strip() if sentences(text) else ""
-    return bool(ANNOUNCE.search(text) or ANNOUNCE.search(last)) and not WAITING.search(re.sub(r"`[^`]*`", " ", text))
+    if not text or WAITING.search(re.sub(r"`[^`]*`", " ", text)):
+        return ""
+    parts = sentences(text)
+    raw, last = (parts[-1][0].strip(), parts[-1][1].strip()) if parts else ("", "")
+    if len(text) <= ANNOUNCE_MAX:
+        return text if ANNOUNCE.search(text) or ANNOUNCE.search(last) else ""
+    if last.endswith("?") or not ANNOUNCE_LAST.search(last):
+        return ""
+    quote = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", raw)  # links: keep the name, drop the long target
+    return quote if len(quote) <= ANNOUNCE_QUOTE else quote[:ANNOUNCE_QUOTE - 1] + "…"
+
+
+def announced_only(answer: str) -> bool:
+    """The agent ended its turn with a message that announces an action it didn't take."""
+    return bool(announcement(answer))
 
 
 def setup_left(payload: dict, turn: dict, st: dict, answer: str) -> List[str]:
@@ -238,39 +282,139 @@ VERIFY = re.compile(
     r"|\bdocker\s+(compose\s+)?(run|exec|build)\b|\bpython3?\s+(-m\s+\w+|[\w./-]+\.py)\b|\b(node|deno|ts-node|tsx)\s+[\w./-]+"
     r"|\b(bash|sh|zsh)\s+[\w./-]+\.sh\b|(^|[\s;&|])\.[/\\][\w./\\-]+|\bcurl\b.*\b(localhost|127\.0\.0\.1)\b|ui_check\.py"
     r"|\bpy\s+(-3\S*\s+)?(-m\s+\w+|[\w./\\:-]+\.py)\b|\bpython3?(\.exe)?\s+(-m\s+\w+|[\w./\\:-]+\.py)\b"
-    r"|\b(pwsh|powershell)(\.exe)?\b.*\.ps1\b|\bdotnet\s+(test|build|run)\b|\binvoke-pester\b|\b(iwr|irm|invoke-webrequest|invoke-restmethod)\b.*\b(localhost|127\.0\.0\.1)\b", re.I)
+    r"|\b(pwsh|powershell)(\.exe)?\b.*\.ps1\b|\bdotnet\s+(test|build|run)\b|\binvoke-pester\b|\b(iwr|irm|invoke-webrequest|invoke-restmethod)\b.*\b(localhost|127\.0\.0\.1)\b"
+    r"|\bflutter\s+(test|analyze|build|drive|run)\b|\bdart\s+(test|analyze)\b|\bdetox\s+(test|build)\b|\bmaestro\s+test\b", re.I)
 # Commands that show how a page looks: screenshots in a real browser (a syntax check or curl doesn't).
 LOOK = re.compile(r"ui_check\.py|\b(playwright|cypress|puppeteer|selenium|webdriver|screencapture)\b|--screenshot", re.I)
+# What a command does for a mobile app. `mobile.py` is this plugin's tool — not a file that merely ends that way.
+MOBILE_TOOL = r"(?<![\w-])mobile\.py[\"']?\s+"
+# …puts a build on a simulator or an emulator: what was changed before it is what will be seen.
+MOBILE_INSTALL = re.compile(MOBILE_TOOL + r"(run|install)\b|\bsimctl\s+install\b|\badb(\.exe)?\b[^|;&]*\sinstall(-multiple)?\s"
+                            r"|\bandroid\s+(run|install)\b|\bflutter\s+(run|install)\b|\b(expo|react-native)\s+run", re.I)
+# …shows it running: a screenshot.
+MOBILE_LOOK = re.compile(MOBILE_TOOL + r"(run|shot)\b|" + MOBILE_TOOL + r"[^|;&]*\s--shot\b|\bsimctl\s+io\s+\S+\s+screenshot\b"
+                         r"|\badb(\.exe)?\b[^|;&]*\bscreencap\b|\bandroid\s+screen\s+capture\b", re.I)
+# …drives its screens in UI tests — Flutter's widget tests included (a JVM unit test or a plain build doesn't; nor
+# does a path with «test» in it).
+MOBILE_TESTS = re.compile(r"\bxcodebuild\b.*\s(test|test-without-building)(\s|$)|\bgradlew?(\.bat)?\b.*\b\w*AndroidTest\b"
+                          r"|\bflutter\s+(test|drive)\b|\bdetox\s+test\b|\bmaestro\s+test\b", re.I)
+HELP = re.compile(r"\s(--help|-h)(\s|$)")
+BG_STARTED = re.compile(r"running as a background task with task id:\s*(\S+)")
+BG_FINISHED = re.compile(r'Task id "([^"]+)" finished with result:\s*Command exited with code (-?\d+)')
+HOT_RELOAD = (".tsx", ".jsx")  # React Native: a saved file reaches the running app by itself
+
+
+def mobile_command(line: str) -> Optional[dict]:
+    """{"install", "look", "tests"} for a command that matters to a mobile app's screens, else None."""
+    if HELP.search(line):
+        return None
+    did = {"install": bool(MOBILE_INSTALL.search(line)), "look": bool(MOBILE_LOOK.search(line)),
+           "tests": bool(MOBILE_TESTS.search(line))}
+    return dict(did, ok=None) if any(did.values()) else None
+
+
+def command_result(raw: str, waiting: List[Optional[dict]], background: dict) -> None:
+    """Give the commands the agent started their outcome: one result row per call, in order; a command that went on
+    in the background gets it when it reports back. A command that failed (or was refused) did nothing."""
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return
+    content = d.get("content") or ""
+    for m in BG_FINISHED.finditer(content):
+        if m.group(1) in background:
+            background.pop(m.group(1))["ok"] = m.group(2) == "0"
+    if d.get("type") != "GENERIC" or not waiting:
+        return
+    command = waiting.pop(0)
+    if command is None:
+        return
+    code, later = conv.EXIT.search(content[:3000]), BG_STARTED.search(content[:800])
+    if code:
+        command["ok"] = code.group(1) == "0"
+    elif later:
+        background[later.group(1)] = command
+    else:
+        command["ok"] = False
+
+
+def mobile_ui(path: str) -> str:
+    """"layout" for a file that is a mobile screen by itself (storyboard, Android layout or resources), "code" for
+    source that draws one (SwiftUI, UIKit, Compose, Flutter, React Native), "" for anything else."""
+    if MOBILE_LAYOUT.search(path):
+        return "layout"
+    marker = MOBILE_CODE.get(os.path.splitext(path)[1].lower())
+    if not marker:
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return "code" if marker.search(f.read(200_000)) else ""
+    except OSError:
+        return ""
+
+
+def mobile_here(paths: List[str], wss: List[str]) -> List[str]:
+    """Of these files, the ones that belong to a mobile app this computer can run: an iOS app with Xcode's simulators,
+    an Android app with the SDK. A SwiftUI view of a Mac app or a Compose screen of a desktop app isn't one."""
+    try:
+        sys.path.insert(0, os.path.dirname(MOBILE))
+        import mobile
+        ios, android = bool(mobile.xcrun()), bool(mobile.adb())
+        found = [mobile.detect(w) for w in wss[:2]]
+    except Exception:
+        return []
+    has = {key: any(f[key] for f in found) for key in ("ios", "android", "flutter", "rn")}
+    out = []
+    for p in paths:
+        ext = os.path.splitext(p)[1].lower()
+        if ext in (".swift", ".storyboard", ".xib"):
+            fits = ios and (has["ios"] or has["flutter"] or has["rn"])
+        elif ext in (".kt", ".xml"):
+            fits = android and (has["android"] or has["flutter"] or has["rn"])
+        else:
+            fits = (ios or android) and has["flutter" if ext == ".dart" else "rn"]
+        if fits:
+            out.append(p)
+    return out
 
 
 def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
     """What the agent did in this turn (steps after the user's last message): code files written, whether a review
-    ran, the code changed after the last check (tests, build, running the program), and the web UI changed after
-    the agent last looked at it (tests also cover components, but pages and styles only by looking)."""
+    ran, the code changed after the last check (tests, build, running the program), the web UI changed after
+    the agent last looked at it (tests also cover components, but pages and styles only by looking), and the screens
+    of a mobile app changed after it last ran the app on a simulator or an emulator (UI tests cover the code, but a
+    build alone shows nothing)."""
     files: List[str] = []
     pending: List[str] = []
     unseen: List[str] = []
+    story: List[dict] = []                   # screens edited and mobile commands run, in the order they were started
+    waiting: List[Optional[dict]] = []       # the calls of the latest step, each still to get its result row
+    background: dict = {}
     setup: Set[str] = set()
     reviewed = False
     wss = [os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or [] if isinstance(w, str)]
     try:
         f = open(tp, encoding="utf-8", errors="replace")
     except OSError:
-        return {"files": [], "reviewed": True, "pending": [], "unseen": [], "setup": []}
+        return {"files": [], "reviewed": True, "pending": [], "unseen": [], "mobile": [], "setup": []}
     with f:
         for raw in f:
-            if '"tool_calls"' not in raw:
-                continue
             m = STEP.search(raw[:120])
             if not m or int(m.group(1)) <= since_step:
+                continue
+            if '"tool_calls"' not in raw:
+                if any(waiting) or background:
+                    command_result(raw, waiting, background)
                 continue
             try:
                 calls = json.loads(raw).get("tool_calls") or []
             except ValueError:
                 continue
+            waiting = []
             for c in calls:
                 args = c.get("args") or {}
                 name = str(c.get("name") or "")
+                waiting.append(None)
                 if name == "invoke_subagent" and REVIEWERS.search(str(args.get("TypeName") or "")):
                     reviewed = True
                 elif name == "read_file" and str(args.get("Path") or "").endswith(REVIEW_SKILLS):
@@ -281,7 +425,13 @@ def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
                     line = str(args.get("CommandLine") or "")
                     if "repo_init.py" in line:
                         setup.add("git")
-                    if LOOK.search(line):
+                    did = mobile_command(line)
+                    if did:
+                        story.append(did)
+                        waiting[-1] = did
+                    if did and (did["look"] or did["tests"]):
+                        pending = []
+                    elif LOOK.search(line):
                         pending, unseen = [], []
                     elif VERIFY.search(line):
                         pending = []
@@ -292,14 +442,42 @@ def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
                 elif name in ("write_file", "edit_file"):
                     p = os.path.realpath(str(args.get("Path") or ""))
                     ext = os.path.splitext(p)[1].lower()
-                    if ext in CODE_EXT and any(p.startswith(w + os.sep) for w in wss):
+                    if not any(p.startswith(w + os.sep) for w in wss):
+                        continue
+                    screen = mobile_ui(p)
+                    if screen:
+                        story.append({"edit": p})
+                    if ext in CODE_EXT:
                         if p not in files:
                             files.append(p)
                         if p not in pending:
                             pending.append(p)
-                        if ext in WEB_EXT and p not in unseen:
+                        if ext in WEB_EXT and not screen and p not in unseen:
                             unseen.append(p)
-    return {"files": files, "reviewed": reviewed, "pending": pending, "unseen": unseen, "setup": sorted(setup)}
+    return {"files": files, "reviewed": reviewed, "pending": pending, "unseen": unseen, "mobile": unseen_screens(story),
+            "setup": sorted(setup)}
+
+
+def unseen_screens(story: List[dict]) -> List[str]:
+    """The screens changed and not looked at since. A look shows what is installed: a screen changed after the last
+    install is still the old one in the picture (React Native aside, where a saved file reaches the running app). UI
+    tests cover the code of a screen, not a layout file. A command that failed, or hasn't finished, did nothing."""
+    unseen: List[str] = []
+    old_build: Set[str] = set()
+    for step in story:
+        path = step.get("edit")
+        if path:
+            unseen = [p for p in unseen if p != path] + [path]
+            if not path.lower().endswith(HOT_RELOAD):
+                old_build.add(path)
+        elif step.get("ok"):
+            if step["install"]:
+                old_build.clear()
+            if step["look"]:
+                unseen = [p for p in unseen if p in old_build]
+            if step["tests"]:
+                unseen = [p for p in unseen if MOBILE_LAYOUT.search(p)]
+    return unseen
 
 
 def test_commands(payload: dict) -> List[str]:
@@ -344,6 +522,46 @@ def waiting_on_background(payload: dict, st: dict, run: List[dict]) -> Optional[
     return parallel.stop_message(run, items, SHOWN)
 
 
+def facts_check(payload: dict, st: dict, answer: str) -> Optional[str]:
+    """Nothing else is left: what the final report claims without anything in the conversation to back it
+    (hooks/facts.py) — for subagents' reports too."""
+    try:
+        import facts
+        msg = facts.stop_message(payload, st, answer, VERIFY, tuple(CODE_EXT), WEB_EXT)
+    except Exception as e:  # a check of the report must never trap the agent
+        print(f"stop: facts: {e}", file=sys.stderr)
+        return None
+    if msg:
+        conv.store(payload["conversationId"], st)
+    return msg
+
+
+def objective_check(payload: dict, st: dict, answer: str) -> Optional[str]:
+    """Nothing else is left: the main agent gave in to the user's objection or guess without checking anything
+    (hooks/objective.py)."""
+    try:
+        import objective
+        msg = objective.stop_message(payload, st, answer)
+    except Exception as e:  # a check of the answer must never trap the agent
+        print(f"stop: objective: {e}", file=sys.stderr)
+        return None
+    if msg:
+        conv.store(payload["conversationId"], st)
+    return msg
+
+
+def memory_check(payload: dict, st: dict, answer: str) -> Optional[str]:
+    """Nothing else is left: what the main agent learned in this work and should save (hooks/memory_hints.py)."""
+    try:
+        import memory_hints
+        msg = memory_hints.stop_message(payload, st, answer, handing_over(answer))
+    except Exception as e:  # memory is optional: never trap the agent over it
+        print(f"stop: memory: {e}", file=sys.stderr)
+        return None
+    conv.store(payload["conversationId"], st)
+    return msg
+
+
 def decide(payload: dict) -> Optional[str]:
     if payload.get("terminationReason") != "NO_TOOL_CALL":
         return None
@@ -365,9 +583,10 @@ def decide(payload: dict) -> Optional[str]:
     review: List[str] = []
     unverified: List[str] = []
     unseen: List[str] = []
+    mobile: List[str] = []
     setup: List[str] = []
     answer = last_answer(tp) if tp else ""
-    announced = bool(st["users"]) and announced_only(answer)
+    announced = announcement(answer) if st["users"] else ""
     if not broken and not items and st["users"] and tp:
         turn = turn_changes(tp, st["users"][-1].get("step", -1), payload)
         setup = setup_left(payload, turn, st, answer)
@@ -375,19 +594,26 @@ def decide(payload: dict) -> Optional[str]:
             review = turn["files"]
         if setting("autoVerify"):
             unseen = turn["unseen"]
-            unverified = [p for p in turn["pending"] if p not in unseen]  # the web UI is checked by looking at it
-    if not broken and not items and not review and not unverified and not unseen and not setup and not announced:
-        return None
+            mobile = mobile_here(turn["mobile"], [os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or []
+                                                  if isinstance(w, str)]) if turn["mobile"] else []
+            # the web UI and a mobile app's screens are checked by looking at them
+            unverified = [p for p in turn["pending"] if p not in unseen and p not in mobile]
+    if not broken and not items and not review and not unverified and not unseen and not mobile and not setup and not announced:
+        return (facts_check(payload, st, answer) or (objective_check(payload, st, answer) if st["users"] else None)
+                or (memory_check(payload, st, answer) if st["users"] else None))
     if handing_over(answer):
         if not (setup and only_setup_questions(answer)):
             return None  # the agent handed the turn to the user on purpose
-        review, unverified, unseen = [], [], []  # it only asked whether to set up the project: just that
+        review, unverified, unseen, mobile = [], [], [], []  # it only asked whether to set up the project: just that
 
     key = ([f"{path}|{p['msg']}" for path, p in broken] + [text for _mark, text in items]
            + [f"review|{p}" for p in review] + [f"verify|{p}" for p in unverified] + [f"look|{p}" for p in unseen]
+           + [f"mobile|{p}" for p in mobile]
            + [f"setup|{s}" for s in setup] + (["announced|" + answer.strip()[:80]] if announced else []))
     if not first_time(st, key):
-        return None  # it already decided to stop with exactly this left
+        # It already decided to stop with exactly this left: say no more about it, but its report still has to be
+        # true (seen live: «Тесты не запускались… Готово, тесты проходят») and rest on a look, not on giving in.
+        return facts_check(payload, st, answer) or (objective_check(payload, st, answer) if st["users"] else None)
     if setup:
         st["setup"] = sorted(set(st.get("setup") or []) | set(setup))
     conv.store(payload["conversationId"], st)
@@ -399,9 +625,14 @@ def decide(payload: dict) -> Optional[str]:
     look = (f"run `{compat.python_cmd()} \"{UI_CHECK}\" \"{page}\" --widths 390,1440` (BypassSandbox: true; an app: its dev-server "
             "URL instead of the file), then open the screenshots it prints with read_file, check the layout at both "
             "widths and the console errors it reports, and fix what's broken")
+    py = compat.python_cmd()
+    app_look = (f"build the app (`{py} \"{MOBILE}\" project \"{ws[0] if ws else '.'}\"` prints the build command), then run "
+                f"`{py} \"{MOBILE}\" run --project \"{ws[0] if ws else '.'}\"` (BypassSandbox: true): it installs and launches the "
+                "newest build on the running simulator or emulator (`boot` starts one) and takes a screenshot. Open the "
+                "screenshot with read_file, go to the screen you changed (`ui`, then `tap --text \"…\"`), and fix what's broken")
     parts = []
     if announced:
-        parts.append(f"Antigravity Plus: you wrote «{answer.strip()}» and ended your turn without doing it — a message "
+        parts.append(f"Antigravity Plus: you wrote «{announced}» and ended your turn without doing it — a message "
                      "doesn't run anything. Do it now with a tool call, then continue with the user's request until it's "
                      "done (or until you really need the user).")
     if broken:
@@ -434,6 +665,11 @@ def decide(payload: dict) -> Optional[str]:
                      f"report the work done, look at it yourself: {look}. A syntax check or a command that only prints a "
                      "message doesn't count. If it can't be opened here (it needs a login or a backend that isn't "
                      "running), run its tests instead or say so in one line.")
+    if mobile and not review:
+        parts.append(f"Antigravity Plus: you changed the app's screens ({listed(mobile)}) but haven't looked at them on a "
+                     f"simulator or an emulator. Before you report the work done, look yourself: {app_look}. A build or a "
+                     "syntax check alone doesn't show how a screen looks. If it can't be shown here (no simulator, it needs "
+                     "an account or a server that isn't running), say so in one line.")
     if review:
         parts.append(f"Antigravity Plus: you changed {len(review)} code files in this turn ({listed(review)}"
                      + ") and haven't reviewed them. Before you report the work "
@@ -442,7 +678,8 @@ def decide(payload: dict) -> Optional[str]:
                      "moved code, config values) or the user asked for speed; then just finish and say why in one line."
                      + (" Also run the project's tests or build after the last change — you haven't checked it yet."
                         if unverified else "")
-                     + (f" And look at the web UI you changed: {look}." if unseen else ""))
+                     + (f" And look at the web UI you changed: {look}." if unseen else "")
+                     + (f" And look at the app's screens you changed: {app_look}." if mobile else ""))
     if setup:
         steps = []
         if "git" in setup:

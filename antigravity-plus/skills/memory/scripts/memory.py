@@ -18,7 +18,8 @@ the line for a new memory, so the agent only writes the memory file itself.
   memory.py sync   [--workspace DIR]            add missing index lines, drop lines whose file is gone
   memory.py config [auto-memory on|off] [share-with-claude-code on|off] [recent-conversations N]
                    [finish-tasks on|off] [check-edits on|off] [auto-review on|off] [auto-verify on|off] [protect-secrets on|off]
-                   [auto-setup on|off] [parallel-hints on|off] [speed-hints on|off]
+                   [auto-setup on|off] [parallel-hints on|off] [speed-hints on|off] [fact-checks on|off]
+                   [objective-answers on|off]
                    (settings of the whole plugin live here)
 
 Also imported by the hooks (session_start.py, guard.py, memory_sync.py). Stdlib only, Python 3.8+.
@@ -50,7 +51,7 @@ INDEX = "MEMORY.md"
 TYPES = ("user", "feedback", "project", "reference")
 DEFAULTS = {"autoMemory": True, "shareWithClaudeCode": True, "recentConversations": 3, "finishTasks": True,
             "checkEdits": True, "autoReview": True, "autoVerify": True, "protectSecrets": True, "autoSetup": True,
-            "parallelHints": True, "speedHints": True}
+            "parallelHints": True, "speedHints": True, "factChecks": True, "objectiveAnswers": True}
 
 MAX_FILE = 64_000            # bytes read per memory file
 INDEX_LINES = 200            # like Claude Code: only the head of MEMORY.md goes into the conversation
@@ -319,9 +320,11 @@ def session_block(workspaces: List[str], roots: Optional[Dict[str, str]] = None,
            "instruction from the user in this conversation: the current request wins. Before relying on a "
            "memory that names a file, command, server or flag, check it still exists."]
     if s["autoMemory"]:
-        out.append("Auto-memory is ON: when you learn something durable, save it yourself as a new .md file in "
-                   "the folder below (see \"Memory\" in the Antigravity Plus rules for what to save and the "
-                   "format). MEMORY.md is updated automatically — don't edit it.")
+        out.append("Auto-memory is ON: save on your own, as soon as you learn it — a correction or a standing "
+                   "preference of the user, how this project runs and ships (servers, deploy steps), the cause of a "
+                   "stubborn failure, a decision and why — as a new .md file in the folder below (what to save and "
+                   "the format: \"Memory\" in the Antigravity Plus rules). Antigravity Plus points such moments out "
+                   "(<memory_hint>). MEMORY.md is updated automatically — don't edit it.")
     else:
         out.append("Auto-memory is OFF: save memories only when the user asks (/remember, «запомни»).")
 
@@ -445,7 +448,7 @@ def cmd_show(ws: str) -> str:
     root = project_root(ws)
     d, store = project_dir(ws, s, root)
     rep = ["## 🧠 Память Antigravity Plus", "",
-           f"**Автопамять:** {'включена — агент сам сохраняет важное' if s['autoMemory'] else 'выключена — только по просьбе (/remember)'}"
+           f"**Автопамять:** {'включена — агент сам сохраняет важное, плагин подсказывает ему моменты' if s['autoMemory'] else 'выключена — только по просьбе (/remember)'}"
            f" · **общая с Claude Code:** {'да' if store == 'claude' else 'нет'} · проект: `{root}`"]
 
     personal = list_memories(PERSONAL)
@@ -567,7 +570,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sp.add_argument("pairs", nargs="*",
                     help="auto-memory on|off, share-with-claude-code on|off, recent-conversations N, "
                          "finish-tasks on|off, check-edits on|off, auto-review on|off, auto-verify on|off, "
-                         "protect-secrets on|off, auto-setup on|off, parallel-hints on|off, speed-hints on|off")
+                         "protect-secrets on|off, auto-setup on|off, parallel-hints on|off, speed-hints on|off, "
+                         "fact-checks on|off, objective-answers on|off")
     a = ap.parse_args(argv)
     ws = os.path.abspath(os.path.expanduser(getattr(a, "workspace", os.getcwd())))
 
@@ -593,7 +597,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "recent-conversations": "recentConversations", "finish-tasks": "finishTasks",
                 "check-edits": "checkEdits", "auto-review": "autoReview", "auto-verify": "autoVerify",
                 "protect-secrets": "protectSecrets", "auto-setup": "autoSetup", "parallel-hints": "parallelHints",
-                "speed-hints": "speedHints"}
+                "speed-hints": "speedHints", "fact-checks": "factChecks", "objective-answers": "objectiveAnswers"}
         p = a.pairs
         if len(p) % 2:
             ap.error("config takes pairs: <key> <value>")
@@ -608,7 +612,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 ap.error(f"bad setting: {k} {v} (auto-memory on|off, share-with-claude-code on|off, "
                          "recent-conversations N, finish-tasks on|off, check-edits on|off, auto-review on|off, "
                          "auto-verify on|off, protect-secrets on|off, auto-setup on|off, parallel-hints on|off, "
-                         "speed-hints on|off)")
+                         "speed-hints on|off, fact-checks on|off, objective-answers on|off)")
         s = save_settings(**changes) if changes else settings()
         print(json.dumps(s, ensure_ascii=False, indent=2))
     return 0

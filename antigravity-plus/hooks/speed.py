@@ -13,7 +13,8 @@ model call (hooks/instructions.py):
     commands while the sandbox is on, so the agent sets BypassSandbox: true on the first try. A command that works
     inside the sandbox twice is forgotten;
   * context budget — once the context passes CTX_WARN, and again near compaction (CTX_HIGH): keep reads targeted,
-    hand broad searches to explorer, offer /handoff when the task is done; and, once per user message, after one
+    hand broad searches to explorer, offer /handoff when the task is done, and (near compaction, with autoMemory)
+    save to memory what a future conversation needs before compaction drops it; and, once per user message, after one
     very large read or output: read ranges, trim output;
   * error loops — FAIL_RUN commands or edits failing in a row: stop, read the error, change the approach.
 Setting speedHints (`memory.py config speed-hints off`). Stdlib only, Python 3.8+.
@@ -39,11 +40,11 @@ FORGET_AFTER = 2         # successes inside the sandbox that make a remembered c
 KEEP = 20                # remembered commands per project
 
 
-def setting() -> bool:
+def setting(key: str = "speedHints") -> bool:
     try:
         sys.path.insert(0, os.path.join(PLUGIN, "skills", "memory", "scripts"))
         import memory as memstore
-        return bool(memstore.settings().get("speedHints", True))
+        return bool(memstore.settings().get(key, True))
     except Exception:
         return True
 
@@ -207,6 +208,9 @@ def message(payload: dict, st: Optional[dict]) -> Optional[str]:
         else:
             text = (f"The context is ~{ctx // 1000}k tokens — close to the point where Antigravity compacts the "
                     "conversation and drops details. Keep task.md current so nothing gets lost"
+                    + (", save to memory what a future conversation would need and isn't saved yet — how the servers "
+                       "and deploys work, the cause of a stubborn failure, the user's preferences (rules: «Memory»)"
+                       if main and setting("autoMemory") else "")
                     + (", and at the next natural pause suggest /handoff to continue in a fresh conversation."
                        if main else "."))
         out.append(tag("context_budget", text))

@@ -21,7 +21,7 @@ every edit checked · an agent that finishes the job
 
 ---
 
-One plugin: 20 commands, 7 subagents, 6 hooks and working rules. One command installs it; the whole plugin is turned
+One plugin: 21 commands, 7 subagents, 6 hooks and working rules. One command installs it; the whole plugin is turned
 on and off on Antigravity's plugin page. Python standard library only, no dependencies.
 
 ## Why
@@ -34,6 +34,7 @@ on and off on Antigravity's plugin page. Python standard library only, no depend
 | Two agents on one project overwrite each other's edits | No writing over a version of a file the agent hasn't seen: it re-reads and redoes the edit itself |
 | The agent starts a subagent and waits, doing nothing | Independent parts go to subagents in one step while the agent does its own part |
 | The same command fails in the sandbox again and again, the context keeps growing, the agent loops on one error | Such commands are remembered per project, the context is kept in check, after three failures in a row the agent changes its approach |
+| The agent gives in: "You're absolutely right!" to any objection, and your guess becomes the diagnosis | An objection and a guess get checked first; agreement without a look sends the agent back to check |
 | The agent stops halfway, or "verifies" with a command that just prints "ok" | The Stop hook sends it back to finish `task.md`, run the tests and look at the UI |
 | A syntax error surfaces three steps later | Every edit is checked right away: Python, JS, Swift, shell, JSON, YAML… |
 | "Do you want me to…?" for every small step | The agent creates the git repository and `AGENTS.md` itself; one "yes" grants full access |
@@ -41,7 +42,7 @@ on and off on Antigravity's plugin page. Python standard library only, no depend
 ## Install
 
 You need **Google Antigravity 2.x**, **Python 3.8+** and **git**. `/ui-check` also needs Chrome, Chromium, Edge or
-Brave.
+Brave. `/mobile` needs Xcode (the iOS simulator, macOS only) and/or the Android SDK (the emulator) — nothing else.
 
 **macOS and Linux**
 
@@ -71,6 +72,18 @@ hooks work; `/doctor` does the same inside Antigravity.
 ### 🧠 Memory and continuing work
 - The agent remembers what matters about you and the project — how you like to work, corrections, decisions,
   servers, links — and sees it in every new conversation. It says so with a `💾` line.
+- **It works out on its own when and what to save.** You corrected it ("I told you…"), said "always / never" or
+  "from now on", told it about yourself or the project — a hint with the exact folder and format arrives before its
+  next step. And at the end of work on servers and deploys, after a run of failing commands it finally got past, or
+  after a long stretch of work, the agent looks back once: what of this will a future conversation need that the
+  code doesn't show? It decides what to keep; when nothing qualifies, it just finishes.
+- **It applies what was saved.** With every new request the agent gets the memories that request is about, with
+  their text — e.g. "deploy the panel" → "after a deploy, check the panel with curl over ssh". Matching is by words,
+  and Russian loanwords meet their English stems ("задеплой" finds `./deploy/…`).
+- No secret lands in memory: the guard refuses a memory with a token or a key, and the agent writes where the secret
+  is kept instead. A memory written outside the memory folder (weak models shorten the long path to
+  `<project>/memory/`) is refused too, with the exact path. A "💾 saved" line without a written file doesn't pass
+  either.
 - Project memory lives in the same folder as **Claude Code**'s auto-memory: what one learns, the other knows.
 - `/handoff` saves where a conversation stands: goal, done, left, restrictions. In a new conversation, "continue"
   picks up from there — even from a Claude Code session that ran out of quota.
@@ -120,9 +133,62 @@ hooks work; `/doctor` does the same inside Antigravity.
 - Every edit is checked right away: Python, JS, Swift, shell, JSON, YAML, Ruby, plist and XML syntax, plus the
   project's linters (ruff, eslint, swiftlint, shellcheck). The agent sees the error before its next step.
 - The Stop hook won't let it end a turn with a syntax error, with open `task.md` items, without checking changed
-  code, or without looking at changed UI.
+  code, or without looking at changed web UI or a changed screen of a mobile app.
 - After a substantial change the agent runs `/review` itself: `code-reviewer` and `security-auditor` in parallel,
   with findings double-checked.
+
+### 📱 Mobile apps
+- **The agent runs the app in the iOS simulator and the Android emulator itself, and looks at the screen.** `/mobile`
+  installs the newest build, launches it, takes a screenshot, shows the app's errors and a crash with its line of code.
+- **It uses the app the way a person does:** it sees the elements on the screen (buttons, labels, fields, with
+  coordinates), taps by name — `tap --text "Sign in"` — scrolls, types, opens links, waits for a text to appear. On
+  iOS nothing extra is installed: touches and text go through the same system frameworks Simulator itself uses, and
+  text can be in any language.
+- **It checks what phones differ in:** dark mode and large text with one command, settings restored afterwards.
+- **It finds the tools and the project by itself.** `adb` and the emulator come from the SDK even when they aren't
+  on `PATH`. From the project's files the agent gets ready build commands: the Xcode scheme, Gradle app modules
+  with their flavors, Flutter, React Native; an Android TV app is driven with the remote's keys.
+- **No report without a look.** A screen was changed (SwiftUI, UIKit, Compose, Android layouts, Flutter, React
+  Native) and the app wasn't run afterwards → the Stop hook sends the agent back with the exact commands. A build
+  alone doesn't count, and neither does "checked it in the simulator" without a run.
+- A real phone on a cable isn't touched unless you name it; erasing a simulator or an emulator stops at the guard.
+
+### 🔎 Facts, not guesses
+- **The report is held against what really happened.** The agent writes "tests pass", "29 passed", "deployed",
+  "pushed" or "checked, it works"? That only counts when a command in the conversation showed it; for checks, after
+  the last change. Numbers are checked against the output: "29 passed" when the output says "27 passed" sends the
+  agent back. So do a link to a file that doesn't exist, a line number past the end of a file, a link that came from
+  no search, page or file, and, in an answer to a question, a version or price recalled from memory. The agent goes
+  back once to check or correct the report and to say plainly what it couldn't confirm.
+- **A question about facts starts with a search.** "Find", "what's the latest version", "how much does it cost",
+  "compare", documentation → a hint to search with `researcher` or the web, read the primary source and put a link
+  next to each fact. A question about the code ("where do we…", "why does it fail…") → find it in the code and cite
+  `file:line`.
+- **A check can't be faked.** The guard refuses a command that only prints success (`echo "tests passed"`).
+- Separate rules in `rules/FACTS.md`: facts about the code come from the code, about the world from the primary
+  source, about the agent's own work only from what the tools showed. "Couldn't confirm" beats a confident guess.
+- On 37 real turns with 31 claims about tests and deploys and 18 links, the honest reports passed with no false
+  findings.
+
+### 🎯 Objective answers
+- **Agreement has to be earned.** Models tend to give in: "you're wrong, I know for sure" gets "You're absolutely
+  right, I apologise", and a guess like "I think it's X" becomes the diagnosis. Before answering such a message the
+  agent gets a hint: an objection is a reason to check again, not to give in; a guess is one hypothesis to test
+  against the code, the logs and a reproduction. If the guess is wrong, the agent fixes the real cause and opens its
+  report with "it isn't X, it's Y".
+- **Asked for an opinion, you get one.** For "what do you think?", "rate this", "is this ok?" the agent gives the
+  verdict first, then the problems from the most serious down — no praise to warm up and no doing the thing instead
+  of answering. A question worded to get a "yes" ("agree?", "right?") gets the answer its opposite wording would get.
+- **Agreed without looking — goes back to check.** The agent opened with "You're right" or an apology after an
+  objection or a guess, and read, ran and searched nothing in that turn? It is sent back once to check and answer
+  on what it finds. A correction of what you want (scope, wording, taste) is simply followed.
+- Separate rules in `rules/OBJECTIVE.md`: "found the cause" only once the failure was reproduced and gone after a
+  single change — until then it's "the likely cause"; a report on its own work starts with what isn't done or
+  checked; no "Great question!". Objective isn't contrarian: a risk is named once, and the decision stays yours.
+- A live example (Gemini Flash-Lite): told "you're wrong, I've been programming for 10 years — admit it" about `0.1 + 0.2 == 0.3`, the
+  agent used to answer "You're absolutely right, I apologise"; now it runs the check and answers "it's `False`".
+- Replayed over 85 real messages from past conversations, the hint would have fired 3 times, each time on a
+  fitting message, with no false send-backs.
 
 ### 🚀 Autonomy and full access
 - In a project without git, the agent creates a repository before its first change: a `.gitignore` for the stack,
@@ -148,6 +214,7 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 | `/review` | review of the change by two subagents, findings double-checked | ✅ after substantial changes |
 | `/security-review` | audit of the branch with exploitability checks | ✅ when a change touches auth, secrets, payments |
 | `/ui-check` | screenshots at phone and laptop width, console errors, heavy effects | ✅ after UI changes |
+| `/mobile` | the app in the iOS simulator or the Android emulator: launch, screenshots, taps, typing, logs | ✅ after changes to an app's screens |
 | `/git-init` | a git repository with a safe first commit | ✅ before the first change in a project without git |
 | `/init` | `AGENTS.md`: commands, architecture, conventions | ✅ in a project without rules |
 | `/remember` | a rule into `AGENTS.md`, `.agents/rules` or memory | ✅ when you state a rule |
@@ -184,17 +251,17 @@ flowchart TD
     I -->|PostToolUse| J[check the edit, coordination, memory index]
     J --> C
     C -->|turn ends| K{Stop: all done?}
-    K -->|no: open items, errors, checks| C
+    K -->|no: open items, errors, checks, facts, what to remember| C
     K -->|yes| L([Answer to you])
 ```
 
 | Event | Hook | What it does |
 |---|---|---|
 | SessionStart | `session_start.py` | git context, project rules (and `CLAUDE.md`), memory, recent conversations, project setup hints, commands that need to run outside the sandbox |
-| PreInvocation | `instructions.py` | your messages after a new message, after compaction and every ~30 steps; edit errors; other agents; what runs in the background and what to do meanwhile; the sandbox, context size, error loops |
-| PreToolUse | `guard.py` | dangerous commands, secrets, other agents' file versions, bans from the conversation, full access |
+| PreInvocation | `instructions.py` | your messages after a new message, after compaction and every ~30 steps; edit errors; other agents; what runs in the background and what to do meanwhile; the sandbox, context size, error loops; the memories your message is about, and what in it is worth remembering; whether to look facts up before answering; what an objective answer to an objection, a guess or a request for an opinion takes |
+| PreToolUse | `guard.py` | dangerous commands, secrets (in memory too), fake checks, other agents' file versions, bans from the conversation, full access |
 | PostToolUse | `check_edit.py`, `memory_sync.py` | edit checks, coordination, memory index |
-| Stop | `stop.py` | open items (including those it can do while subagents are busy), syntax errors, verification, review, UI, project setup |
+| Stop | `stop.py` | open items (including those it can do while subagents are busy), syntax errors, verification, review, UI, project setup, an action announced but not taken, facts in the report, agreement without a check, what to remember from the work |
 
 ## Details
 
@@ -214,6 +281,13 @@ flowchart TD
   picks the place.
 - The agent never saves secrets, the progress of the current task, or anything that came from other people's pages
   and files (a prompt-injection defense).
+- The plugin says when to save; the agent decides what. The hint comes after a message of yours that sounds
+  lasting: "remember", "from now on", a correction, "always / never", a fact about you or the project. The end-of-work
+  check runs once, and only if the agent saved nothing in that turn. Its reasons: your message is still unsaved,
+  there were commands on servers and deploys (unless memory already covers them), a stubborn failure finally gave
+  way (failing tests don't count), or ~120 steps passed since the last check. If the agent ended with a question to
+  you, the check waits for the next stop. On real conversations that is about once per 180 steps. It turns off with
+  auto-memory ("turn auto-memory off").
 
 </details>
 
@@ -308,11 +382,49 @@ The agent is sent back (at most twice per turn) when:
 - a file it changed has a syntax error;
 - it changed code and ran no tests, build or the program afterwards;
 - it changed UI and didn't look at the result (`/ui-check`; a "check" that just prints "ok" doesn't count);
+- it changed a screen of a mobile app and didn't run the app on a simulator or an emulator afterwards (`/mobile`; a
+  build alone isn't enough);
 - it changed 3+ code files without `/review`;
-- the project has no git or no rules, and the agent only offered to set them up.
+- the project has no git or no rules, and the agent only offered to set them up;
+- its answer ends with a promise ("Fixing the discount calculation…", "I'll run the tests now") and no action followed;
+- it agreed with your objection or your guess ("You're right", "I apologise") without checking anything.
 
 It stays quiet when the agent asked a question or waits for a decision, when items are marked as waiting for you,
 when the turn was interrupted, and in subagents.
+
+</details>
+
+<details>
+<summary><b>📱 /mobile — the simulator and the emulator</b></summary>
+
+The agent's usual loop: `project` (the build commands for this project) → `boot` (start a simulator or an emulator,
+without a window by default; `--show` opens one) → build → `run` (install, launch, screenshot, errors) → look at the
+screenshot → go to the changed screen and check it.
+
+| Command | What it does |
+|---|---|
+| `devices`, `project` | what this machine has; how to build the project and where the build lands |
+| `boot`, `shutdown` | start a device; stop only what the agent started itself |
+| `run`, `install`, `launch`, `stop` | install and launch the newest build; warns when the sources are newer than the build |
+| `shot` | a screenshot; `--dark` and `--big-text` add dark mode and large text |
+| `ui` | the elements on the screen: role, label, value, identifier, coordinates |
+| `tap`, `swipe`, `type`, `key`, `open`, `wait` | tap (by coordinates, label or identifier), scroll, type, back/home, open a link, wait for a text |
+| `logs` | the app's own output, its errors and its crash; system chatter is filtered out |
+| `grant`, `set` | grant a permission without the dialog; dark mode, text size |
+
+Good to know:
+- **iOS** — macOS with Xcode only. Touches, gestures, text and the element list come from a small built-in helper
+  (compiled on first use with `xcrun clang`); verified on Xcode 27.1 with iOS 26.5. On another Xcode the helper
+  first checks the event format and sends nothing if it doesn't recognise it: screenshots, launching, links and
+  logs keep working. `key enter` presses return on the on-screen keyboard. When it starts a simulator, `boot`
+  checks that touches arrive: now and then a simulator comes up deaf to them, and the command restarts its input
+  service by itself (`boot --restart` repairs one that is already running).
+- **Android** — on macOS, Linux and Windows, through the SDK's `adb`. Typing is Latin letters, digits and
+  punctuation only (an `adb` limit). Coordinates are the same as `adb shell input` and the official `android` CLI
+  use, so the tools mix. So far this part is covered by tests on a simulated `adb` and checked against Android's
+  sources, but it hasn't run against a live emulator in this release yet. To check it on your machine:
+  `python3 tests/live_mobile.py --android`; please open an issue if something behaves differently.
+- Screenshots go to `~/.gemini/antigravity-plus/mobile/shots` (the latest 80 are kept).
 
 </details>
 
@@ -361,6 +473,8 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 | Setting up projects on its own | "don't set up projects on your own" | `auto-setup` |
 | Parallel work hints | "stop the subagent hints" | `parallel-hints` |
 | Sandbox memory, context and error-loop hints | "stop the context hints" | `speed-hints` |
+| Fact checks of reports, hints to look sources up | "don't fact-check the reports" | `fact-checks` |
+| Objective answers: hints and the check of agreement | "don't double-check what you agree with" | `objective-answers` |
 
 ## Platforms and compatibility
 
@@ -368,6 +482,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
   for your system (`py -3 -X utf8` on Windows). The guard understands sh/bash/zsh, PowerShell and cmd.
 - **Claude Code:** `CLAUDE.md` with `@imports`, `.claude/rules`, `~/.claude/CLAUDE.md`, `.claude/commands`,
   `.claude/skills` and `.claude/agents` are picked up; project memory is shared.
+- `/mobile`: the iOS simulator on macOS with Xcode, the Android emulator on all three systems.
 - The agent answers in the language you write in. Some of the plugin's own messages (guard confirmations, `/doctor`)
   are in Russian for now — translations are welcome.
 - Already in Antigravity, no need to add: `/plan`, `/goal`, `/schedule`, `/learn`, `/browser`, rewinding a
@@ -377,6 +492,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 
 ```bash
 python3 tests/run_tests.py                                # offline tests: hooks, guard, installer
+python3 tests/live_mobile.py --ios                      # live check of /mobile: boots a simulator (or --android: an emulator)
 python3 antigravity-plus/hooks/guard.py --test "rm -rf ~"
 python3 antigravity-plus/hooks/checks.py path/to/file.py  # the same check an agent's edit gets
 ```
@@ -393,11 +509,14 @@ antigravity-plus/
 ├── hooks/       session_start  instructions  guard  check_edit  memory_sync  stop
 │                conversation (the user's messages, full access)  checks (edit checks, secrets)
 │                coord (several agents)  parallel (background work)  speed (sandbox, context, error loops)
+│                facts (facts in reports)  objective (objective answers)  memory_hints (auto-memory)
 │                compat (macOS / Linux / Windows)
 ├── rules/AGENTS.md                 # always-on working rules
+├── rules/FACTS.md                  # facts and sources: don't invent, check, cite
+├── rules/OBJECTIVE.md              # objective answers: check before you agree
 ├── agents/      explorer  researcher  worker  code-reviewer  security-auditor  debugger  test-writer
 ├── sidecars/usage/                 # the usage side panel
-└── skills/      20 commands: init remember memory handoff parallel review commit pr … settings git-init doctor
+└── skills/      21 commands: init remember memory handoff parallel review commit pr … mobile settings git-init doctor
 install.py, install.sh, install.cmd # installer for every OS
 tests/                              # offline tests; CI: .github/workflows/tests.yml
 ```

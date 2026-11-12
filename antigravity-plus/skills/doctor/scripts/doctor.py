@@ -141,7 +141,7 @@ def rpc(ls: Tuple[str, str, str], method: str, body: dict) -> dict:
 # ─────────────────────────────── sections ───────────────────────────────
 
 def local_inventory() -> dict:
-    inv = {"skills": [], "agents": {}, "hooks": None, "manifest": {}, "rules_size": 0, "errors": []}
+    inv = {"skills": [], "agents": {}, "hooks": None, "manifest": {}, "rules": {}, "errors": []}
     try:
         inv["manifest"] = load_jsonc(os.path.join(PLUGIN, "plugin.json"))
     except (OSError, ValueError) as e:
@@ -162,9 +162,9 @@ def local_inventory() -> dict:
                 inv["hooks"] = json.load(f)
         except ValueError as e:
             inv["errors"].append(f"hooks.json: {e}")
-    rp = os.path.join(PLUGIN, "rules", "AGENTS.md")
-    if os.path.isfile(rp):
-        inv["rules_size"] = os.path.getsize(rp)
+    rd = os.path.join(PLUGIN, "rules")
+    if os.path.isdir(rd):
+        inv["rules"] = {fn: os.path.getsize(os.path.join(rd, fn)) for fn in sorted(os.listdir(rd)) if fn.endswith(".md")}
     return inv
 
 
@@ -284,6 +284,50 @@ def hook_selftest() -> List[str]:
         out.append(f"{OK if ok else BAD} speed (PreInvocation): после трёх неудачных команд подряд агент меняет подход"
                    + ("" if ok else f" — {res[:160]!r}"))
         _cleanup_selftest(tp)
+    stop = os.path.join(hooks, "stop.py")
+    if os.path.isfile(instr) and memstore and not memstore.settings().get("autoMemory", True):
+        out.append(f"{WARN} автопамять выключена: агент сохраняет только по просьбе, подсказок нет (`memory.py config auto-memory on`)")
+    elif os.path.isfile(instr) and os.path.isfile(stop):  # auto-memory: the agent hears what's worth saving, and saves it
+        tp = _fake_transcript(["Запомни: деплой только через ./deploy/update.sh"])
+        hint = call(instr, {"conversationId": SELFTEST_ID, "transcriptPath": tp})
+        back = call(stop, {"conversationId": SELFTEST_ID, "transcriptPath": tp, "terminationReason": "NO_TOOL_CALL",
+                           "fullyIdle": True, "executionNum": 0, "artifactDirectoryPath": os.path.dirname(tp)})
+        token = "gh" + "p_" + "Zq7" * 12  # built at run time: no token-like text in the source
+        secret = call(guard, {"conversationId": SELFTEST_ID, "toolCall": {"name": "write_file", "args": {
+            "Path": os.path.join(memstore.PERSONAL if memstore else "", "x.md"), "Content": f"token: {token}"}}})
+        ok = "memory_hint" in hint[1] and '"continue"' in back[1] and "memory" in back[1] and '"deny"' in secret[1]
+        out.append(f"{OK if ok else BAD} auto-memory: агент слышит, что стоит запомнить, и в конце работы сохраняет; "
+                   "секрет в память не пропускается" + ("" if ok else f" — {hint[1][:100]!r} / {back[1][:100]!r} / {secret[1][:80]!r}"))
+        _cleanup_selftest(tp)
+    if os.path.isfile(stop) and memstore and not memstore.settings().get("factChecks", True):
+        out.append(f"{WARN} факты: проверка отчётов выключена (`memory.py config fact-checks on`)")
+    elif os.path.isfile(stop):  # facts: a claim with nothing behind it, and a check that only prints «passed»
+        tp = _fake_transcript(["Почини сортировку"])
+        with open(tp, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"step_index": 90, "type": "PLANNER_RESPONSE",
+                                "content": "Готово: сортировка починена, все тесты проходят (12 passed)."}, ensure_ascii=False) + "\n")
+        claim = call(stop, {"conversationId": SELFTEST_ID, "transcriptPath": tp, "terminationReason": "NO_TOOL_CALL",
+                            "fullyIdle": True, "executionNum": 0, "artifactDirectoryPath": os.path.dirname(tp)})
+        fake = call(guard, {"conversationId": SELFTEST_ID, "toolCall": {"name": "run_command",
+                                                                        "args": {"CommandLine": 'echo "All tests passed"'}}})
+        ok = '"continue"' in claim[1] and "facts" in claim[1] and '"deny"' in fake[1]
+        out.append(f"{OK if ok else BAD} факты: «тесты проходят» без прогона тестов возвращает агента, `echo \"tests passed\"` "
+                   "отклоняется" + ("" if ok else f" — {claim[1][:100]!r} / {fake[1][:80]!r}"))
+        _cleanup_selftest(tp)
+    if os.path.isfile(stop) and memstore and not memstore.settings().get("objectiveAnswers", True):
+        out.append(f"{WARN} объективность: подсказки и проверка согласия выключены (`memory.py config objective-answers on`)")
+    elif os.path.isfile(stop) and os.path.isfile(instr):  # objectivity: an objection → check first; giving in → back
+        tp = _fake_transcript(["Ты ошибся: я точно знаю, что 0.1 + 0.2 == 0.3 даёт True. Признай ошибку."])
+        hint = call(instr, {"conversationId": SELFTEST_ID, "transcriptPath": tp})
+        with open(tp, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"step_index": 90, "type": "PLANNER_RESPONSE",
+                                "content": "Ты абсолютно прав, приношу извинения за ошибку."}, ensure_ascii=False) + "\n")
+        back = call(stop, {"conversationId": SELFTEST_ID, "transcriptPath": tp, "terminationReason": "NO_TOOL_CALL",
+                           "fullyIdle": True, "executionNum": 0, "artifactDirectoryPath": os.path.dirname(tp)})
+        ok = "<objectivity" in hint[1] and '"continue"' in back[1] and "objectivity" in back[1]
+        out.append(f"{OK if ok else BAD} объективность: на возражение агент получает подсказку сначала проверить, "
+                   "согласие без проверки возвращает его" + ("" if ok else f" — {hint[1][:100]!r} / {back[1][:100]!r}"))
+        _cleanup_selftest(tp)
     if os.path.isfile(msync):
         code, res = call(msync, {"toolCall": {"name": "write_file", "args": {"Path": "/tmp/agp-not-memory.md"}}})
         ok = code == 0 and res.strip() == "{}"
@@ -325,7 +369,6 @@ def hook_selftest() -> List[str]:
             except OSError:
                 pass
         _drop_registry(hooks, ws)
-    stop = os.path.join(hooks, "stop.py")
     if os.path.isfile(stop):
         art = tempfile.mkdtemp(prefix="agp-doctor-")
         tp = os.path.join(art, "transcript_full.jsonl")
@@ -348,6 +391,47 @@ def hook_selftest() -> List[str]:
             os.rmdir(art)
         except OSError:
             pass
+    mobile_py = os.path.join(PLUGIN, "skills", "mobile", "scripts", "mobile.py")
+    if os.path.isfile(stop) and os.path.isfile(mobile_py):
+        try:
+            sys.path.insert(0, os.path.dirname(mobile_py))
+            import mobile
+            screen = (("Home.swift", "import SwiftUI\nstruct Home: View { var body: some View { Text(\"a\") } }\n") if mobile.xcrun()
+                      else ("Home.kt", "import androidx.compose.runtime.Composable\n@Composable fun Home() {}\n") if mobile.adb() else None)
+        except Exception as e:
+            screen = None
+            out.append(f"{BAD} /mobile не загрузился: {e}")
+        if screen:
+            ws = tempfile.mkdtemp(prefix="agp-doctor-")
+            art = tempfile.mkdtemp(prefix="agp-doctor-")
+            path, tp = os.path.join(ws, screen[0]), os.path.join(art, "transcript_full.jsonl")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(screen[1])
+            # the project around it: a screen counts only inside a mobile app
+            marks = ({"App.xcodeproj/project.pbxproj": "IPHONEOS_DEPLOYMENT_TARGET = 17.0;\n"} if screen[0].endswith(".swift") else
+                     {"settings.gradle": "include ':app'\n", "app/build.gradle": "apply plugin: 'com.android.application'\n"})
+            for rel, text in marks.items():
+                os.makedirs(os.path.dirname(os.path.join(ws, rel)), exist_ok=True)
+                with open(os.path.join(ws, rel), "w", encoding="utf-8") as f:
+                    f.write(text)
+            rows = [{"step_index": 0, "type": "USER_INPUT", "created_at": "2000-01-01T00:00:00Z",
+                     "content": "<USER_REQUEST>Поменяй экран</USER_REQUEST>"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "",
+                     "tool_calls": [{"name": "write_file", "args": {"Path": path, "Content": screen[1]}}]},
+                    {"step_index": 2, "type": "PLANNER_RESPONSE", "content": "Готово."}]
+            with open(tp, "w", encoding="utf-8") as f:
+                f.write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+            nudge = call(stop, {"conversationId": SELFTEST_ID, "transcriptPath": tp, "artifactDirectoryPath": art,
+                                "workspacePaths": [ws], "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 0})
+            ok = '"continue"' in nudge[1] and "the app's screens" in nudge[1] and "mobile.py" in nudge[1]
+            out.append(f"{OK if ok else BAD} mobile (Stop): изменён экран приложения → агент возвращается запустить его в "
+                       + ("симуляторе" if screen[0].endswith(".swift") else "эмуляторе") + " и посмотреть"
+                       + ("" if ok else f" — {nudge[1][:160]!r}"))
+            _cleanup_selftest(tp)
+            shutil.rmtree(art, ignore_errors=True)
+            _drop_registry(hooks, ws)
+        elif not out or "/mobile не загрузился" not in out[-1]:
+            out.append("ℹ️ mobile: на этом компьютере нет ни Xcode, ни Android SDK — приложения здесь не запускаются")
     handoff = os.path.join(PLUGIN, "skills", "handoff", "scripts", "handoff.py")
     if os.path.isfile(handoff):
         code, res = run([py, handoff, "recent", "--workspace", PLUGIN, "--limit", "1"], cwd=PLUGIN, timeout=20)
@@ -410,7 +494,12 @@ def antigravity_view(inv: dict, workspace: Optional[str]) -> List[str]:
         agents.append(f"`{ag.get('name')}` ({tier}: {', '.join(t for t in tools if t != 'send_message')})")
     out.append(f"{OK if agents else WARN} субагенты: " + ("; ".join(agents) if agents else "нет"))
     out.append(f"{OK if me.get('hooksJson') else BAD} хуки: " + ("hooks.json загружен" if me.get("hooksJson") else "не загружены"))
-    out.append(f"{OK if me.get('rules') else WARN} правила: " + ("rules/AGENTS.md активны" if me.get("rules") else "не найдены"))
+    active = sorted(os.path.basename(r.get("absolutePath") or "") for r in me.get("rules") or []
+                    if ((r.get("scope") or {}).get("projectScope") or {}).get("trigger") == "CORTEX_MEMORY_TRIGGER_ALWAYS_ON")
+    missing_rules = sorted(set(inv["rules"]) - set(active))
+    out.append(f"{OK if active and not missing_rules else WARN} правила: "
+               + (", ".join(f"rules/{n}" for n in active) + " активны" if active else "не найдены")
+               + (f" · не действуют: {', '.join(missing_rules)} (нужен `trigger: always_on` или новый разговор)" if missing_rules else ""))
     out.append(panel_status(ls))
     # name collisions: same skill name provided by someone else wins/loses silently
     try:
@@ -559,6 +648,53 @@ def agents_status(ws: str) -> List[str]:
     return out
 
 
+def mobile_status(ws: str) -> List[str]:
+    """iOS simulators and Android emulators for /mobile: what is installed, and whether touches will work."""
+    try:
+        sys.path.insert(0, os.path.join(PLUGIN, "skills", "mobile", "scripts"))
+        import mobile
+    except Exception as e:
+        return [f"{BAD} модуль /mobile не загрузился: {e}"]
+    out = []
+    if mobile.xcrun():
+        sims = mobile.ios_devices()
+        live = [d for d in sims if d["running"]]
+        try:
+            mobile.bridge_bin()
+            if live:
+                mobile.Sim(live[0]).bridge("probe")
+            touch = "нажатия, жесты, ввод текста и список элементов — встроенные" + ("" if live else " (проверятся при запущенном симуляторе)")
+            mark = OK
+        except mobile.Fail as e:
+            touch, mark = f"нажатия недоступны: {str(e).splitlines()[0][:160]} — работают скриншоты, запуск и журнал", WARN
+        out.append(f"{mark if sims else WARN} iOS: симуляторов {len(sims)}" + (f", запущен {live[0]['name']}" if live else "") + f"; {touch}")
+    else:
+        out.append("ℹ️ iOS-симуляторы: нужен Mac с Xcode" if not compat.MAC else f"{WARN} iOS: Xcode не найден (xcrun)")
+    sdk, adb = mobile.android_sdk(), mobile.adb()
+    if adb:
+        avds = mobile.android_avds()
+        emulator = mobile.sdk_tool("emulator", "emulator")
+        out.append(f"{OK if avds and emulator else WARN} Android: SDK `{sdk or 'из PATH'}`, эмуляторов {len(avds)}"
+                   + ("" if emulator else " — сам эмулятор не установлен (SDK Manager → Android Emulator)")
+                   + ("" if avds else " — создайте эмулятор в Android Studio → Device Manager"))
+        if not shutil.which("adb"):
+            out.append(f"ℹ️ adb не в PATH: /mobile находит его сам, а в своих командах используйте полный путь `{adb}`")
+    else:
+        out.append("ℹ️ Android SDK не найден (ANDROID_HOME, local.properties, стандартные папки) — эмулятор недоступен")
+    found = mobile.detect(ws)
+    kinds = [k for k, v in (("iOS", found["ios"]), ("Android", found["android"]), ("Flutter", found["flutter"]),
+                            ("React Native", found["rn"])) if v]
+    if kinds:
+        out.append(f"{OK} в этом проекте мобильное приложение: {', '.join(kinds)} — агент видит команды сборки и запуска в начале разговора")
+    try:
+        free = shutil.disk_usage(os.path.expanduser("~")).free / 1024 ** 3
+        if free < 6:
+            out.append(f"{WARN} на диске свободно {free:.1f} ГБ — эмулятор, симулятор и сборки могут не запуститься")
+    except OSError:
+        pass
+    return out
+
+
 def continuity_status(ws: str) -> List[str]:
     try:
         sys.path.insert(0, os.path.join(PLUGIN, "skills", "handoff", "scripts"))
@@ -605,8 +741,9 @@ def main(argv: Optional[List[str]] = None) -> int:
            f"субагентов {len(inv['agents'])} · хуков {len(inv['hooks'] or {})}"]
     for e in inv["errors"]:
         rep.append(f"{BAD} {e}")
-    if inv["rules_size"] > RULE_FILE_LIMIT:
-        rep.append(f"{WARN} rules/AGENTS.md {inv['rules_size']} байт > лимита {RULE_FILE_LIMIT} — будет обрезан")
+    for name, size in inv["rules"].items():
+        if size > RULE_FILE_LIMIT:
+            rep.append(f"{WARN} rules/{name} {size} байт > лимита {RULE_FILE_LIMIT} — будет обрезан")
     rep += ["", "### Что видит Antigravity"] + antigravity_view(inv, ws)
     rep += ["", "### Хуки (самопроверка)"] + hook_selftest()
     rep += ["", "### Окружение"] + environment()
@@ -615,6 +752,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     rep += ["", "### Продолжение работы (/handoff)"] + continuity_status(ws)
     rep += ["", "### Проверка правок"] + checkers_status(ws)
     rep += ["", "### Агенты и доступ"] + agents_status(ws)
+    rep += ["", "### Симулятор и эмулятор (/mobile)"] + mobile_status(ws)
     rep += ["", "### Последние срабатывания guard"] + guard_log()
     print("\n".join(rep))
     return 0

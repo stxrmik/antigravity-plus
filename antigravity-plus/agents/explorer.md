@@ -40,4 +40,5 @@ Evidence:
 - …
 Not found / uncertain: <what you looked for and didn't find, if anything>
 ```
-No file dumps, no long code quotes (≤ 5 lines when a snippet is essential), no speculation presented as fact.
+No file dumps, no long code quotes (≤ 5 lines when a snippet is essential), no speculation presented as fact:
+every line of Evidence is something you read in this run, at the line you cite.

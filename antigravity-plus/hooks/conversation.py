@@ -8,9 +8,10 @@ messages in ~/.gemini/antigravity-plus/state/<conversationId>.json. Shared by:
   * hooks/guard.py (PreToolUse) — asks before pushing/deploying/committing when the user said not to.
 Also detects standing restrictions ("не пушь", "don't commit") and their lifting ("пушь", "commit it"), and tracks
 the background work the agent started — subagents, commands that went to the background, timers — what reported
-back and how the agent waits, for hooks/parallel.py; and how its steps go — the context size, command results
-(sandbox failures and their retries outside it, failures in a row), very large reads — for hooks/speed.py.
-Stdlib only, Python 3.8+.
+back and how the agent waits, for hooks/parallel.py; how its steps go — the context size, command results
+(sandbox failures and their retries outside it, failures in a row), very large reads — for hooks/speed.py; and what
+it learns from — memory writes, commands on servers and deploys, failing commands it got past — for
+hooks/memory_hints.py. Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
 
@@ -62,6 +63,18 @@ SUBCOMMANDS = {"git", "npm", "pnpm", "yarn", "bun", "go", "cargo", "make", "pip"
 SCRIPTED = re.compile(r"(python[\d.]*|py|node|deno|ruby|perl|php|bash|sh|zsh|pwsh|powershell|osascript|npx|uvx)")
 ABSOLUTE = re.compile(r"[/\\~]|[A-Za-z]:[\\/]")  # /usr/bin/x, ~/bin/x, C:\x, C:/x, \\server\share — on any OS
 SEP = re.compile(r"[\\/]")
+# What the agent learns from (hooks/memory_hints.py): memory files it writes, commands on servers and deploys, and runs
+# of failing commands that finally worked.
+MEMORY_PATH = re.compile(r"[/\\]\.gemini[/\\]antigravity-plus[/\\]memory[/\\](?:personal|projects[/\\][^/\\]+)[/\\][^/\\]+\.md$"
+                         r"|[/\\]\.claude[/\\]projects[/\\][^/\\]+[/\\]memory[/\\][^/\\]+\.md$", re.I)
+REMOTE = re.compile(r"(^|[/\s])(ssh|scp|rsync|sftp|mosh|sshpass|kubectl|helm|ansible\S*|terraform|pulumi|gcloud|doctl|hcloud|"
+                    r"flyctl|fly|vercel|netlify|heroku|wrangler|railway|aws|az|kamal)(\s|$)|deploy", re.I)
+FIXED_WITHIN = 6          # commands after a run of failures within which a success counts as the way that works
+LEARN_KEEP = 40
+# Failing tests, builds and linters are the agent's own work in progress, not something about the environment to learn.
+CHECK_RUN = re.compile(r"\b(pytest|unittest|tox|nox|jest|vitest|mocha|tsc|eslint|ruff|mypy|flake8|pylint|xcodebuild|"
+                       r"swiftlint|phpunit|rspec|ctest)\b|\b(npm|pnpm|yarn|bun)\s+(run\s+)?(test|build|lint|check|typecheck)\b"
+                       r"|\b(go|cargo|swift|dotnet)\s+(test|build|vet|check)\b|\bmake\s+(test|check|build|lint)\b", re.I)
 REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
 TAGS = re.compile(r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|[A-Z_]+_METADATA)>.*?</\1>", re.S)
 
@@ -353,7 +366,10 @@ def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
     edits failing in a row (a success that changes something resets it; a grep without matches isn't a failure);
     sbx — {command key: index} of commands that failed inside the terminal sandbox; sbx_fail — the latest such failure;
     sbx_new — keys that then worked with BypassSandbox (to remember for the project); sbx_ok — keys that worked inside
-    the sandbox; big — the latest very large tool result (a whole long file, a huge output)."""
+    the sandbox; big — the latest very large tool result (a whole long file, a huge output). For hooks/memory_hints.py:
+    remote — [{k: command key, s: step}] of commands on servers and deploys; loop — the current run of 3+ failing
+    commands; fixed — [{what, n, s}] such runs that a success soon ended; mem_any / mem_saved — the latest step that
+    wrote into a memory folder / wrote a memory (not a handoff note); mem_files — the memories written here."""
     calls = st.setdefault("calls", {})
     if kind == b"PLANNER_RESPONSE":
         tokens = dict((k.decode(), int(v)) for k, v in TOKENS.findall(raw[:600] + raw[-600:]))
@@ -371,6 +387,8 @@ def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
                 entry.update(cmd=str(a.get("CommandLine") or "")[:400], bp=bool(a.get("BypassSandbox")))
             elif entry["n"] == "read_file":
                 entry.update(path=str(a.get("Path") or ""), rng=bool(a.get("StartLine") or a.get("EndLine")))
+            elif entry["n"] in ("write_file", "edit_file"):
+                entry.update(path=str(a.get("Path") or a.get("TargetFile") or "")[:400])
             pending.append(entry)
         st["calls_pending"] = pending
         return
@@ -390,7 +408,13 @@ def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
         calls["n_cmd"] = n = calls.get("n_cmd", 0) + 1
         sbx = calls.setdefault("sbx", {})
         out = content[m.end():].split("Command output:", 1)[-1]  # the command's own output, not Antigravity's note
+        if key and REMOTE.search(key):
+            _learned(calls, "remote", {"k": key, "s": step})
+        loop = calls.get("loop")
         if code == 0:
+            if loop and n - loop.get("at", 0) <= FIXED_WITHIN:
+                _learned(calls, "fixed", {"what": loop.get("what", ""), "n": loop.get("n", 0), "s": step})
+            calls.pop("loop", None)
             calls["fail_run"] = 0
             if key and call.get("bp") and key in sbx and n - sbx[key] <= SBX_WINDOW:
                 calls.setdefault("sbx_new", []).append({"key": key, "cmd": cmd[:160]})
@@ -406,6 +430,8 @@ def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
                 calls["sbx_fail"] = {"key": key, "step": step}
         elif not (code == 1 and NO_MATCH.match(cmd.strip()) and len(out.strip()) < 300):
             _failed(calls, cmd[:120], step)
+            if calls["fail_run"] >= 3 and not CHECK_RUN.search(cmd[:300]):  # a success soon after: it found what works
+                calls["loop"] = {"what": cmd[:120], "n": calls["fail_run"], "at": n}
         if len(content) > BIG_OUTPUT:
             calls["big"] = {"step": step, "what": f"the output of `{cmd[:60]}`", "chars": len(content)}
     elif name == "read_file":
@@ -422,6 +448,22 @@ def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
             _failed(calls, f"{name} failed", step)
         else:
             calls["fail_run"] = 0  # a change went in: progress, not a loop
+            path = call.get("path", "")
+            name = SEP.split(path)[-1]
+            if MEMORY_PATH.search(path) and name != "MEMORY.md":
+                calls["mem_any"] = step  # handoff notes live there too: they count as a write, not as a memory
+                if not name.startswith("handoff-"):
+                    calls["mem_saved"] = step
+                    files = calls.setdefault("mem_files", [])
+                    if name not in files:
+                        files.append(name)
+                        del files[:-30]
+
+
+def _learned(calls: dict, kind: str, item: dict) -> None:
+    items = calls.setdefault(kind, [])
+    items.append(item)
+    del items[:-LEARN_KEEP]
 
 
 def _failed(calls: dict, what: str, step: int) -> None:

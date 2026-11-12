@@ -13,6 +13,9 @@ Subagents (no user messages in their transcript) get nothing of that. Everyone, 
 problems hooks/check_edit.py found in files written since the previous step, the other agents working in the
 project (hooks/coord.py), hints that keep it working while its subagents and background commands run
 (hooks/parallel.py), and hints on the sandbox, the context budget and loops of failing commands (hooks/speed.py).
+The main agent also gets, with a new user message, the saved memories it is about, and hears when the message sounds
+worth remembering (hooks/memory_hints.py), asks for facts it has to look up and cite (hooks/facts.py), or calls for
+a straight answer — an objection, a guess at a cause, a request for an opinion (hooks/objective.py).
 
 Contract: JSON on stdin (conversationId, transcriptPath, lastUserInput, invocationNum, …) →
 {"injectSteps": [{"ephemeralMessage": "…"}]} or {}. Never fails loudly. Stdlib only, Python 3.8+.
@@ -175,13 +178,51 @@ def speed_work(payload: dict) -> Optional[str]:
     return msg
 
 
+def memory_work(payload: dict) -> Optional[str]:
+    """Memory for a new user message (main agent only; hooks/memory_hints.py): the saved memories it is about, and
+    whether it sounds lasting enough to save along the way."""
+    import memory_hints
+    st = conv.load(payload)
+    parts = []
+    for part in (memory_hints.recall, memory_hints.message):
+        try:
+            parts.append(part(payload, st))
+        except Exception as e:  # one half failing must not hide the other
+            print(f"instructions: {part.__name__}: {e}", file=sys.stderr)
+    if st is not None and isinstance(payload.get("conversationId"), str):
+        conv.store(payload["conversationId"], st)
+    return "\n".join(p for p in parts if p) or None
+
+
+def facts_work(payload: dict) -> Optional[str]:
+    """A question that needs facts from outside or from the code: look it up and cite the source (hooks/facts.py)."""
+    import facts
+    st = conv.load(payload)
+    msg = facts.message(payload, st)
+    if st is not None and isinstance(payload.get("conversationId"), str):
+        conv.store(payload["conversationId"], st)
+    return msg
+
+
+def objective_work(payload: dict) -> Optional[str]:
+    """A message that disputes what the agent said, guesses at a cause, asks for its opinion or is worded to get a
+    «да»: what an honest answer to it takes (hooks/objective.py)."""
+    import objective
+    st = conv.load(payload)
+    msg = objective.message(payload, st)
+    if st is not None and isinstance(payload.get("conversationId"), str):
+        conv.store(payload["conversationId"], st)
+    return msg
+
+
 def main() -> None:
     steps = []
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         payload = None
-    for part in (decide, edit_checks, other_agents, parallel_work, speed_work) if isinstance(payload, dict) else ():
+    for part in (decide, edit_checks, other_agents, parallel_work, speed_work, memory_work, facts_work,
+                 objective_work) if isinstance(payload, dict) else ():
         try:
             msg = part(payload)
         except Exception as e:  # a hook must never break the conversation

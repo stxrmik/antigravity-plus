@@ -46,7 +46,7 @@ Your report goes to the lead agent (send it as your final message):
 ```
 Done: <one line — what now works> | Partly done: <what's missing and why>
 Changed: path — what (one line per file)
-Verified: <command → result> | Not verified: <why>
+Verified: <command → the result line as it printed, e.g. `29 passed`> | Not verified: <why>
 Needs from others: <changes outside your files, with exact content> | none
 Notes: <decisions you made, risks>
 ```

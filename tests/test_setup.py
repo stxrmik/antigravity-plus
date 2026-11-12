@@ -69,6 +69,18 @@ ann("English «Let me run the tests.»", "Let me run the tests.", [], True)
 ann("a real final report (long)", "Сделал утилиту wordcount.py: считает слова в файле, путь — аргумент. " * 6, [w("a.py"), cmd("pytest")], False)
 ann("short done message", "Готово: wordcount.py и тест, тест проходит.", [w("a.py"), cmd("pytest")], False)
 ann("announce with a question", "Запускаю тесты? Или сначала посмотрите код?", [], False)
+DIAGNOSIS = ("Дело не в округлении float. В [calc.py](file:///x/proj/calc.py#L7) скидка вычитается напрямую как абсолютное "
+             "число (`subtotal - discount`, то есть `300 - 10 = 290`), а тест ожидает вычитание процента (`300 - 10% = 270`), "
+             "поэтому `test_discount` и падает на сравнении с 270.\n\n")
+ann("a diagnosis that ends «Исправляем…» (live failure)", DIAGNOSIS + "Исправляем расчёт скидки как процента в "
+    "[calc.py](file:///x/proj/calc.py).", [], True)
+ann("…«Сейчас внесу правку и перезапущу тест.»", DIAGNOSIS + "Сейчас внесу правку и перезапущу тест.", [], True)
+ann("…«I'll fix the discount now.»", DIAGNOSIS + "I'll fix the discount calculation now.", [], True)
+ann("a diagnosis that ends with a question", DIAGNOSIS + "Исправить расчёт скидки как процента в calc.py?", [], False)
+ann("a long report that ends «Теперь всё работает.»", DIAGNOSIS + "Исправил расчёт, тест проходит. Теперь всё работает.",
+    [w("a.py"), cmd("pytest")], False)
+ann("a long report that ends in the past tense", DIAGNOSIS + "Исправил расчёт скидки в calc.py и перезапустил тест: 2 passed.",
+    [w("a.py"), cmd("pytest")], False)
 for d in (ws, art): shutil.rmtree(d, ignore_errors=True)
 clear_state()
 print("ALL OK" if ok else "FAILURES")

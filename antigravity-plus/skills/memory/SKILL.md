@@ -23,7 +23,7 @@ On your own, use only search: `memory.py search "<words>" --workspace "<ws>"` be
 | "забудь …", "удали из памяти …" | **forget** |
 | "почисти", "наведи порядок", "сожми память" | **clean up** |
 | "запомни …" | follow the `remember` skill instead |
-| "выключи/включи автопамять", "не делись с Claude Code", "показывай N последних разговоров", "не заставляй доделывать задачи", "не проверяй правки", "не запускай ревью сам", "не напоминай про тесты", "не защищай секреты", "не настраивай проекты сам" | **settings** |
+| "выключи/включи автопамять", "не делись с Claude Code", "показывай N последних разговоров", "не заставляй доделывать задачи", "не проверяй правки", "не запускай ревью сам", "не напоминай про тесты", "не защищай секреты", "не настраивай проекты сам", "не проверяй факты в отчётах" | **settings** |
 
 ### show
 1. Run `python3 "<skill_dir>/scripts/memory.py" show --workspace "<workspace-root>"`.
@@ -50,7 +50,7 @@ On your own, use only search: `memory.py search "<words>" --workspace "<ws>"` be
 5. Run `memory.py sync --workspace "<ws>"`, then report what changed.
 
 ### settings
-- `memory.py config auto-memory on|off`. When off, the agent saves memories only when asked.
+- `memory.py config auto-memory on|off`. When on (default), the agent saves what it learns on its own, and Antigravity Plus points the moments out: a lasting thing the user said, and the end of work on servers and deploys, of a failure it got past or of a long stretch of work. With each new request it also shows the agent the saved memories that request is about. When off, the agent saves memories only when asked, and no memories are shown per request.
 - `memory.py config share-with-claude-code on|off`. When off, project memory lives in `~/.gemini/antigravity-plus/memory/projects/` and Claude Code's memory isn't loaded. Existing files are not moved.
 - `memory.py config recent-conversations N` sets how many recent conversations of the project the agent sees at the start (default 3, `0` turns the list off).
 - `memory.py config finish-tasks on|off`. When on (default), the agent is sent back once if it stops with open `task.md` items that nothing blocks.
@@ -58,6 +58,8 @@ On your own, use only search: `memory.py search "<words>" --workspace "<ws>"` be
 - `memory.py config auto-verify on|off`. When on (default), the agent that changed code and ran no tests, build or program afterwards is reminded once to verify before reporting done.
 - `memory.py config auto-review on|off`. When on (default), the agent that changed 3+ code files in a turn without a review is reminded once to run /review before reporting done.
 - `memory.py config check-edits on|off`. When on (default), every file the agent writes is checked (syntax, the project's linters) and errors are shown to it before its next step.
+- `memory.py config fact-checks on|off`. When on (default), the agent's final report is held against the conversation: «тесты проходят», «задеплоил», file links, line references, links and — in an answer to a question — versions and prices with nothing to back them send it back once to check or correct them; a question that needs facts gets a hint to look them up and cite sources; a command that only prints success is refused.
+- `memory.py config objective-answers on|off`. When on (default), a user message that disputes what the agent said, guesses at a cause, asks for its opinion or is worded to get a «да» comes with a hint on what an honest answer takes (check before agreeing, verdict first), and the agent that opens with «Вы правы» or an apology after an objection or a guess without having looked at anything in that turn is sent back once to check. The rules in `rules/OBJECTIVE.md` stay on either way.
 - `memory.py config auto-setup on|off`. When on (default), the agent sets up projects on its own: creates a git repository (/git-init) before its first change in a project without one, and runs /init in a project without rules.
 
 After changing a setting, say in one line what changed and that it applies to new conversations.

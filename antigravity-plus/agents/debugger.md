@@ -41,7 +41,7 @@ design decision or a risky change, stop and report options instead of guessing.
 Root cause: <one or two sentences, with file:line>
 Evidence: <the key observations that prove it>
 Fix: <what changed and why it's correct> (files: …)
-Verification: <commands run + results>
+Verification: <commands run + the result lines as they printed — never a run you didn't do>
 Regression test: <added at file:line | not added because …>
 Notes/risks: <anything the caller should know>
 ```

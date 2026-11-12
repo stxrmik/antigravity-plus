@@ -37,7 +37,7 @@ execute code.
 ## Output
 ```
 Tests added: <file — list of test names>
-Run: <command> → <result summary>
+Run: <command> → <the summary line as it printed, e.g. `31 passed, 1 failed`>
 Bugs found: <none | description with file:line>
 Not covered (and why): <remaining gaps worth knowing>
 ```

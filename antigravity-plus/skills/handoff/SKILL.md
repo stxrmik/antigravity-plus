@@ -63,6 +63,8 @@ On your own: when the user wraps up with work left («на сегодня всё
    - Write it in the user's language. Be specific: names of files, functions, commands, servers.
    - No secrets, passwords, tokens or keys. Refer to where they live (e.g. "пароль в .env").
    - Don't edit `MEMORY.md`: the index line is added automatically.
+   - Facts that outlive this task — how to deploy, a gotcha you hit, the user's preferences — also go to memory as
+     separate files (rules «Memory»): the note is deleted once the work is done, memories stay.
 
 3. **Reply** in 2–3 lines:
    `💾 Передача сохранена: [<file>](<path>)`, then one line on what's left, then: «Откройте новый разговор и
