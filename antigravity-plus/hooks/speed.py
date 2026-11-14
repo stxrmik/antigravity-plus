@@ -23,9 +23,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import compat
 import conversation as conv
@@ -34,10 +35,23 @@ PLUGIN = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__))
 STORE = os.path.expanduser("~/.gemini/antigravity-plus/sandbox.json")
 AG_CONFIG = os.path.expanduser("~/.gemini/config/config.json")
 CTX_WARN = 150_000       # tokens per model call: steps get slower, details from the middle get lost
-CTX_HIGH = 220_000       # near the point where Antigravity compacts the conversation
+CTX_HIGH = 220_000       # near the ~250k threshold where Antigravity compacts Gemini conversations (limit ~300k)
 FAIL_RUN = 3             # failures in a row before the error-loop hint (again at twice that)
 FORGET_AFTER = 2         # successes inside the sandbox that make a remembered command unnecessary
 KEEP = 20                # remembered commands per project
+
+
+def ctx_limits(model: str) -> Tuple[int, int, str]:
+    """(warn, high, note) context thresholds for `model`. In Antigravity 2.x Gemini conversations have a ~300k limit
+    and auto-compact around ~250k (Flash-Lite subagents: ~128k compaction, ~168k limit), while Claude 5.5 runs up to ~840k."""
+    m = (model or "").lower()
+    if re.search(r"flash[-_ ]?lite", m):
+        return 80_000, 110_000, " (~128k compaction, ~168k limit)"
+    if "gemini" in m:
+        return CTX_WARN, CTX_HIGH, " (~250k compaction, ~300k limit)"
+    if re.search(r"(opus|sonnet)[- ]?5[.-]5", m):
+        return 180_000, 720_000, " (~840k compaction)"
+    return CTX_WARN, CTX_HIGH, ""
 
 
 def setting(key: str = "speedHints") -> bool:
@@ -193,9 +207,12 @@ def message(payload: dict, st: Optional[dict]) -> Optional[str]:
                        + (" A failure you can't explain → the `debugger` subagent." if main else "")))
 
     ctx = calls.get("ctx", 0)
-    if sp.get("ctx_cp") != len(st.get("checkpoints") or []) or ctx < CTX_WARN * 0.7:
+    warn, high, ctx_note = ctx_limits(str(payload.get("modelName") or ""))
+    if sp.get("ctx_cp") != len(st.get("checkpoints") or []) or ctx < warn * 0.7:
         sp["ctx_cp"], sp["ctx_level"] = len(st.get("checkpoints") or []), 0  # compacted: the context is small again
-    ctx_level = 2 if ctx >= CTX_HIGH else 1 if ctx >= CTX_WARN else 0
+    elif sp.get("ctx_level", 0) >= 2 and ctx < high * 0.85:
+        sp["ctx_level"] = 1 if ctx >= warn else 0  # switched to a larger-window model (e.g. Gemini → Claude 5.5)
+    ctx_level = 2 if ctx >= high else 1 if ctx >= warn else 0
     ctx_told = ctx_level > sp.get("ctx_level", 0)
     if ctx_told:
         sp["ctx_level"] = ctx_level
@@ -207,7 +224,7 @@ def message(payload: dict, st: Optional[dict]) -> Optional[str]:
                                    "remains, suggest /handoff to continue in a fresh conversation." if main else "."))
         else:
             text = (f"The context is ~{ctx // 1000}k tokens — close to the point where Antigravity compacts the "
-                    "conversation and drops details. Keep task.md current so nothing gets lost"
+                    f"conversation{ctx_note} and drops details. Keep task.md current so nothing gets lost"
                     + (", save to memory what a future conversation would need and isn't saved yet — how the servers "
                        "and deploys work, the cause of a stubborn failure, the user's preferences (rules: «Memory»)"
                        if main and setting("autoMemory") else "")

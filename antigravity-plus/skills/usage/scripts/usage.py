@@ -125,11 +125,16 @@ class Pricing:
         m = self.lookup(model_name)
         return (m or {}).get("context_window") or self.cfg.get("default_context_window", 200000)
 
+    def compaction_threshold(self, model_name: str) -> Optional[int]:
+        m = self.lookup(model_name)
+        val = (m or {}).get("compaction_threshold")
+        return int(val) if isinstance(val, int) and val > 0 else None
+
     def rates(self, m: dict, ts: Optional[dt.datetime]) -> dict:
         """Prices of model entry `m` for a call made at `ts`: the chosen service tier (it replaces the
-        standard prices and their price_changes), then every price change dated on or before that day."""
+        standard prices, their price_changes and long_context), then every price change dated on or before that day."""
         t = (m.get("service_tiers") or {}).get(self.service_tier or "")
-        r = {**m, "price_changes": [], **t} if t else m
+        r = {**m, "price_changes": [], "long_context": None, **t} if t else m
         day = (ts or dt.datetime.now(dt.timezone.utc)).astimezone().strftime("%Y-%m-%d")
         for ch in sorted(r.get("price_changes") or [], key=lambda x: x["from"]):
             if ch["from"] <= day:
@@ -145,7 +150,7 @@ class Pricing:
         tier = self.rates(m, c.ts)
         lc = tier.get("long_context")
         if lc and c.prompt > lc.get("threshold", 10**12):
-            tier = {**m, **lc}
+            tier = {**tier, **lc}
         in_rate = tier.get("cache_write", tier["input"]) if m.get("uncached_input_as_cache_write") else tier["input"]
         p_in = c.input * in_rate / 1e6
         p_cr = c.cache_read * tier.get("cache_read", tier["input"]) / 1e6
@@ -458,8 +463,10 @@ def render_markdown(s: Session, pricing: Pricing, max_turns: int = 10) -> str:
         last = s.calls[-1]
         peak = max(s.calls, key=lambda c: c.prompt)
         win = pricing.context_window(last.model)
+        comp = pricing.compaction_threshold(last.model)
+        comp_note = f" (сжатие ~{k(comp)})" if comp and comp < win else ""
         out.append(f"**Контекст:** сейчас {k(last.prompt)} / {k(win)} `{bar(last.prompt / win)}` "
-                   f"{last.prompt / win:.0%} · пик {k(peak.prompt)}")
+                   f"{last.prompt / win:.0%}{comp_note} · пик {k(peak.prompt)}")
         avg_turn = grand.cost / max(1, len(s.turns))
         out.append(f"**Средняя цена хода:** {usd(avg_turn)} · **Средний вывод на вызов:** {k(own.output / max(1, own.calls))}")
     out.append("")
@@ -540,6 +547,7 @@ def render_html(s: Session, pricing: Pricing) -> str:
     grand.merge(subagent_totals(s))
     last = s.calls[-1] if s.calls else None
     win = pricing.context_window(last.model) if last else 200000
+    comp = pricing.compaction_threshold(last.model) if last else None
     peak = max((c.prompt for c in s.calls), default=0)
 
     # stacked bars per call
@@ -557,10 +565,13 @@ def render_html(s: Session, pricing: Pricing) -> str:
             if h > 0:
                 rects.append(f'<rect x="{x:.1f}" y="{y:.1f}" width="{max(1.0, bw - 1):.1f}" height="{h:.1f}" fill="{color}" rx="1">'
                              f'<title>шаг {c.step} · ход {c.turn}\nкэш {n(c.cache_read)} · ввод {n(c.input)} · вывод {n(c.output)}\n{usd(c.cost)}</title></rect>')
-    # context window line
+    # context window & compaction lines (pointer-events="none" so they sit cleanly over call bars)
     ctx_y = H - min(1.0, win / maxv) * (H - 10)
-    ctx_line = (f'<line x1="0" x2="{W}" y1="{ctx_y:.1f}" y2="{ctx_y:.1f}" stroke="currentColor" stroke-dasharray="4 4" opacity=".35"/>'
+    ctx_line = (f'<line x1="0" x2="{W}" y1="{ctx_y:.1f}" y2="{ctx_y:.1f}" stroke="currentColor" stroke-dasharray="4 4" opacity=".35" pointer-events="none"/>'
                 if win <= maxv * 1.05 else "")
+    if comp and comp < win and comp <= maxv * 1.05:
+        comp_y = H - min(1.0, comp / maxv) * (H - 10)
+        ctx_line += f'<line x1="0" x2="{W}" y1="{comp_y:.1f}" y2="{comp_y:.1f}" stroke="#fab219" stroke-dasharray="3 3" opacity=".55" pointer-events="none"/>'
 
     turns_rows = []
     max_turn_cost = max((totals_of(t.calls).cost for t in s.turns), default=0) or 1
@@ -581,7 +592,8 @@ def render_html(s: Session, pricing: Pricing) -> str:
         kpi("Всего токенов", k(grand.total), f"{own.calls} вызовов · {len(s.turns)} ходов"),
         kpi("≈ API-цена", usd(grand.cost), f"кэш сэкономил {usd(saved)}" if saved > 0 else ""),
         kpi("Попадание в кэш", f"{grand.hit_rate:.0%}", f"вывод {k(grand.output)}"),
-        kpi("Контекст", f"{k(last.prompt) if last else 0} / {k(win)}", f"пик {k(peak)}"),
+        kpi("Контекст", f"{k(last.prompt) if last else 0} / {k(win)}",
+            f"пик {k(peak)}" + (f" · сжатие ~{k(comp)}" if comp and comp < win else "")),
     ])
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -600,7 +612,7 @@ def render_html(s: Session, pricing: Pricing) -> str:
       <span><span class="inline-block w-2 h-2 rounded-sm" style="background:#34d399"></span> вывод</span>
       <span class="ml-auto">токены на каждый вызов модели (наведите для деталей)</span>
     </div>
-    <svg viewBox="0 0 {W} {H}" class="w-full" style="height:{H}px" preserveAspectRatio="none">{ctx_line}{''.join(rects)}</svg>
+    <svg viewBox="0 0 {W} {H}" class="w-full" style="height:{H}px" preserveAspectRatio="none">{''.join(rects)}{ctx_line}</svg>
   </div>
   <div class="space-y-1">{''.join(turns_rows)}</div>
 </div></body></html>"""
@@ -689,7 +701,7 @@ def render_all(roots: List[str], pricing: Pricing, days: Optional[int], limit: i
 # ─────────────────────────────── JSON (side panel) ─────────────────────────
 
 CACHE_PATH = os.path.expanduser("~/.gemini/antigravity-plus/usage-cache.json")
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 
 def _iso(ts: Optional[dt.datetime]) -> Optional[str]:
@@ -722,8 +734,12 @@ def _context(s: Session, pricing: Pricing) -> Optional[dict]:
         return None
     last = s.calls[-1]
     win = pricing.context_window(last.model)
-    return {"current": last.prompt, "peak": max(c.prompt for c in s.calls), "window": win, "model": last.model,
-            "fraction": round(last.prompt / win, 4) if win else None}
+    comp = pricing.compaction_threshold(last.model)
+    res = {"current": last.prompt, "peak": max(c.prompt for c in s.calls), "window": win, "model": last.model,
+           "fraction": round(last.prompt / win, 4) if win else None}
+    if comp:
+        res["compaction"] = comp
+    return res
 
 
 def session_json(s: Session, pricing: Pricing) -> dict:
@@ -908,7 +924,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="only sessions active in the last N days (implies --all unless a conversation is given)")
     ap.add_argument("--limit", type=int, default=15, help="with --all: max sessions listed")
     ap.add_argument("--turns", type=int, default=10, help="max turns shown in the per-turn table")
-    ap.add_argument("--model", help="force pricing model (e.g. 'claude-opus-5.5', 'gemini-3-pro')")
+    ap.add_argument("--model", help="force pricing model (e.g. 'claude-opus-5.5', 'gemini-4-carbon')")
     ap.add_argument("--tier", choices=["standard", "batch", "flex", "priority", "contributor"],
                     help="Gemini API service tier; models without it in pricing.json keep standard prices")
     ap.add_argument("--pricing", default=DEFAULT_PRICING, help="path to pricing.json")

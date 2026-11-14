@@ -65,8 +65,10 @@ def think(tokens, cached):
     add("PLANNER_RESPONSE", content="…", input_tokens=tokens, cache_read_tokens=cached, output_tokens=200)
 
 
-def pre():
+def pre(model=""):
     p = {"conversationId": cid, "transcriptPath": tp, "artifactDirectoryPath": art, "workspacePaths": [WS]}
+    if model:
+        p["modelName"] = model
     out = subprocess.run([sys.executable, os.path.join(HOOKS, "instructions.py")], input=json.dumps(p),
                          capture_output=True, text=True, encoding="utf-8")
     msgs = [s["ephemeralMessage"] for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
@@ -212,6 +214,24 @@ check("climbing again → warns again", pre(), ["~160k"])
 start("ctxsub", main=False)
 think(10_000, 160_000)
 check("subagent: no /handoff", pre(), ["~170k"], ["/handoff"])
+start("ctxgemini")
+think(15_000, 220_000)
+check("Gemini near 250k → mentions ~250k compaction and ~300k limit", pre("gemini-4-carbon-high"), ["~235k", "~250k compaction", "~300k limit"])
+start("ctxflashlite", main=False)
+think(10_000, 105_000)
+check("Flash-Lite subagent → warns near ~128k compaction", pre("flash_lite"), ["~115k", "~128k compaction", "~168k limit"])
+start("ctxclaude55")
+think(20_000, 210_000)
+check("Claude Opus 5.5 at 230k → lean hint, not near-compaction yet", pre("claude-opus-5-5-high"), ["~230k", "rg -n"], ["compacts"])
+think(30_000, 710_000)
+check("Claude Opus 5.5 at 740k → near ~840k compaction", pre("claude-opus-5-5-high"), ["~740k", "~840k compaction"])
+start("ctxswitch")
+think(15_000, 220_000)
+check("Gemini at 235k → level-2 compaction warning", pre("gemini-4-carbon-high"), ["~235k", "~250k compaction"])
+think(10_000, 230_000)
+check("switched to Claude Opus 5.5 at 240k → quiet until Claude's high threshold", pre("claude-opus-5-5-high"), empty=True)
+think(30_000, 710_000)
+check("later at 740k on Claude Opus 5.5 → warns again near ~840k compaction", pre("claude-opus-5-5-high"), ["~740k", "~840k compaction"])
 
 # 7. very large reads and outputs: once per user message, main agent only
 start("big")

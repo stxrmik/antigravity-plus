@@ -70,6 +70,7 @@
   .meter { position: relative; height: 10px; border-radius: 5px; overflow: hidden; margin: 6px 0 4px; }
   .meter .track { position: absolute; inset: 0; opacity: .18; }
   .meter .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 5px; transition: width .4s ease; }
+  .meter .tick { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--ap-fg); opacity: .45; }
   .lim + .lim { margin-top: 10px; }
   .limits { display: grid; grid-template-columns: auto minmax(48px, 1fr) auto; gap: 4px 10px; align-items: center; font-size: 12px; margin-top: 4px; }
   .limits .meter { margin: 0; }
@@ -320,13 +321,14 @@
     host.replaceChildren(svg);
   }
 
-  // Context size per model call: 2px line + 10% wash, end dot with surface ring, window limit hairline, crosshair tooltip.
-  function contextLine(host, calls, win) {
-    const W = chartWidth(host), H = 130, padL = 40, padR = 46, padT = 12, padB = 20;
+  // Context size per model call: 2px line + 10% wash, end dot with surface ring, window/compaction hairlines, crosshair tooltip.
+  function contextLine(host, calls, win, comp) {
+    const W = chartWidth(host), H = 130, padL = 40, padR = 52, padT = 12, padB = 20;
     const vals = calls.map((c) => c.prompt);
     const peak = Math.max(...vals, 1);
-    const showWin = win && peak > win * 0.35;
-    const yMax = niceMax(showWin ? Math.max(win, peak) : peak * 1.1);
+    const showComp = comp && comp < (win || Infinity) && peak > comp * 0.35;
+    const showWin = win && (peak > win * 0.35 || showComp);
+    const yMax = niceMax(showWin ? Math.max(win, peak) : showComp ? Math.max(comp, peak) : peak * 1.1);
     const n = vals.length;
     const x = (i) => padL + (n <= 1 ? (W - padL - padR) / 2 : (i / (n - 1)) * (W - padL - padR));
     const y = (v) => padT + (1 - v / yMax) * (H - padT - padB);
@@ -337,17 +339,28 @@
       svg.append(s('line', { class: t === 0 ? 'base' : 'grid', x1: padL, x2: W - padR, y1: Math.round(y(t)) + 0.5, y2: Math.round(y(t)) + 0.5 }));
       svg.append(s('text', { x: padL - 6, y: y(t) + 4, 'text-anchor': 'end' }, fmtK(t)));
     }
+    const wy = showWin ? Math.round(y(win)) + 0.5 : -999;
+    const cy = showComp ? Math.round(y(comp)) + 0.5 : -999;
+    const close = showWin && showComp && Math.abs(cy - wy) < 12;
+    const wyLbl = wy + (close ? 1 : 4), cyLbl = cy + (close ? 9 : 4);
     if (showWin) {
-      const wy = Math.round(y(win)) + 0.5;
       svg.append(s('line', { x1: padL, x2: W - padR, y1: wy, y2: wy, stroke: css('--ap-muted'), 'stroke-width': 1 }));
-      svg.append(s('text', { x: W - padR + 4, y: wy + 4 }, 'лимит'));
+      svg.append(s('text', { x: W - padR + 4, y: wyLbl }, 'лимит'));
+    }
+    if (showComp) {
+      svg.append(s('line', { x1: padL, x2: W - padR, y1: cy, y2: cy, stroke: css('--ap-warn'), 'stroke-width': 1, 'stroke-dasharray': '3 3' }));
+      svg.append(s('text', { x: W - padR + 4, y: cyLbl }, 'сжатие'));
     }
     if (n) {
       const pts = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`);
       svg.append(s('path', { d: `M${x(0)},${y(0)}L${pts.join('L')}L${x(n - 1)},${y(0)}Z`, fill: color, 'fill-opacity': 0.1 }));
       svg.append(s('path', { d: `M${pts.join('L')}`, fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
-      svg.append(s('circle', { cx: x(n - 1), cy: y(vals[n - 1]), r: 4, fill: color, stroke: css('--ap-card'), 'stroke-width': 2 }));
-      svg.append(s('text', { class: 'val', x: x(n - 1) + 8, y: y(vals[n - 1]) + 4 }, fmtK(vals[n - 1])));
+      const lx = x(n - 1), ly = y(vals[n - 1]);
+      svg.append(s('circle', { cx: lx, cy: ly, r: 4, fill: color, stroke: css('--ap-card'), 'stroke-width': 2 }));
+      const hitRight = n > 1 && ((showWin && Math.abs(ly + 4 - wyLbl) < 11) || (showComp && Math.abs(ly + 4 - cyLbl) < 11));
+      const ty = hitRight ? (ly + 15 <= H - padB ? ly + 14 : ly - 7) : ly + 4;
+      svg.append(s('text', { class: 'val', x: hitRight ? lx - 6 : lx + 8, y: ty, 'text-anchor': hitRight ? 'end' : 'start',
+        stroke: css('--ap-card'), 'stroke-width': 3, 'paint-order': 'stroke' }, fmtK(vals[n - 1])));
     }
     const cross = s('line', { x1: 0, x2: 0, y1: padT, y2: H - padB, stroke: css('--ap-muted'), 'stroke-width': 1, visibility: 'hidden' });
     const dot = s('circle', { r: 4, fill: color, stroke: css('--ap-card'), 'stroke-width': 2, visibility: 'hidden' });
@@ -468,17 +481,24 @@
     // context meter
     if (ctx) {
       const f = Math.min(1, ctx.fraction || 0);
-      const sev = f >= 0.85 ? 'crit' : f >= 0.7 ? 'warn' : 'ok';
+      const comp = ctx.compaction && ctx.compaction < ctx.window ? ctx.compaction : 0;
+      const cf = comp ? ctx.current / comp : f;
+      const sev = (comp ? cf >= 0.88 : f >= 0.85) ? 'crit' : (comp ? cf >= 0.68 : f >= 0.7) ? 'warn' : 'ok';
       const fillColor = sev === 'crit' ? 'var(--ap-crit)' : sev === 'warn' ? 'var(--ap-warn)' : 'var(--ap-s1)';
       out.push(h('div', { class: 'card' },
         h('div', { class: 'row between' }, h('h3', { style: 'margin:0' }, 'Контекст'),
           h('span', { class: 'num' }, `${fmtK(ctx.current)} / ${fmtK(ctx.window)} · ${fmtPct(f)}`)),
         h('div', { class: 'meter', role: 'meter', 'aria-valuenow': Math.round(f * 100), 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-label': 'Заполнение контекста' },
           h('div', { class: 'track', style: `background:${fillColor}` }),
-          h('div', { class: 'fill', style: `width:${(f * 100).toFixed(1)}%;background:${fillColor}` })),
-        h('div', { class: 'small muted' }, `пик ${fmtK(ctx.peak)} · модель ${ctx.model}`),
-        sev === 'crit' ? note('crit', 'Контекст почти заполнен: скоро начнётся сжатие истории. Подведите итог и начните новый разговор.')
-          : sev === 'warn' ? note('warn', 'Контекст заполнен больше чем на 70% — для новой большой задачи лучше начать новый разговор.') : null));
+          h('div', { class: 'fill', style: `width:${(f * 100).toFixed(1)}%;background:${fillColor}` }),
+          comp ? h('div', { class: 'tick', style: `left:${(comp / ctx.window * 100).toFixed(1)}%`, title: `Сжатие истории около ${fmtK(comp)}` }) : null),
+        h('div', { class: 'small muted' }, `пик ${fmtK(ctx.peak)}${comp ? ` · сжатие ~${fmtK(comp)}` : ''} · модель ${ctx.model}`),
+        sev === 'crit' ? note('crit', comp
+            ? `Контекст у порога сжатия (~${fmtK(comp)} при лимите ~${fmtK(ctx.window)}): скоро Antigravity сожмёт историю. Подведите итог и начните новый разговор.`
+            : 'Контекст почти заполнен: скоро начнётся сжатие истории. Подведите итог и начните новый разговор.')
+          : sev === 'warn' ? note('warn', comp
+            ? `Контекст приближается к порогу сжатия (~${fmtK(comp)}): для новой большой задачи лучше начать новый разговор.`
+            : 'Контекст заполнен больше чем на 70% — для новой большой задачи лучше начать новый разговор.') : null));
     }
 
     // tiles
@@ -507,7 +527,7 @@
     if ((d.calls || []).length > 1) {
       out.push(h('div', { class: 'card' },
         h('h3', null, 'Рост контекста ', h('span', { class: 'muted' }, '— токенов в промпте на каждом вызове')),
-        chartBox((box) => contextLine(box, d.calls, ctx && ctx.window))));
+        chartBox((box) => contextLine(box, d.calls, ctx && ctx.window, ctx && ctx.compaction))));
     }
 
     // cost per turn

@@ -124,8 +124,10 @@ hooks work; `/doctor` does the same inside Antigravity.
   project: in new conversations the agent runs it outside the sandbox right away, without a wasted run. A command
   that works inside the sandbox twice is forgotten; with the sandbox off, the list isn't shown.
 - When the conversation's context reaches 150k tokens, the agent is told to keep it lean: search with `rg -n`, read
-  only the lines it needs, trim long output. Around 220k it hears that compaction is near and it's time to offer
-  `/handoff`. After it reads a whole large file: a tip to read ranges (once per message).
+  only the lines it needs, trim long output. In Antigravity, Gemini models have an effective limit around 300k tokens
+  and auto-compact around 250k — so around 220k the agent hears that compaction is near and it's time to offer
+  `/handoff` (for Claude 5.5 the compaction ceiling is higher, around 840k). After it reads a whole large file: a tip
+  to read ranges (once per message).
 - After three failed commands or edits in a row the agent stops, reads the error and changes its approach; code for
   a server or a container goes in a file piped to stdin, not into `python3 -c` with nested quotes.
 
@@ -449,8 +451,10 @@ Good to know:
 
 - The side panel is an Antigravity sidecar; open it from the link in a `/usage` answer or ask "open the usage
   panel". While hidden, it polls nothing.
-- Limits come from Antigravity itself; the cost uses prices from `skills/usage/pricing.json` (USD per 1M tokens).
-  It's an API-equivalent estimate, not your bill — check the prices against the current ones.
+- Limits come from Antigravity itself; the cost uses prices from `skills/usage/pricing.json` (USD per 1M tokens:
+  Gemini 4 Carbon / Argon / Hydrogen, Gemini 3.8 / 3.6 Flash, Gemini 3.5 / 3.1 Flash-Lite, Gemini 3.1 Pro, Claude 5.5,
+  etc.), and the context meter reflects Antigravity's effective window and compaction threshold (~300k limit and ~250k
+  compaction for Gemini). It's an API-equivalent estimate, not your bill — check the prices against the current ones.
 - The scripts also run by hand: `usage.py --all --days 7`, `export.py --conversation <id>`.
 
 </details>
