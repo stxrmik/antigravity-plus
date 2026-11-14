@@ -184,7 +184,8 @@ def memory_work(payload: dict) -> Optional[str]:
     import memory_hints
     st = conv.load(payload)
     parts = []
-    for part in (memory_hints.recall, memory_hints.message):
+    # a task from Claude Code gets what memory knows, but no nudges to save: that memory is Claude Code's too
+    for part in (memory_hints.recall,) + (() if conv.delegated(st, payload) else (memory_hints.message,)):
         try:
             parts.append(part(payload, st))
         except Exception as e:  # one half failing must not hide the other

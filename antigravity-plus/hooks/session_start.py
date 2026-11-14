@@ -409,6 +409,17 @@ def mobile_section(ws: str) -> List[str]:
         return []
 
 
+def ci_section(ws: str) -> List[str]:
+    """CI workflows in the workspace: the exact `ci.py watch` command after pushing or opening a PR (skill /ci)."""
+    try:
+        sys.path.insert(0, os.path.join(PLUGIN, "skills", "ci", "scripts"))
+        import ci
+        return ci.session_lines(ws)
+    except Exception as e:  # optional, like memory
+        print(f"session_start: ci: {e}", file=sys.stderr)
+        return []
+
+
 def is_subagent(payload: dict) -> bool:
     """A subagent's transcript has no user message: its first step is this hook's own message, while a
     conversation the user started already holds the user's request as step 0 when the hook runs."""
@@ -435,6 +446,9 @@ def build(payload: dict) -> str:
         return ""
     paths = paths[:MAX_WORKSPACES]
     sub = is_subagent(payload)
+    st = conv.load(payload) if not sub else None
+    # a task from Claude Code (claude-code/skills/antigravity): no project setup, CI or recent-conversations blocks
+    handed = not sub and conv.delegated(st, payload)
     head = ["<antigravity_plus_session_context>",
             "Snapshot taken when this conversation started (Antigravity Plus). It does not update — "
             "re-run git commands when you need the current state."]
@@ -457,19 +471,19 @@ def build(payload: dict) -> str:
         except Exception as e:  # the session context must come through anyway
             print(f"session_start: sandbox: {e}", file=sys.stderr)
         head.extend(mobile_section(ws))
-        if not sub:
+        if not sub and not handed:
+            head.extend(ci_section(ws))
             head.extend(setup_hints(ws, top))
         since = conv._project_grant(os.path.realpath(ws), None)
         if since and not sub:
             head.append(f"Full access: ON for this project since {since} — the user allowed you to run every plugin "
                         "command yourself without asking (rules: \"Full access\"). Revoked by «верни вопросы».")
-        if not sub:
+        if not sub and not handed:
             head.extend(recent_section(ws, top, payload.get("conversationId")))
         if claude:
             bridge.append(f"\n## Claude Code files in {top or ws}")
             bridge.extend(claude)
     bridge.extend(user_claude_md())
-    st = conv.load(payload) if not sub else None
     query = (st["users"][0]["text"] if st and st["users"] else "") or str(payload.get("lastUserInput") or "")
     memory = [] if sub else memory_section(paths, tops, query)  # subagents don't talk to the user or write memory
 

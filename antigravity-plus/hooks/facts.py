@@ -101,6 +101,17 @@ CLAIMS: List[Tuple[str, "re.Pattern", Optional["re.Pattern"], bool, bool]] = [
      re.compile(r"\bgit\s+push\b", re.I), False, True),
     ("commit", re.compile(r"\bзакоммитил\w*|\bзакоммичено|\bсделал\w*\s+коммит|\bcommitted\s+(?:it|the|all|my|your|these|this)\b", re.I),
      re.compile(r"\bgit\s+commit\b", re.I), False, True),
+    ("ci",
+     re.compile(
+         r"\b(?:ci|пайплайн\w*|pipeline|github\s+actions?|gitlab\s+ci|(?:ci|actions|github)\s+workflows?)\s+"
+         r"(?:(?:тоже|все|теперь|снова|уже|успешно|полностью)\s+)?"
+         r"(?:прош(?:ли|ёл|ел|ло)|проход\w*|зел[её]н\w*|успешн\w*|чист\w*|ok\b|passed|succeeded|is\s+green|are\s+green)"
+         r"|\b(?:все\s+)?(?:(?:проверки|джобы)\s+в\s+(?:ci|pr|mr|github|gitlab)\s+|экшены\s+(?:в\s+(?:ci|pr|github)\s+)?)"
+         r"(?:успешно\s+)?(?:прош(?:ли|ёл|ел)|зел[её]н\w*)"
+         r"|\ball\s+(?:ci|pr|mr|github|gitlab|pipeline)\s+checks?\s+(?:have\s+)?pass(?:ed|ing)?\b", re.I),
+     re.compile(r"(?<![\w-])ci\.py[\"']?\s+(?:watch|status)\b|\bgh\s+(?:run\s+(?:watch|view|list)|pr\s+checks)\b"
+                r"|\bglab\s+ci\s+(?:status|view|trace|get|list)\b", re.I),
+     True, True),
     ("install", re.compile(r"\bустановил\w*\s+(?:зависимост\w*|пакет\w*|библиотек\w*|модул\w*)|\binstalled\s+(?:the\s+)?(?:dependencies|packages?)\b", re.I),
      re.compile(r"\b(?:pip3?|npm|pnpm|yarn|bun|brew|apt(?:-get)?|uv|poetry|gem|cargo|go|composer|pod)\s+(?:install|add|i|sync|get)\b", re.I),
      False, True),
@@ -109,7 +120,8 @@ WHAT = {"tests": "test run", "tests_ran": "test command", "build": "build", "bui
         "lint": "linter run", "works": "check (tests, a build, running it)",
         "ui": "look at the page (ui_check.py screenshots or the browser)",
         "mobile": "run on a simulator or an emulator (mobile.py run / shot)", "deploy": "deploy command",
-        "push": "`git push`", "commit": "`git commit`", "install": "install command"}
+        "push": "`git push`", "commit": "`git commit`", "ci": "CI check (`ci.py watch` / `gh run`)",
+        "install": "install command"}
 # A claim the sentence hedges, attributes, asks about or quotes isn't the agent's own statement of fact.
 HEDGE_BEFORE = re.compile(r"(?:чтобы|если|когда|пока|пусть|должн\w*|может|могут|можно|стоит|нужно|надо|осталось|ожида\w*|"
                           r"предполага\w*|предлагаю|рекомендую|запустите|проверьте|выполните|попробуйте|прогоните|не|to\s+make|"
@@ -288,6 +300,31 @@ def claims(answer: str) -> List[Tuple[str, str]]:
     return out
 
 
+_QUOTED_ARG = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+_SHELL_WRAP = re.compile(r"\b(?:sh|bash|zsh|dash)\s+-c\b|\bcmd(?:\.exe)?\s+/c\b", re.I)
+PUSH_CMD = re.compile(
+    r"(?:^|[;&|\n]\s*)(?:(?:cd|pushd)\s+[^;&|\n]+(?:&&|;)\s*)*(?:env\s+\S+=\S+\s+)*"
+    r"(?:git(?:\.exe)?\s+(?:-[^\s;|&]+\s+(?:Q\s+)?)*push\b(?!.*\s(?:-n|--dry-run|--delete|-d|--tags)\b)(?!.*\s:[\w./-]+)"
+    r"|gh(?:\.exe)?\s+pr\s+create\b|glab(?:\.exe)?\s+mr\s+create\b)", re.I
+)
+CI_RUNNING_OUT = re.compile(
+    r'⏳\s*CI|"status":\s*"(?:in_progress|queued|pending|waiting|requested)"|\bin_progress\b'
+    r'|\b[1-9]\d*\s+pending\s+checks?\b|(?:status|state):\s*(?:running|pending)\b', re.I
+)
+CI_FAILED_OUT = re.compile(
+    r'❌\s*CI|"conclusion":\s*"(?:failure|cancelled|timed_out|startup_failure|action_required)"'
+    r'|"status":\s*"(?:failed|canceled)"|completed with \'(?:failure|cancelled|timed_out|startup_failure|action_required)\''
+    r'|\b[1-9]\d*\s+failing\b|(?:^|\n)\s*[X✗×]\s+\S|(?:pipeline\s+state|status):\s*(?:failed|canceled)\b', re.I
+)
+CI_NONE_OUT = re.compile(r'ℹ️\s*No CI run|ℹ️\s*CI cannot be queried|\bno (?:runs?|pipelines?) found\b', re.I)
+
+
+def _is_push_cmd(cmd: str) -> bool:
+    s = cmd[:600]
+    cleaned = s if _SHELL_WRAP.search(s) else _QUOTED_ARG.sub("Q", s)
+    return bool(PUSH_CMD.search(cleaned))
+
+
 def code_edit_step(ev: dict, ws: str, exts: Tuple[str, ...]) -> int:
     last = -1
     for e in ev["edits"]:
@@ -295,6 +332,10 @@ def code_edit_step(ev: dict, ws: str, exts: Tuple[str, ...]) -> int:
         if p and os.path.splitext(p)[1].lower() in exts and (not ws or p.startswith(ws + os.sep)):
             last = max(last, e["s"])
     return last
+
+
+def push_step(ev: dict) -> int:
+    return max((c["s"] for c in ev["cmds"] if c.get("code") == 0 and _is_push_cmd(c["cmd"])), default=-1)
 
 
 def unbacked(answer: str, ev: dict, ws: str, verify: "re.Pattern", code_ext: Tuple[str, ...],
@@ -308,22 +349,33 @@ def unbacked(answer: str, ev: dict, ws: str, verify: "re.Pattern", code_ext: Tup
         if kind == "works":
             proof = re.compile(verify.pattern + r"|\bcurl\b|\bwget\b|\bssh\b|deploy|\bhttpie?\b", re.I)
         since = code_edit_step(ev, ws, web_ext if kind == "ui" else code_ext) if after else -1
+        if kind == "ci":
+            since = max(since, push_step(ev))
         if kind == "ui" and any(s > since for s in ev["browser"]):
             continue
         runs = [c for c in ev["cmds"] if c["s"] > since and proof.search(c["cmd"][:500])]
         quote = sentence if len(sentence) <= 120 else sentence[:119] + "…"
         last = runs[-1] if runs else None
         problem = None
+        after_what = "after your last push/change" if kind == "ci" else "after your last change"
         if not last:
-            problem = f"no {WHAT[kind]} " + ("after your last change." if after and since >= 0 else "in this conversation.")
+            problem = f"no {WHAT[kind]} " + (f"{after_what}." if after and since >= 0 else "in this conversation.")
         elif not must_pass:
             pass
         elif last["code"] is None:
             problem = f"{WHAT[kind]} is still running or reported no result; wait for it before claiming this."
         elif last["code"] != 0:
-            problem = (f"the latest {WHAT[kind]}" + (" after your last change" if after and since >= 0 else "")
+            problem = (f"the latest {WHAT[kind]}" + (f" {after_what}" if after and since >= 0 else "")
                        + f" failed (`{last['cmd'][:80]}` → " + (f"exit {last['code']}" if not last.get("inferred") else
                                                                     "its output reports failures") + ").")
+        elif kind == "ci":
+            out_txt = last.get("out") or ""
+            if CI_FAILED_OUT.search(out_txt) and "✅ CI passed" not in out_txt:
+                problem = f"the latest {WHAT[kind]} output shows a failure (`{last['cmd'][:80]}`)."
+            elif CI_RUNNING_OUT.search(out_txt) and "✅ CI passed" not in out_txt:
+                problem = f"the latest {WHAT[kind]} output shows CI is still running (`{last['cmd'][:80]}`); wait with `ci.py watch`."
+            elif CI_NONE_OUT.search(out_txt) or (out_txt.strip() in ("", "[]") and re.search(r"\b(?:list|status|checks)\b", last["cmd"], re.I)):
+                problem = f"the latest {WHAT[kind]} found no CI run (`{last['cmd'][:80]}`); wait with `ci.py watch` or verify CI triggered."
         elif kind == "tests":
             m = NUM_PASSED.search(sentence)
             n = next((g for g in m.groups() if g), None) if m else None

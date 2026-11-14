@@ -32,7 +32,7 @@ unclear, ask the user once and save the answer to the project memory (type `proj
 The user's restrictions apply: after «не пушь» / «не деплой» there is no deploy until they lift it.
 
 ## 3. Before deploying
-- Run the project's tests and build. If they fail, stop and report: don't deploy broken code.
+- Run the project's tests and build, and if the repo has CI workflows, check `python3 "<skill_dir>/../ci/scripts/ci.py" status --workspace "<ws>"` (`BypassSandbox: true`) so you don't deploy a commit with red CI. If tests or CI fail, stop and report: don't deploy broken code.
 - For a risky change (data, config, dependencies), say in one line what can break and how you'll check it.
 - Take the lock: `deploy.py lock --workspace "<ws>" --conversation <your id>`. If another agent holds it, wait and retry,
   or coordinate with it through send_message.

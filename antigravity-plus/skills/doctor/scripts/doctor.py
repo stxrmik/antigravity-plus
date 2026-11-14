@@ -432,6 +432,54 @@ def hook_selftest() -> List[str]:
             _drop_registry(hooks, ws)
         elif not out or "/mobile не загрузился" not in out[-1]:
             out.append("ℹ️ mobile: на этом компьютере нет ни Xcode, ни Android SDK — приложения здесь не запускаются")
+    ci_py = os.path.join(PLUGIN, "skills", "ci", "scripts", "ci.py")
+    if os.path.isfile(stop) and os.path.isfile(ci_py) and shutil.which("git"):
+        if memstore and not memstore.settings().get("autoCi", True):
+            out.append(f"{WARN} ci: напоминание отслеживать CI после пуша выключено (`memory.py config auto-ci on`)")
+        else:
+            ws = tempfile.mkdtemp(prefix="agp-doctor-")
+            art = tempfile.mkdtemp(prefix="agp-doctor-")
+            fake_bin = tempfile.mkdtemp(prefix="agp-doctor-bin-")
+            tp = os.path.join(art, "transcript_full.jsonl")
+            gh_stub = os.path.join(fake_bin, "gh.cmd" if compat.WINDOWS else "gh")
+            with open(gh_stub, "w", encoding="utf-8") as f:
+                f.write("@echo off\r\nexit /b 0\r\n" if compat.WINDOWS else "#!/bin/sh\nexit 0\n")
+            if not compat.WINDOWS:
+                os.chmod(gh_stub, 0o755)
+            run(["git", "init", "-q"], cwd=ws)
+            run(["git", "remote", "add", "origin", "https://github.com/example/demo.git"], cwd=ws)
+            with open(os.path.join(ws, "AGENTS.md"), "w", encoding="utf-8") as f:
+                f.write("# Demo\n")
+            os.makedirs(os.path.join(ws, ".github", "workflows"), exist_ok=True)
+            with open(os.path.join(ws, ".github", "workflows", "ci.yml"), "w", encoding="utf-8") as f:
+                f.write("name: ci\non: [push]\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps: [{run: echo ok}]\n")
+            run(["git", "add", "."], cwd=ws)
+            run(["git", "-c", "user.name=Test", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-qm", "init"], cwd=ws)
+            rows = [{"step_index": 0, "type": "USER_INPUT", "created_at": "2000-01-01T00:00:00Z",
+                     "content": "<USER_REQUEST>Запушь изменения</USER_REQUEST>"},
+                    {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "",
+                     "tool_calls": [{"name": "run_command", "args": {"CommandLine": "git push origin main"}}]},
+                    {"step_index": 2, "type": "GENERIC",
+                     "content": "Command exited with code 0.\n\nCommand output:\nab12cd3..ef45ab6  main -> main\n"},
+                    {"step_index": 3, "type": "PLANNER_RESPONSE", "content": "Запушено в origin/main."}]
+            with open(tp, "w", encoding="utf-8") as f:
+                f.write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+            env_ci = dict(os.environ, PATH=fake_bin + os.pathsep + os.environ.get("PATH", ""), GH_TOKEN="selftest-token")
+            try:
+                r = subprocess.run([py, stop], input=json.dumps({
+                    "conversationId": SELFTEST_ID, "transcriptPath": tp, "artifactDirectoryPath": art,
+                    "workspacePaths": [ws], "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 0
+                }, ensure_ascii=False), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10, cwd=PLUGIN, env=env_ci)
+                nudge = (r.returncode, (r.stdout or "") + (r.stderr or ""))
+            except (OSError, subprocess.TimeoutExpired) as e:
+                nudge = (127, str(e))
+            ok = '"continue"' in nudge[1] and "ci.py" in nudge[1] and "watch" in nudge[1]
+            out.append(f"{OK if ok else BAD} ci (Stop): после `git push` в проекте с CI агент возвращается отследить пайплайн"
+                       + ("" if ok else f" — {nudge[1][:160]!r}"))
+            _cleanup_selftest(tp)
+            shutil.rmtree(art, ignore_errors=True)
+            shutil.rmtree(fake_bin, ignore_errors=True)
+            _drop_registry(hooks, ws)
     handoff = os.path.join(PLUGIN, "skills", "handoff", "scripts", "handoff.py")
     if os.path.isfile(handoff):
         code, res = run([py, handoff, "recent", "--workspace", PLUGIN, "--limit", "1"], cwd=PLUGIN, timeout=20)
@@ -549,6 +597,18 @@ def environment() -> List[str]:
     else:
         out.append(f"{WARN} gh не установлен — /pr и /fix-issue не смогут работать с GitHub (`brew install gh`)")
     out.append(f"{OK if shutil.which('rg') else WARN} ripgrep " + ("установлен" if shutil.which("rg") else "не найден — поиск будет медленнее (`brew install ripgrep`)"))
+    claude = os.path.expanduser(os.path.join("~", ".claude"))
+    if os.path.isdir(claude):  # Claude Code's side of the bridge (claude-code/skills/antigravity)
+        if os.path.isfile(os.path.join(claude, "skills", "antigravity", "scripts", "delegate.py")):
+            try:
+                n = len([f for f in os.listdir(os.path.expanduser("~/.gemini/antigravity-plus/delegate")) if f.endswith(".json")])
+            except OSError:
+                n = 0
+            out.append(f"{OK} Claude Code: навык «antigravity» установлен — Claude Code сам отдаёт задачи агентам "
+                       f"Antigravity (передано задач: {n})")
+        else:
+            out.append(f"{WARN} Claude Code есть, но навыка «antigravity» нет — запустите `./install.sh`, чтобы Claude Code "
+                       "мог отдавать задачи в Antigravity")
     return out
 
 
@@ -570,6 +630,16 @@ def workspace_info(ws: str) -> List[str]:
             if os.path.isdir(p):
                 parts.append(f"{sub}: {len([x for x in os.listdir(p) if not x.startswith('.')])}")
         out.append(f"{OK} найдены материалы Claude Code (.claude/: {', '.join(parts) or 'пусто'}) — хук показывает их агенту")
+    try:
+        sys.path.insert(0, os.path.join(PLUGIN, "skills", "ci", "scripts"))
+        import ci as citool
+        info = citool.repo_ci(ws)
+        if info["workflows"] or info["other_ci"]:
+            wfs = ", ".join((info["workflows"] or info["other_ci"])[:5])
+            out.append(f"{OK if info['ready'] else WARN} CI проекта: {info['provider'] or 'other'} ({wfs}) — "
+                       + ("готов к отслеживанию (`/ci`, `ci.py watch`)" if info["ready"] else info["reason"]))
+    except Exception:
+        pass
     return out
 
 

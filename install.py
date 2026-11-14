@@ -2,12 +2,17 @@
 """Antigravity Plus installer for macOS, Linux and Windows.
 
   python3 install.py                      install or update into ~/.gemini/config/plugins/antigravity-plus
+  python3 install.py --no-claude          … without Claude Code's `antigravity` skill
   python3 install.py --uninstall          remove the plugin (memory and settings are kept)
   python3 install.py --uninstall --purge  also remove its memory and settings (~/.claude memory is never touched)
 
+When Claude Code is on this computer (~/.claude exists), its side of the bridge is installed too: the skill
+`antigravity` in ~/.claude/skills/antigravity, with which Claude Code hands sub-tasks to Antigravity agents
+(claude-code/skills/antigravity).
+
 On Windows run `install.cmd` (or `py -3 install.py`). Antigravity runs hook commands with `cmd /c` there, where
 `python3` often doesn't exist, so the installer writes the Python command that works on this computer into the
-installed hooks.json. Stdlib only, Python 3.8+.
+installed hooks.json (and into the Claude Code skill). Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
 
@@ -20,12 +25,15 @@ import shutil
 import stat
 import subprocess
 import sys
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "antigravity-plus")
 DEST = os.path.join(os.path.expanduser("~"), ".gemini", "config", "plugins", "antigravity-plus")
 DATA = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-plus")  # memory, settings, state, logs
+CLAUDE = os.path.join(os.path.expanduser("~"), ".claude")                    # Claude Code's own folder
+CLAUDE_SRC = os.path.join(HERE, "claude-code", "skills", "antigravity")
+CLAUDE_DEST = os.path.join(CLAUDE, "skills", "antigravity")
 SKIP = {"__pycache__", ".DS_Store", "Thumbs.db"}
 WINDOWS = os.name == "nt"
 
@@ -34,26 +42,32 @@ def skipped(name: str) -> bool:
     return name in SKIP or name.endswith((".pyc", ".pyo"))
 
 
-def sync(src: str, dest: str) -> int:
+def sync(src: str, dest: str, extra: Optional[Dict[str, str]] = None) -> int:
     """Make `dest` a copy of `src` (like rsync --delete) without removing the folder itself, so a running
-    Antigravity doesn't lose it mid-way. Returns how many files changed."""
+    Antigravity doesn't lose it mid-way. `extra` maps more files into it ({path in dest: source file}).
+    Returns how many files changed."""
     changed = 0
+    extra = extra or {}
     os.makedirs(dest, exist_ok=True)
+    pairs = []
     for dp, dns, fns in os.walk(src):
         dns[:] = [d for d in dns if not skipped(d)]
         target = os.path.join(dest, os.path.relpath(dp, src))
         os.makedirs(target, exist_ok=True)
-        for fn in fns:
-            if skipped(fn):
-                continue
-            s, d = os.path.join(dp, fn), os.path.join(target, fn)
-            if not os.path.exists(d) or not filecmp.cmp(s, d, shallow=False):
-                shutil.copy2(s, d)
-                changed += 1
+        pairs += [(os.path.join(dp, fn), os.path.join(target, fn)) for fn in fns if not skipped(fn)]
+    pairs += [(s, os.path.join(dest, rel)) for rel, s in extra.items()]
+    for s, d in pairs:
+        if not os.path.exists(d) or not filecmp.cmp(s, d, shallow=False):
+            os.makedirs(os.path.dirname(d), exist_ok=True)
+            shutil.copy2(s, d)
+            changed += 1
+    kept = {os.path.normcase(os.path.join(dest, rel)) for rel in extra}
     for dp, dns, fns in os.walk(dest, topdown=False):  # drop what the source no longer has
         rel = os.path.relpath(dp, dest)
         source_dir = os.path.join(src, rel)
         for fn in fns:
+            if os.path.normcase(os.path.join(dp, fn)) in kept:
+                continue
             if skipped(fn) or not os.path.exists(os.path.join(source_dir, fn)):
                 os.remove(os.path.join(dp, fn))
                 changed += 1
@@ -87,9 +101,39 @@ def write_hooks(dest: str, python: str) -> None:
         f.write(text)
 
 
+def claude_skill_ours() -> bool:
+    """~/.claude/skills/antigravity is free, or it is the one this installer put there (never touch another
+    skill of the same name)."""
+    return not os.path.exists(CLAUDE_DEST) or os.path.isfile(os.path.join(CLAUDE_DEST, "scripts", "delegate.py"))
+
+
+def install_claude_skill(python: str) -> Optional[str]:
+    """Claude Code's side of the bridge: the skill `antigravity`, with compat.py next to its script. Returns a line
+    for the summary, or None when Claude Code isn't on this computer."""
+    if not os.path.isdir(CLAUDE) or not os.path.isfile(os.path.join(CLAUDE_SRC, "SKILL.md")):
+        return None
+    if not claude_skill_ours():
+        return f"  claude : {CLAUDE_DEST} is another skill named «antigravity» — left as it is"
+    changed = sync(CLAUDE_SRC, CLAUDE_DEST, {os.path.join("scripts", "compat.py"): os.path.join(SRC, "hooks", "compat.py")})
+    skill = os.path.join(CLAUDE_DEST, "SKILL.md")
+    if python != "python3":  # Windows: the skill's commands start Python the way this computer can
+        with open(skill, encoding="utf-8") as f:
+            text = f.read()
+        with open(skill, "w", encoding="utf-8") as f:
+            f.write(text.replace("python3 ${CLAUDE_SKILL_DIR}", python + " ${CLAUDE_SKILL_DIR}"))
+    if not WINDOWS:
+        script = os.path.join(CLAUDE_DEST, "scripts", "delegate.py")
+        os.chmod(script, os.stat(script).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return (f"  claude : {CLAUDE_DEST} ({changed} files updated) — Claude Code hands sub-tasks to Antigravity "
+            "on its own (skill «antigravity», new Claude Code sessions)")
+
+
 def uninstall(purge: bool) -> int:
     shutil.rmtree(DEST, ignore_errors=True)
-    for name in ("state", "probe", "coord", "guard.log", "usage-cache.json"):
+    if os.path.isdir(CLAUDE_DEST) and claude_skill_ours():
+        shutil.rmtree(CLAUDE_DEST, ignore_errors=True)
+        print(f"Removed Claude Code's skill {CLAUDE_DEST}.")
+    for name in ("state", "probe", "coord", "guard.log", "usage-cache.json", "delegate"):
         p = os.path.join(DATA, name)
         if os.path.isdir(p):
             shutil.rmtree(p, ignore_errors=True)
@@ -114,6 +158,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--uninstall", action="store_true", help="remove the plugin")
     ap.add_argument("--purge", action="store_true", help="with --uninstall: also remove memory and settings")
+    ap.add_argument("--no-claude", action="store_true", help="don't install Claude Code's skill «antigravity»")
     a = ap.parse_args(argv)
     if a.uninstall:
         return uninstall(a.purge)
@@ -151,6 +196,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"  hooks  : run with `{python}` — session context, instructions, guard, edit checks, coordination, Stop")
     print("  panel  : sidecars/usage — side pane «Расход токенов»")
     print(f"  data   : {DATA} (memory, settings) + ~/.claude/projects/<project>/memory (shared with Claude Code)")
+    claude = None if a.no_claude else install_claude_skill(python)
+    if claude:
+        print(claude)
     print("\nAntigravity check:", flush=True)
     subprocess.run([sys.executable, os.path.join(DEST, "skills", "doctor", "scripts", "doctor.py"), "--install-check"])
     print("\n" + ("First install: restart Antigravity to load the plugin." if first else

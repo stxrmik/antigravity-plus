@@ -23,7 +23,7 @@ def undefined(path):
     walk(top)
     return out
 files = []
-for base in (PLUGIN, os.path.join(ROOT, "tests"), ROOT):
+for base in (PLUGIN, os.path.join(ROOT, "tests"), os.path.join(ROOT, "claude-code"), ROOT):
     for folder, dirs, names in os.walk(base):
         dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git", "node_modules")] if base != ROOT else []
         files += [os.path.join(folder, n) for n in names if n.endswith(".py")]

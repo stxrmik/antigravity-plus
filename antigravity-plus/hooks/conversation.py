@@ -71,10 +71,11 @@ REMOTE = re.compile(r"(^|[/\s])(ssh|scp|rsync|sftp|mosh|sshpass|kubectl|helm|ans
                     r"flyctl|fly|vercel|netlify|heroku|wrangler|railway|aws|az|kamal)(\s|$)|deploy", re.I)
 FIXED_WITHIN = 6          # commands after a run of failures within which a success counts as the way that works
 LEARN_KEEP = 40
-# Failing tests, builds and linters are the agent's own work in progress, not something about the environment to learn.
+# Failing tests, builds, linters and CI checks are work in progress, not something about the environment to learn.
 CHECK_RUN = re.compile(r"\b(pytest|unittest|tox|nox|jest|vitest|mocha|tsc|eslint|ruff|mypy|flake8|pylint|xcodebuild|"
                        r"swiftlint|phpunit|rspec|ctest)\b|\b(npm|pnpm|yarn|bun)\s+(run\s+)?(test|build|lint|check|typecheck)\b"
-                       r"|\b(go|cargo|swift|dotnet)\s+(test|build|vet|check)\b|\bmake\s+(test|check|build|lint)\b", re.I)
+                       r"|\b(go|cargo|swift|dotnet)\s+(test|build|vet|check)\b|\bmake\s+(test|check|build|lint)\b"
+                       r"|(?<![\w-])ci\.py\b|\bgh\s+(run|pr\s+checks)\b|\bglab\s+ci\b", re.I)
 REQUEST = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
 TAGS = re.compile(r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|[A-Z_]+_METADATA)>.*?</\1>", re.S)
 
@@ -507,6 +508,21 @@ def prune_states() -> None:
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()[:300]
+
+
+# The first line of a task Claude Code hands over through its skill `antigravity` (claude-code/skills/antigravity,
+# scripts/delegate.py writes it). Its follow-ups arrive as agent messages, not as user messages.
+DELEGATED_MARK = "[Delegated from Claude Code]"
+
+
+def delegated(st: Optional[dict], payload: Optional[dict] = None) -> bool:
+    """A task Claude Code handed over: every user message so far is its brief, so nobody watches the conversation —
+    no setup, review or memory nudges. A person who writes into it takes it over."""
+    texts = [u.get("text", "") for u in (st or {}).get("users") or [] if isinstance(u, dict)]
+    if not texts and payload:
+        cur = payload.get("lastUserInput")
+        texts = [user_text(cur)] if isinstance(cur, str) and cur.strip() else []
+    return bool(texts) and all(t.lstrip().startswith(DELEGATED_MARK) for t in texts)
 
 
 def with_current(st: Optional[dict], payload: dict) -> List[dict]:

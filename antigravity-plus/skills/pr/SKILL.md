@@ -50,5 +50,9 @@ description: >-
    - Push if needed: `git push -u origin <branch>` (never force-push).
    - Create: `gh pr create --base <base> --title "<title>" --body-file <artifact_dir>/pr.md` (add `--draft` if the user said draft).
    - If `gh` is missing or not authenticated, give the user the compare URL / instructions instead of trying workarounds.
+   - **Track CI:** if the repository has CI workflows (`.github/workflows/` or `.gitlab-ci.yml`), run
+     `python3 "<skill_dir>/../ci/scripts/ci.py" watch --workspace "<ws>"` (`BypassSandbox: true`). If it goes to the
+     background while checks run, share the PR link and say in one line you're waiting for CI — its wakeup message
+     brings the final result and any failure logs.
 
-6. **Report** (in the user's language): PR link (or the saved description), and any open questions.
+6. **Report** (in the user's language): PR link (or the saved description), CI status, and any open questions.

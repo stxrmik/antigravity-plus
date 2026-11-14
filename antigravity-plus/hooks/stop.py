@@ -48,7 +48,7 @@ import os
 import re
 import subprocess
 import sys
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import compat
 import conversation as conv
@@ -64,6 +64,7 @@ WEB_EXT = (".html", ".htm", ".css", ".scss", ".sass", ".less", ".jsx", ".tsx", "
 PAGE_EXT = (".html", ".htm", ".css", ".scss", ".sass", ".less")  # only looking checks these; components also have tests
 UI_CHECK = os.path.join(PLUGIN, "skills", "ui-check", "scripts", "ui_check.py")
 MOBILE = os.path.join(PLUGIN, "skills", "mobile", "scripts", "mobile.py")
+CI_SCRIPT = os.path.join(PLUGIN, "skills", "ci", "scripts", "ci.py")
 # Files that are a mobile screen by themselves, and what marks one in code.
 MOBILE_LAYOUT = re.compile(r"\.(storyboard|xib)$|[/\\]res[/\\](layout|values|drawable|menu|navigation|color|font|anim)"
                            r"[\w-]*[/\\][^/\\]+\.xml$", re.I)
@@ -298,10 +299,43 @@ MOBILE_LOOK = re.compile(MOBILE_TOOL + r"(run|shot)\b|" + MOBILE_TOOL + r"[^|;&]
 # does a path with «test» in it).
 MOBILE_TESTS = re.compile(r"\bxcodebuild\b.*\s(test|test-without-building)(\s|$)|\bgradlew?(\.bat)?\b.*\b\w*AndroidTest\b"
                           r"|\bflutter\s+(test|drive)\b|\bdetox\s+test\b|\bmaestro\s+test\b", re.I)
+_QUOTED_ARG = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
+_SHELL_WRAP = re.compile(r"\b(?:sh|bash|zsh|dash)\s+-c\b|\bcmd(?:\.exe)?\s+/c\b", re.I)
+CI_PUSH = re.compile(
+    r"(?:^|[;&|\n]\s*)(?:(?:cd|pushd)\s+[^;&|\n]+(?:&&|;)\s*)*(?:env\s+\S+=\S+\s+)*"
+    r"(?:git(?:\.exe)?\s+(?:-[^\s;|&]+\s+(?:Q\s+)?)*push\b(?!.*\s(?:-n|--dry-run|--delete|-d|--tags)\b)(?!.*\s:[\w./-]+)"
+    r"|gh(?:\.exe)?\s+pr\s+create\b|glab(?:\.exe)?\s+mr\s+create\b)", re.I
+)
+CI_WATCH = re.compile(r"(?<![\w-])ci\.py[\"']?\s+watch\b|\bgh\s+(?:run\s+watch|pr\s+checks\b.*--watch)\b"
+                      r"|\bglab\s+ci\s+(?:status\b.*--live|trace)\b", re.I)
+CI_CHECK = re.compile(r"(?<![\w-])ci\.py[\"']?\s+status\b|\bgh\s+(?:run\s+(?:view|list)|pr\s+checks)\b"
+                      r"|\bglab\s+ci\s+(?:status|view|get|list)\b", re.I)
+CI_STILL_RUNNING = re.compile(
+    r'⏳\s*CI|"status":\s*"(?:in_progress|queued|pending|waiting|requested)"|\bin_progress\b|\bqueued\b'
+    r'|\b[1-9]\d*\s+pending\s+checks?\b|(?:status|state):\s*(?:running|pending)\b', re.I
+)
+CI_NONE_OUT = re.compile(r'ℹ️\s*No CI run|ℹ️\s*CI cannot be queried|\bno (?:runs?|pipelines?) found\b', re.I)
+NO_CI_WAIT = re.compile(
+    r"\bне\s+(?:жди|ждать|отслежива\w*|проверя\w*)\s+(?:ci|пайплайн\w*|экшен\w*|actions?|проверк\w*)"
+    r"|\b(?:ci|пайплайн\w*|экшен\w*|actions?)\s+не\s+(?:жди|ждать|отслежива\w*|проверя\w*)"
+    r"|\bбез\s+(?:ожидания\s+)?ci\b|\b(?:don'?t|do\s+not|no\s+need\s+to)\s+(?:wait\s+for|watch|track)\s+ci\b", re.I
+)
+CI_WAIT_ITEM = re.compile(
+    r"\b(?:дождаться|отследить|проверить|убедиться|ожидание|wait\s+for|watch|track|verify|check)\b.*"
+    r"\b(?:ci|actions?|экшен\w*|пайплайн\w*|pipeline|воркфлоу|workflows?|checks?)\b"
+    r"|\b(?:ci|github\s+actions?|gitlab\s+ci|pipeline)\b.*\b(?:зелён\w*|прош\w*|ожидан\w*|watch|pass\w*)\b", re.I
+)
 HELP = re.compile(r"\s(--help|-h)(\s|$)")
 BG_STARTED = re.compile(r"running as a background task with task id:\s*(\S+)")
 BG_FINISHED = re.compile(r'Task id "([^"]+)" finished with result:\s*Command exited with code (-?\d+)')
+BG_CUT = re.compile(r'Task id "([^"]+)" finished with result:\s*The tool.s output was truncated')
 HOT_RELOAD = (".tsx", ".jsx")  # React Native: a saved file reaches the running app by itself
+
+
+def _is_push_cmd(line: str) -> bool:
+    s = line[:600]
+    cleaned = s if _SHELL_WRAP.search(s) else _QUOTED_ARG.sub("Q", s)
+    return bool(CI_PUSH.search(cleaned))
 
 
 def mobile_command(line: str) -> Optional[dict]:
@@ -313,7 +347,15 @@ def mobile_command(line: str) -> Optional[dict]:
     return dict(did, ok=None) if any(did.values()) else None
 
 
-def command_result(raw: str, waiting: List[Optional[dict]], background: dict) -> None:
+def ci_command(line: str) -> Optional[dict]:
+    """{"push", "watch", "check"} for a command that pushes to remote or tracks CI, else None."""
+    if HELP.search(line):
+        return None
+    did = {"push": _is_push_cmd(line), "watch": bool(CI_WATCH.search(line)), "check": bool(CI_CHECK.search(line))}
+    return dict(did, ok=None, code=None, out="") if any(did.values()) else None
+
+
+def command_result(raw: str, waiting: List[List[dict]], background: Dict[str, List[dict]]) -> None:
     """Give the commands the agent started their outcome: one result row per call, in order; a command that went on
     in the background gets it when it reports back. A command that failed (or was refused) did nothing."""
     try:
@@ -323,19 +365,38 @@ def command_result(raw: str, waiting: List[Optional[dict]], background: dict) ->
     content = d.get("content") or ""
     for m in BG_FINISHED.finditer(content):
         if m.group(1) in background:
-            background.pop(m.group(1))["ok"] = m.group(2) == "0"
+            tail = content[m.end():m.end() + 8000].split("Command output:", 1)[-1][-3000:]
+            cval = int(m.group(2))
+            for rec in background.pop(m.group(1)):
+                rec["ok"] = cval == 0
+                rec["code"] = cval
+                rec["out"] = tail
+    for m in BG_CUT.finditer(content):
+        if m.group(1) in background:
+            tail = content[m.end():m.end() + 8000][-3000:]
+            for rec in background.pop(m.group(1)):
+                rec["ok"] = True
+                rec["code"] = 0
+                rec["out"] = tail
     if d.get("type") != "GENERIC" or not waiting:
         return
-    command = waiting.pop(0)
-    if command is None:
+    records = waiting.pop(0)
+    if not records:
         return
     code, later = conv.EXIT.search(content[:3000]), BG_STARTED.search(content[:800])
+    out = content.split("Command output:", 1)[-1][-3000:] if code else ""
     if code:
-        command["ok"] = code.group(1) == "0"
+        cval = int(code.group(1))
+        for rec in records:
+            rec["ok"] = cval == 0
+            rec["code"] = cval
+            rec["out"] = out
     elif later:
-        background[later.group(1)] = command
+        background[later.group(1)] = records
     else:
-        command["ok"] = False
+        for rec in records:
+            rec["ok"] = False
+            rec["code"] = None
 
 
 def mobile_ui(path: str) -> str:
@@ -388,15 +449,16 @@ def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
     pending: List[str] = []
     unseen: List[str] = []
     story: List[dict] = []                   # screens edited and mobile commands run, in the order they were started
-    waiting: List[Optional[dict]] = []       # the calls of the latest step, each still to get its result row
-    background: dict = {}
+    ci_story: List[dict] = []                # pushes and CI watch/status commands, in order
+    waiting: List[List[dict]] = []           # the calls of the latest step, each still to get its result row
+    background: Dict[str, List[dict]] = {}
     setup: Set[str] = set()
     reviewed = False
     wss = [os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or [] if isinstance(w, str)]
     try:
         f = open(tp, encoding="utf-8", errors="replace")
     except OSError:
-        return {"files": [], "reviewed": True, "pending": [], "unseen": [], "mobile": [], "setup": []}
+        return {"files": [], "reviewed": True, "pending": [], "unseen": [], "mobile": [], "setup": [], "ci": False}
     with f:
         for raw in f:
             m = STEP.search(raw[:120])
@@ -414,7 +476,7 @@ def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
             for c in calls:
                 args = c.get("args") or {}
                 name = str(c.get("name") or "")
-                waiting.append(None)
+                waiting.append([])
                 if name == "invoke_subagent" and REVIEWERS.search(str(args.get("TypeName") or "")):
                     reviewed = True
                 elif name == "read_file" and str(args.get("Path") or "").endswith(REVIEW_SKILLS):
@@ -428,7 +490,11 @@ def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
                     did = mobile_command(line)
                     if did:
                         story.append(did)
-                        waiting[-1] = did
+                        waiting[-1].append(did)
+                    ci_did = ci_command(line)
+                    if ci_did:
+                        ci_story.append(ci_did)
+                        waiting[-1].append(ci_did)
                     if did and (did["look"] or did["tests"]):
                         pending = []
                     elif LOOK.search(line):
@@ -455,7 +521,46 @@ def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
                         if ext in WEB_EXT and not screen and p not in unseen:
                             unseen.append(p)
     return {"files": files, "reviewed": reviewed, "pending": pending, "unseen": unseen, "mobile": unseen_screens(story),
-            "setup": sorted(setup)}
+            "setup": sorted(setup), "ci": ci_untracked(ci_story)}
+
+
+def ci_untracked(story: List[dict]) -> bool:
+    """True when a push / PR creation succeeded in this turn and no CI watch (or finished CI check) followed it."""
+    untracked = False
+    for step in story:
+        out = step.get("out") or ""
+        if step["watch"] and step.get("code") in (0, 1):
+            if "There were sandbox errors" not in out and "Cannot watch CI" not in out:
+                untracked = False  # `watch` finished (green, red with logs, or explicit no-run after appear-timeout)
+        elif step["push"] and step["ok"]:
+            if "Everything up-to-date" not in out:
+                untracked = True
+        elif step["check"] and step["ok"]:
+            has_run = out.strip() not in ("", "[]") and not CI_NONE_OUT.search(out)
+            if has_run and (not CI_STILL_RUNNING.search(out) or "✅ CI passed" in out or "❌ CI failed" in out):
+                untracked = False
+    return untracked
+
+
+def ci_left(payload: dict, turn: dict, st: dict) -> Optional[Tuple[str, List[str], str]]:
+    """(workspace, workflows, head_sha) when the main agent pushed changes in a repo with active CI and hasn't tracked it."""
+    if not setting("autoCi") or not turn.get("ci") or not st.get("users"):
+        return None
+    if any(NO_CI_WAIT.search(u.get("text") or "") for u in st["users"]):
+        return None
+    ws = next((os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or [] if isinstance(w, str)), "")
+    if not ws or not os.path.isdir(ws):
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(CI_SCRIPT))
+        import ci as citool
+        info = citool.repo_ci(ws)
+        if not info.get("ready") or citool.commit_skips_ci(info["root"]):
+            return None
+        head_sha = citool.git(["rev-parse", "HEAD"], info["root"]) or ""
+        return ws, info["triggerable"], head_sha
+    except Exception:
+        return None
 
 
 def unseen_screens(story: List[dict]) -> List[str]:
@@ -512,7 +617,8 @@ def waiting_on_background(payload: dict, st: dict, run: List[dict]) -> Optional[
     everything left needs their results; open task.md items it kept for itself are not."""
     if not st["users"] or not setting("finishTasks"):
         return None
-    items = [(mark, text) for mark, text in task_items(payload, st) if not DELEGATED.search(text)]
+    items = [(mark, text) for mark, text in task_items(payload, st)
+             if not DELEGATED.search(text) and not CI_WAIT_ITEM.search(text)]
     tp = conv.transcript_path(payload)
     if not items or handing_over(AGENT_WAIT.sub(" ", last_answer(tp) if tp else "")):
         return None
@@ -585,12 +691,15 @@ def decide(payload: dict) -> Optional[str]:
     unseen: List[str] = []
     mobile: List[str] = []
     setup: List[str] = []
+    ci_need: Optional[Tuple[str, List[str], str]] = None
     answer = last_answer(tp) if tp else ""
     announced = announcement(answer) if st["users"] else ""
+    handed = conv.delegated(st)  # a task from Claude Code: it reviews the result itself and never pushes from here
     if not broken and not items and st["users"] and tp:
         turn = turn_changes(tp, st["users"][-1].get("step", -1), payload)
-        setup = setup_left(payload, turn, st, answer)
-        if setting("autoReview") and not turn["reviewed"] and len(turn["files"]) >= REVIEW_MIN_FILES:
+        setup = [] if handed else setup_left(payload, turn, st, answer)
+        ci_need = None if handed else ci_left(payload, turn, st)
+        if setting("autoReview") and not handed and not turn["reviewed"] and len(turn["files"]) >= REVIEW_MIN_FILES:
             review = turn["files"]
         if setting("autoVerify"):
             unseen = turn["unseen"]
@@ -598,18 +707,21 @@ def decide(payload: dict) -> Optional[str]:
                                                   if isinstance(w, str)]) if turn["mobile"] else []
             # the web UI and a mobile app's screens are checked by looking at them
             unverified = [p for p in turn["pending"] if p not in unseen and p not in mobile]
-    if not broken and not items and not review and not unverified and not unseen and not mobile and not setup and not announced:
+    if (not broken and not items and not review and not unverified and not unseen and not mobile
+            and not setup and not ci_need and not announced):
         return (facts_check(payload, st, answer) or (objective_check(payload, st, answer) if st["users"] else None)
-                or (memory_check(payload, st, answer) if st["users"] else None))
+                or (memory_check(payload, st, answer) if st["users"] and not handed else None))
     if handing_over(answer):
         if not (setup and only_setup_questions(answer)):
             return None  # the agent handed the turn to the user on purpose
-        review, unverified, unseen, mobile = [], [], [], []  # it only asked whether to set up the project: just that
+        review, unverified, unseen, mobile, ci_need = [], [], [], [], None  # it only asked whether to set up the project: just that
 
     key = ([f"{path}|{p['msg']}" for path, p in broken] + [text for _mark, text in items]
            + [f"review|{p}" for p in review] + [f"verify|{p}" for p in unverified] + [f"look|{p}" for p in unseen]
            + [f"mobile|{p}" for p in mobile]
-           + [f"setup|{s}" for s in setup] + (["announced|" + answer.strip()[:80]] if announced else []))
+           + [f"setup|{s}" for s in setup]
+           + ([f"ci|{ci_need[0]}|{ci_need[2]}"] if ci_need else [])
+           + (["announced|" + answer.strip()[:80]] if announced else []))
     if not first_time(st, key):
         # It already decided to stop with exactly this left: say no more about it, but its report still has to be
         # true (seen live: «Тесты не запускались… Готово, тесты проходят») and rest on a look, not on giving in.
@@ -692,6 +804,14 @@ def decide(payload: dict) -> Optional[str]:
                                              if offers_setup(answer) else "")
                      + "Set up the project now — it's yours to do, no need to ask:\n" + "\n".join(steps)
                      + "\nThen say in one line what you did. Skip a step only if the user said not to.")
+    if ci_need:
+        ci_ws, ci_wfs, _ = ci_need
+        wfs = ", ".join(ci_wfs[:4]) + (f", +{len(ci_wfs) - 4}" if len(ci_wfs) > 4 else "")
+        parts.append(f"Antigravity Plus: you pushed changes to the remote, and this repository has CI workflows ({wfs}), "
+                     f"but you haven't tracked the CI run. Run `{py} \"{CI_SCRIPT}\" watch --workspace \"{ci_ws}\"` "
+                     "(BypassSandbox: true) now. If it moves to the background while CI runs, end your turn with one line "
+                     "saying you're waiting for CI — its completion message will wake you up with the result and any "
+                     "failure logs. Skip only if the user asked not to wait for CI.")
     return "\n\n".join(parts)
 
 

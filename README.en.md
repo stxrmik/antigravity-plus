@@ -21,8 +21,9 @@ every edit checked · an agent that finishes the job
 
 ---
 
-One plugin: 21 commands, 7 subagents, 6 hooks and working rules. One command installs it; the whole plugin is turned
-on and off on Antigravity's plugin page. Python standard library only, no dependencies.
+One plugin: 22 commands, 7 subagents, 6 hooks and working rules — plus a skill for Claude Code that lets it hand
+part of its work to Antigravity agents on its own. One command installs it; the whole plugin is turned on and off on
+Antigravity's plugin page. Python standard library only, no dependencies.
 
 ## Why
 
@@ -38,11 +39,13 @@ on and off on Antigravity's plugin page. Python standard library only, no depend
 | The agent stops halfway, or "verifies" with a command that just prints "ok" | The Stop hook sends it back to finish `task.md`, run the tests and look at the UI |
 | A syntax error surfaces three steps later | Every edit is checked right away: Python, JS, Swift, shell, JSON, YAML… |
 | "Do you want me to…?" for every small step | The agent creates the git repository and `AGENTS.md` itself; one "yes" grants full access |
+| Claude Code spends its own limit on routine work while the Antigravity quota sits idle | Claude Code hands bulky routine work to an Antigravity agent itself, picks the model and checks the result |
 
 ## Install
 
 You need **Google Antigravity 2.x**, **Python 3.8+** and **git**. `/ui-check` also needs Chrome, Chromium, Edge or
-Brave. `/mobile` needs Xcode (the iOS simulator, macOS only) and/or the Android SDK (the emulator) — nothing else.
+Brave. `/mobile` needs Xcode (the iOS simulator, macOS only) and/or the Android SDK (the emulator); `/ci` uses `gh`
+(GitHub) or `glab` (GitLab) — nothing else.
 
 **macOS and Linux**
 
@@ -62,6 +65,9 @@ cd antigravity-plus
 
 Restart Antigravity after the first install. The installer checks that Antigravity loaded the plugin and that the
 hooks work; `/doctor` does the same inside Antigravity.
+
+When Claude Code is on the computer (a `~/.claude` folder), the installer also adds its skill `antigravity` to
+`~/.claude/skills/antigravity`; new Claude Code sessions pick it up. Don't want it: `./install.sh --no-claude`.
 
 - **Update:** `git pull`, then the same install command.
 - **Uninstall:** `./install.sh --uninstall` (Windows: `.\install.cmd --uninstall`). Memory and settings stay;
@@ -119,6 +125,34 @@ hooks work; `/doctor` does the same inside Antigravity.
 - `/parallel` does the same on request, with brief templates; for four or more similar pieces the agent uses
   Antigravity's built-in `run_workflow`.
 
+### 🔀 Claude Code hands tasks to Antigravity
+- Claude Code gets a skill, `antigravity`. Claude Code decides itself what to hand over: light, simple tasks (a small
+  function with its test, a rename, a lint fix, docs, a lookup across files) as well as bulky work with a lot of
+  reading, editing and re-running but few decisions — edits across many files, tests, a build → error → fix loop,
+  porting code, translations, digging through a large codebase or logs, long commands. It keeps design decisions,
+  subtle bugs, one-step edits in a file it already has open, commits, pushes and deploys for itself.
+- It checks the limits before handing work over: its own (the Claude desktop app's `get_usage`, `/usage` in a
+  terminal) and Antigravity's (`delegate.py budget`: the weekly and 5-hour window of each quota group and the pace of
+  spending). Its own limit running low → it hands over more, light tasks included; Antigravity's quota tight → only
+  bulky work on the cheapest model; used up → it does the work itself until the reset.
+- The model is a tier or an exact id: `fast` — Gemini 4 Hydrogen (Low) for light tasks, `standard` — Gemini 4 Hydrogen
+  (High) for work from a clear spec, `strong` — Gemini 4 Carbon (High) for multi-file features and debugging, `claude`
+  — Claude Sonnet 5.5 (High) in Antigravity, on its separate Claude quota. Within a tier the limits left decide:
+  used-up models are skipped, a "tight" quota group (under 15% left, or spent faster than the week goes by) comes
+  last, and a quota that would reset unused soon comes first. The output says why this model.
+- Why Hydrogen for light work: on the same task Hydrogen (Low) finished in 20 s and 4 model calls, Gemini 3.8 Flash in
+  25 s and 9 calls; Hydrogen streams ~400–650 tokens/s against ~130–310 for Flash, while Gemini 4 Carbon (High) thinks
+  ~11 s before each answer. `delegate.py models` shows each model's speed in your recent conversations.
+- The Antigravity agent works in the same folder, its conversation shows up in Antigravity ("Claude Code: …"), and
+  Claude Code does its own part meanwhile. At the end Claude Code gets a short report: the agent's words, the files it
+  changed (+/− lines), its commands with exit codes, and the cost — model calls, tokens, share of the weekly limit.
+- Claude Code checks the result itself (the diff, its own test run) and can send a follow-up into the same
+  conversation — the agent goes on with its context.
+- The agent may not commit, push, deploy or ask questions — nobody reads it. When the guard asks for a confirmation,
+  Claude Code doesn't approve it itself; it tells you that a decision waits for you in Antigravity.
+- The saving: the agent's reading, editing and test runs come out of the Antigravity quota; Claude Code spends tokens
+  only on the brief and the report.
+
 ### 🏎️ Speed and context
 - A command that failed in Antigravity's terminal sandbox and worked with `BypassSandbox` is remembered for the
   project: in new conversations the agent runs it outside the sandbox right away, without a wasted run. A command
@@ -135,9 +169,14 @@ hooks work; `/doctor` does the same inside Antigravity.
 - Every edit is checked right away: Python, JS, Swift, shell, JSON, YAML, Ruby, plist and XML syntax, plus the
   project's linters (ruff, eslint, swiftlint, shellcheck). The agent sees the error before its next step.
 - The Stop hook won't let it end a turn with a syntax error, with open `task.md` items, without checking changed
-  code, or without looking at changed web UI or a changed screen of a mobile app.
+  code, without looking at changed web UI or a changed screen of a mobile app, or — in a repo with CI — without
+  tracking the pipeline after `git push` or `/pr`.
 - After a substantial change the agent runs `/review` itself: `code-reviewer` and `security-auditor` in parallel,
   with findings double-checked.
+- **CI tracked after push and PR until it finishes.** `/ci` tracks GitHub Actions (`gh`) and GitLab CI (`glab`) for
+  the exact pushed commit, moves into the background on long runs without polling loops (`sleep` / `gh run list`) and
+  wakes the agent up when done; on failure it extracts cleaned logs of the failed steps without blowing up context, and
+  before `/deploy` it checks that `HEAD` isn't red.
 
 ### 📱 Mobile apps
 - **The agent runs the app in the iOS simulator and the Android emulator itself, and looks at the screen.** `/mobile`
@@ -156,12 +195,13 @@ hooks work; `/doctor` does the same inside Antigravity.
 - A real phone on a cable isn't touched unless you name it; erasing a simulator or an emulator stops at the guard.
 
 ### 🔎 Facts, not guesses
-- **The report is held against what really happened.** The agent writes "tests pass", "29 passed", "deployed",
-  "pushed" or "checked, it works"? That only counts when a command in the conversation showed it; for checks, after
-  the last change. Numbers are checked against the output: "29 passed" when the output says "27 passed" sends the
-  agent back. So do a link to a file that doesn't exist, a line number past the end of a file, a link that came from
-  no search, page or file, and, in an answer to a question, a version or price recalled from memory. The agent goes
-  back once to check or correct the report and to say plainly what it couldn't confirm.
+- **The report is held against what really happened.** The agent writes "tests pass", "29 passed", "CI is green",
+  "deployed", "pushed" or "checked, it works"? That only counts when a command in the conversation showed it; for
+  checks, after the last change (and for CI, after the push). Numbers are checked against the output: "29 passed" when
+  the output says "27 passed" sends the agent back. So do a link to a file that doesn't exist, a line number past the
+  end of a file, a link that came from no search, page or file, and, in an answer to a question, a version or price
+  recalled from memory. The agent goes back once to check or correct the report and to say plainly what it couldn't
+  confirm.
 - **A question about facts starts with a search.** "Find", "what's the latest version", "how much does it cost",
   "compare", documentation → a hint to search with `researcher` or the web, read the primary source and put a link
   next to each fact. A question about the code ("where do we…", "why does it fail…") → find it in the code and cite
@@ -217,6 +257,7 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 | `/security-review` | audit of the branch with exploitability checks | ✅ when a change touches auth, secrets, payments |
 | `/ui-check` | screenshots at phone and laptop width, console errors, heavy effects | ✅ after UI changes |
 | `/mobile` | the app in the iOS simulator or the Android emulator: launch, screenshots, taps, typing, logs | ✅ after changes to an app's screens |
+| `/ci` | GitHub Actions and GitLab CI: wait for runs in the background, check status, clean failure logs | ✅ after `git push` and `/pr`, before `/deploy` |
 | `/git-init` | a git repository with a safe first commit | ✅ before the first change in a project without git |
 | `/init` | `AGENTS.md`: commands, architecture, conventions | ✅ in a project without rules |
 | `/remember` | a rule into `AGENTS.md`, `.agents/rules` or memory | ✅ when you state a rule |
@@ -237,6 +278,9 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 🔑 — on your request or with full access. Subagents: `explorer` (fast search on Flash), `researcher` (docs and APIs,
 on Flash), `worker` (a part of the implementation in its own files), `code-reviewer`, `security-auditor`,
 `debugger`, `test-writer`.
+
+In Claude Code: the skill `antigravity` — hand part of the work to an Antigravity agent on a model of its choice.
+Claude Code runs it itself when it pays off; you can also ask: "give the tests to Antigravity", `/antigravity …`.
 
 ## How it works
 
@@ -259,11 +303,11 @@ flowchart TD
 
 | Event | Hook | What it does |
 |---|---|---|
-| SessionStart | `session_start.py` | git context, project rules (and `CLAUDE.md`), memory, recent conversations, project setup hints, commands that need to run outside the sandbox |
+| SessionStart | `session_start.py` | git context, project rules (and `CLAUDE.md`), memory, recent conversations, mobile builds & CI workflows, project setup hints, commands that need to run outside the sandbox |
 | PreInvocation | `instructions.py` | your messages after a new message, after compaction and every ~30 steps; edit errors; other agents; what runs in the background and what to do meanwhile; the sandbox, context size, error loops; the memories your message is about, and what in it is worth remembering; whether to look facts up before answering; what an objective answer to an objection, a guess or a request for an opinion takes |
 | PreToolUse | `guard.py` | dangerous commands, secrets (in memory too), fake checks, other agents' file versions, bans from the conversation, full access |
 | PostToolUse | `check_edit.py`, `memory_sync.py` | edit checks, coordination, memory index |
-| Stop | `stop.py` | open items (including those it can do while subagents are busy), syntax errors, verification, review, UI, project setup, an action announced but not taken, facts in the report, agreement without a check, what to remember from the work |
+| Stop | `stop.py` | open items (including those it can do while subagents are busy), syntax errors, verification, review, UI, mobile screens, CI after push, project setup, an action announced but not taken, facts in the report, agreement without a check, what to remember from the work |
 
 ## Details
 
@@ -386,6 +430,7 @@ The agent is sent back (at most twice per turn) when:
 - it changed UI and didn't look at the result (`/ui-check`; a "check" that just prints "ok" doesn't count);
 - it changed a screen of a mobile app and didn't run the app on a simulator or an emulator afterwards (`/mobile`; a
   build alone isn't enough);
+- it pushed changes (`git push` or opening a PR/MR) in a repository with CI workflows without tracking the run (`/ci`);
 - it changed 3+ code files without `/review`;
 - the project has no git or no rules, and the agent only offered to set them up;
 - its answer ends with a promise ("Fixing the discount calculation…", "I'll run the tests now") and no action followed;
@@ -431,11 +476,15 @@ Good to know:
 </details>
 
 <details>
-<summary><b>🚢 /deploy, 🖼 /ui-check, 📋 /standup, 🪝 /hooks</b></summary>
+<summary><b>🔄 /ci, 🚢 /deploy, 🖼 /ui-check, 📋 /standup, 🪝 /hooks</b></summary>
 
+- **`/ci`** — tracks GitHub Actions (`gh`) and GitLab CI (`glab`): `detect` finds workflows and checks auth, `watch`
+  waits for every workflow of the exact pushed commit (moving into the background on long runs and waking the agent up
+  when done, with no `sleep` loops), `status` checks a branch or PR before deploying, `logs` extracts cleaned errors
+  from failed steps, and `rerun --failed` re-runs a confirmed runner/network flake.
 - **`/deploy`** — "If we deploy now, will anything break?" The agent shows what changed since the last deploy (from a
   file snapshot, so it works without git), grouped by risk: data and schema, configs and `.env`, dependencies,
-  infrastructure, code. The deploy itself: tests → lock → backup → deploy → health check → rollback on failure.
+  infrastructure, code. The deploy itself: tests and CI status → lock → backup → deploy → health check → rollback on failure.
 - **`/ui-check`** — screenshots at 390 and 1440 px through a headless browser (your browser isn't touched), console
   errors, a blank page; `--scan` finds effects that are heavy on phones (`backdrop-filter`, big blurs, endless
   animations).
@@ -459,6 +508,33 @@ Good to know:
 
 </details>
 
+<details>
+<summary><b>🔀 Claude Code → Antigravity: how it works</b></summary>
+
+- The skill `~/.claude/skills/antigravity` is a `SKILL.md` (when to hand work over, which model to take, how to write
+  the brief and check the result) and a script, `delegate.py`. Claude Code sees only the skill's name and "when to
+  use"; it reads the instructions once it decides to hand a task over.
+- `delegate.py run --model <tier or id>` finds the running Antigravity (on macOS it opens a closed one in the
+  background), takes the Antigravity project that holds the folder (or creates one), and starts the conversation
+  through Antigravity's own `agentapi`. Claude Code's brief gets the run rules: nobody watches, so no questions; no
+  commits, pushes or deploys; check the work after the last change; end with a STATUS / CHANGED / CHECKS / NOTES report.
+- It waits until the work is over, the agent's background commands and subagents included (up to 30 minutes by
+  default), and when the agent stops at a guard confirmation it reports at once what waits and why. Changed files
+  come from Antigravity (what the agent wrote with its tools), changes made by its commands from `git status`.
+- The rest: `budget` (both sides' limits, what each tier takes now, how much to hand over), `models` (every model:
+  quota left, price, measured speed), `wait`, `result`, `diff`, `send` (a follow-up in the same conversation),
+  `cancel`, `list`. Tasks are recorded in `~/.gemini/antigravity-plus/delegate/`.
+- In the Claude desktop app Claude Code takes its own limits from `get_usage` and passes them as `budget --claude-5h
+  <%> --claude-week <%>`. In a terminal the status line can remember them: add
+  `"statusLine": {"type": "command", "command": "python3 ~/.claude/skills/antigravity/scripts/delegate.py statusline"}`
+  to `~/.claude/settings.json`, and `budget` sees them by itself (for half an hour after the line last updated).
+- The plugin's hooks recognize these conversations by the first line of the brief: no nudges about `/git-init`,
+  `/init`, `/review`, CI, recent conversations or saving memories (memory is shared with Claude Code), while edit
+  checks, `task.md`, tests and facts in the report work as usual.
+- By hand: `python3 ~/.claude/skills/antigravity/scripts/delegate.py budget`.
+
+</details>
+
 ## Settings
 
 Tell the agent in your own words or use `/settings`. Everything is on by default and stored in
@@ -479,13 +555,15 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 | Sandbox memory, context and error-loop hints | "stop the context hints" | `speed-hints` |
 | Fact checks of reports, hints to look sources up | "don't fact-check the reports" | `fact-checks` |
 | Objective answers: hints and the check of agreement | "don't double-check what you agree with" | `objective-answers` |
+| Reminder to track CI after push | "don't remind me about CI" | `auto-ci` |
 
 ## Platforms and compatibility
 
 - **macOS, Linux, Windows.** Antigravity runs hooks with `sh -c` or `cmd /c`; the installer picks the Python command
   for your system (`py -3 -X utf8` on Windows). The guard understands sh/bash/zsh, PowerShell and cmd.
 - **Claude Code:** `CLAUDE.md` with `@imports`, `.claude/rules`, `~/.claude/CLAUDE.md`, `.claude/commands`,
-  `.claude/skills` and `.claude/agents` are picked up; project memory is shared.
+  `.claude/skills` and `.claude/agents` are picked up; project memory is shared. The other way round, the skill
+  `antigravity` lets Claude Code hand tasks to Antigravity agents (checked with Claude Code 2.1 and Antigravity 2.29).
 - `/mobile`: the iOS simulator on macOS with Xcode, the Android emulator on all three systems.
 - The agent answers in the language you write in. Some of the plugin's own messages (guard confirmations, `/doctor`)
   are in Russian for now — translations are welcome.
@@ -499,6 +577,7 @@ python3 tests/run_tests.py                                # offline tests: hooks
 python3 tests/live_mobile.py --ios                      # live check of /mobile: boots a simulator (or --android: an emulator)
 python3 antigravity-plus/hooks/guard.py --test "rm -rf ~"
 python3 antigravity-plus/hooks/checks.py path/to/file.py  # the same check an agent's edit gets
+python3 claude-code/skills/antigravity/scripts/delegate.py budget  # limits and tier models, as Claude Code sees them
 ```
 
 The tests never touch your `~/.gemini` or `~/.claude`: each runs in a throw-away home folder and feeds the hooks the
@@ -520,7 +599,8 @@ antigravity-plus/
 ├── rules/OBJECTIVE.md              # objective answers: check before you agree
 ├── agents/      explorer  researcher  worker  code-reviewer  security-auditor  debugger  test-writer
 ├── sidecars/usage/                 # the usage side panel
-└── skills/      21 commands: init remember memory handoff parallel review commit pr … mobile settings git-init doctor
+└── skills/      22 commands: init remember memory handoff parallel review commit pr ci … mobile settings git-init doctor
+claude-code/skills/antigravity/     # Claude Code's skill: SKILL.md + scripts/delegate.py (tasks → Antigravity)
 install.py, install.sh, install.cmd # installer for every OS
 tests/                              # offline tests; CI: .github/workflows/tests.yml
 ```
