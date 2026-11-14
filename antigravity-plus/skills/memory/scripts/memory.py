@@ -19,7 +19,7 @@ the line for a new memory, so the agent only writes the memory file itself.
   memory.py config [auto-memory on|off] [share-with-claude-code on|off] [recent-conversations N]
                    [finish-tasks on|off] [check-edits on|off] [auto-review on|off] [auto-verify on|off] [protect-secrets on|off]
                    [auto-setup on|off] [parallel-hints on|off] [speed-hints on|off] [fact-checks on|off]
-                   [objective-answers on|off] [auto-ci on|off]
+                   [objective-answers on|off] [auto-ci on|off] [git-checks on|off]
                    (settings of the whole plugin live here)
 
 Also imported by the hooks (session_start.py, guard.py, memory_sync.py). Stdlib only, Python 3.8+.
@@ -42,6 +42,7 @@ import compat  # noqa: E402  (atomic writes on Windows, the Python command for h
 HOME = os.path.expanduser("~")
 DATA = os.path.join(HOME, ".gemini", "antigravity-plus")
 SETTINGS = os.path.join(DATA, "settings.json")
+MODULES_FILE = os.path.join(DATA, "modules.json")  # the modules chosen at install time (install.py)
 PLUGIN_MEMORY = os.path.join(DATA, "memory")
 PERSONAL = os.path.join(PLUGIN_MEMORY, "personal")
 CLAUDE_HOME = os.path.join(HOME, ".claude")
@@ -51,7 +52,8 @@ INDEX = "MEMORY.md"
 TYPES = ("user", "feedback", "project", "reference")
 DEFAULTS = {"autoMemory": True, "shareWithClaudeCode": True, "recentConversations": 3, "finishTasks": True,
             "checkEdits": True, "autoReview": True, "autoVerify": True, "protectSecrets": True, "autoSetup": True,
-            "parallelHints": True, "speedHints": True, "factChecks": True, "objectiveAnswers": True, "autoCi": True}
+            "parallelHints": True, "speedHints": True, "factChecks": True, "objectiveAnswers": True, "autoCi": True,
+            "gitChecks": True}
 
 MAX_FILE = 64_000            # bytes read per memory file
 INDEX_LINES = 200            # like Claude Code: only the head of MEMORY.md goes into the conversation
@@ -81,7 +83,21 @@ def settings() -> dict:
             s.update({k: d[k] for k, v in DEFAULTS.items() if type(d.get(k)) is type(v)})
     except (OSError, ValueError):
         pass
+    s.update(modules_off())
     return s
+
+
+def modules_off() -> dict:
+    """Features of modules left out at install time (install.py writes MODULES_FILE): forced off over the user's
+    settings, so a hook never points the agent at a command that isn't installed."""
+    try:
+        with open(MODULES_FILE, encoding="utf-8") as f:
+            off = (json.load(f) or {}).get("off")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(off, dict):
+        return {}
+    return {k: v for k, v in off.items() if k in DEFAULTS and type(v) is type(DEFAULTS[k])}
 
 
 def save_settings(**changes) -> dict:
@@ -571,7 +587,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="auto-memory on|off, share-with-claude-code on|off, recent-conversations N, "
                          "finish-tasks on|off, check-edits on|off, auto-review on|off, auto-verify on|off, "
                          "protect-secrets on|off, auto-setup on|off, parallel-hints on|off, speed-hints on|off, "
-                         "fact-checks on|off, objective-answers on|off, auto-ci on|off")
+                         "fact-checks on|off, objective-answers on|off, auto-ci on|off, git-checks on|off")
     a = ap.parse_args(argv)
     ws = os.path.abspath(os.path.expanduser(getattr(a, "workspace", os.getcwd())))
 
@@ -598,7 +614,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "check-edits": "checkEdits", "auto-review": "autoReview", "auto-verify": "autoVerify",
                 "protect-secrets": "protectSecrets", "auto-setup": "autoSetup", "parallel-hints": "parallelHints",
                 "speed-hints": "speedHints", "fact-checks": "factChecks", "objective-answers": "objectiveAnswers",
-                "auto-ci": "autoCi"}
+                "auto-ci": "autoCi", "git-checks": "gitChecks"}
         p = a.pairs
         if len(p) % 2:
             ap.error("config takes pairs: <key> <value>")
@@ -613,7 +629,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 ap.error(f"bad setting: {k} {v} (auto-memory on|off, share-with-claude-code on|off, "
                          "recent-conversations N, finish-tasks on|off, check-edits on|off, auto-review on|off, "
                          "auto-verify on|off, protect-secrets on|off, auto-setup on|off, parallel-hints on|off, "
-                         "speed-hints on|off, fact-checks on|off, objective-answers on|off, auto-ci on|off)")
+                         "speed-hints on|off, fact-checks on|off, objective-answers on|off, auto-ci on|off, "
+                         "git-checks on|off)")
         s = save_settings(**changes) if changes else settings()
         print(json.dumps(s, ensure_ascii=False, indent=2))
     return 0

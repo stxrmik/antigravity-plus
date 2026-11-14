@@ -216,20 +216,23 @@ def setup_left(payload: dict, turn: dict, st: dict, answer: str) -> List[str]:
     ws = next((os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or [] if isinstance(w, str)), "")
     if not ws or not os.path.isdir(ws):
         return []
+    repo_init = None
     try:
-        sys.path.insert(0, os.path.dirname(GIT_INIT))
-        import repo_init
-        if repo_init.place_refusal(ws):
-            return []  # the home folder, ~/Downloads and the like
+        if os.path.isfile(GIT_INIT):  # the git module may not be installed: then only /init
+            sys.path.insert(0, os.path.dirname(GIT_INIT))
+            import repo_init
+            if repo_init.place_refusal(ws):
+                return []  # the home folder, ~/Downloads and the like
         r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=ws, capture_output=True, text=True, timeout=10)
         top = r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
         return []
     done = set(st.get("setup") or []) | set(turn["setup"])
     left = []
-    if "git" not in done and not top and not repo_init.refusal(ws):
+    if repo_init and "git" not in done and not top and not repo_init.refusal(ws):
         left.append("git")
-    if "init" not in done and not any(os.path.isfile(os.path.join(r, n)) for r in {ws, top} - {""} for n in RULE_FILES):
+    if os.path.isfile(INIT_SKILL) and "init" not in done and \
+            not any(os.path.isfile(os.path.join(r, n)) for r in {ws, top} - {""} for n in RULE_FILES):
         left.append("init")
     return left
 
@@ -274,6 +277,9 @@ def broken_files(payload: dict) -> List[tuple]:
     import check_edit
     return check_edit.unresolved_syntax(payload)
 
+
+# git commands that can stop half way and leave the repository in a rebase, merge, cherry-pick, revert, am or bisect
+GIT_MULTISTEP = re.compile(r"\bgit\b[^|;&\n]*\b(rebase|merge|cherry-pick|revert|am|bisect|pull|stash\s+(pop|apply))\b")
 
 # Commands that check work: tests, builds, linters, or running the changed program itself.
 VERIFY = re.compile(
@@ -454,11 +460,13 @@ def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
     background: Dict[str, List[dict]] = {}
     setup: Set[str] = set()
     reviewed = False
+    git_ops = False                          # a git command that can stop half way (rebase, merge, pull, …)
     wss = [os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or [] if isinstance(w, str)]
     try:
         f = open(tp, encoding="utf-8", errors="replace")
     except OSError:
-        return {"files": [], "reviewed": True, "pending": [], "unseen": [], "mobile": [], "setup": [], "ci": False}
+        return {"files": [], "reviewed": True, "pending": [], "unseen": [], "mobile": [], "setup": [], "ci": False,
+                "git": False}
     with f:
         for raw in f:
             m = STEP.search(raw[:120])
@@ -487,6 +495,8 @@ def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
                     line = str(args.get("CommandLine") or "")
                     if "repo_init.py" in line:
                         setup.add("git")
+                    if GIT_MULTISTEP.search(line):
+                        git_ops = True
                     did = mobile_command(line)
                     if did:
                         story.append(did)
@@ -521,7 +531,7 @@ def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
                         if ext in WEB_EXT and not screen and p not in unseen:
                             unseen.append(p)
     return {"files": files, "reviewed": reviewed, "pending": pending, "unseen": unseen, "mobile": unseen_screens(story),
-            "setup": sorted(setup), "ci": ci_untracked(ci_story)}
+            "setup": sorted(setup), "ci": ci_untracked(ci_story), "git": git_ops}
 
 
 def ci_untracked(story: List[dict]) -> bool:
@@ -668,6 +678,25 @@ def memory_check(payload: dict, st: dict, answer: str) -> Optional[str]:
     return msg
 
 
+def git_unfinished(payload: dict) -> Optional[dict]:
+    """A rebase, merge, cherry-pick, revert, am or bisect the agent left half done in this turn, or conflict markers
+    left in changed files (hooks/gitcheck.py)."""
+    try:
+        import gitcheck
+    except Exception:  # optional, like the other checks
+        return None
+    for w in payload.get("workspacePaths") or []:
+        if isinstance(w, str) and w:
+            try:
+                found = gitcheck.unfinished(os.path.realpath(conv.to_path(w)))
+            except Exception as e:  # never trap the agent over a check
+                print(f"stop: git: {e}", file=sys.stderr)
+                return None
+            if found:
+                return found
+    return None
+
+
 def decide(payload: dict) -> Optional[str]:
     if payload.get("terminationReason") != "NO_TOOL_CALL":
         return None
@@ -692,6 +721,7 @@ def decide(payload: dict) -> Optional[str]:
     mobile: List[str] = []
     setup: List[str] = []
     ci_need: Optional[Tuple[str, List[str], str]] = None
+    git_left: Optional[dict] = None
     answer = last_answer(tp) if tp else ""
     announced = announcement(answer) if st["users"] else ""
     handed = conv.delegated(st)  # a task from Claude Code: it reviews the result itself and never pushes from here
@@ -699,16 +729,17 @@ def decide(payload: dict) -> Optional[str]:
         turn = turn_changes(tp, st["users"][-1].get("step", -1), payload)
         setup = [] if handed else setup_left(payload, turn, st, answer)
         ci_need = None if handed else ci_left(payload, turn, st)
+        git_left = git_unfinished(payload) if turn.get("git") and setting("gitChecks") else None
         if setting("autoReview") and not handed and not turn["reviewed"] and len(turn["files"]) >= REVIEW_MIN_FILES:
             review = turn["files"]
         if setting("autoVerify"):
-            unseen = turn["unseen"]
+            unseen = turn["unseen"] if os.path.isfile(UI_CHECK) else []  # no /ui-check installed: tests are the check
             mobile = mobile_here(turn["mobile"], [os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or []
-                                                  if isinstance(w, str)]) if turn["mobile"] else []
+                                                  if isinstance(w, str)]) if turn["mobile"] and os.path.isfile(MOBILE) else []
             # the web UI and a mobile app's screens are checked by looking at them
             unverified = [p for p in turn["pending"] if p not in unseen and p not in mobile]
     if (not broken and not items and not review and not unverified and not unseen and not mobile
-            and not setup and not ci_need and not announced):
+            and not setup and not ci_need and not git_left and not announced):
         return (facts_check(payload, st, answer) or (objective_check(payload, st, answer) if st["users"] else None)
                 or (memory_check(payload, st, answer) if st["users"] and not handed else None))
     if handing_over(answer):
@@ -721,6 +752,7 @@ def decide(payload: dict) -> Optional[str]:
            + [f"mobile|{p}" for p in mobile]
            + [f"setup|{s}" for s in setup]
            + ([f"ci|{ci_need[0]}|{ci_need[2]}"] if ci_need else [])
+           + ([f"git|{git_left['kind']}|{','.join(git_left['conflicts'])}|{len(git_left['markers'])}"] if git_left else [])
            + (["announced|" + answer.strip()[:80]] if announced else []))
     if not first_time(st, key):
         # It already decided to stop with exactly this left: say no more about it, but its report still has to be
@@ -747,6 +779,10 @@ def decide(payload: dict) -> Optional[str]:
         parts.append(f"Antigravity Plus: you wrote «{announced}» and ended your turn without doing it — a message "
                      "doesn't run anything. Do it now with a tool call, then continue with the user's request until it's "
                      "done (or until you really need the user).")
+    if git_left:
+        import gitcheck
+        parts.append("Antigravity Plus: " + gitcheck.describe(git_left) + " Don't end your turn with it half done: "
+                     "finish it now (and run the tests), or undo it and say in one line why it's left as it was.")
     if broken:
         lines = "\n".join(f"- {rel(path)}: {p['tool']} {p.get('line') or ''} {p['msg']}".replace("  ", " ")
                           for path, p in broken[:SHOWN])

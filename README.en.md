@@ -21,9 +21,10 @@ every edit checked · an agent that finishes the job
 
 ---
 
-One plugin: 22 commands, 7 subagents, 6 hooks and working rules — plus a skill for Claude Code that lets it hand
-part of its work to Antigravity agents on its own. One command installs it; the whole plugin is turned on and off on
-Antigravity's plugin page. Python standard library only, no dependencies.
+One plugin: 23 commands, 7 subagents, 6 hooks and working rules — plus a skill for Claude Code that lets it hand
+part of its work to Antigravity agents on its own. One command installs it — whole, or the modules you pick at
+install time; on Antigravity's plugin page it is turned on and off as a whole. Python standard library only, no
+dependencies.
 
 ## Why
 
@@ -40,6 +41,7 @@ Antigravity's plugin page. Python standard library only, no dependencies.
 | A syntax error surfaces three steps later | Every edit is checked right away: Python, JS, Swift, shell, JSON, YAML… |
 | "Do you want me to…?" for every small step | The agent creates the git repository and `AGENTS.md` itself; one "yes" grants full access |
 | Claude Code spends its own limit on routine work while the Antigravity quota sits idle | Claude Code hands bulky routine work to an Antigravity agent itself, picks the model and checks the result |
+| With git the agent only looks at `git diff`, pages through a big diff in slices and leaves a conflicted rebase behind | The repository's state in one command, conflicts, history and GitHub step by step; no rebase half done, no conflict markers left |
 
 ## Install
 
@@ -68,6 +70,42 @@ hooks work; `/doctor` does the same inside Antigravity.
 
 When Claude Code is on the computer (a `~/.claude` folder), the installer also adds its skill `antigravity` to
 `~/.claude/skills/antigravity`; new Claude Code sessions pick it up. Don't want it: `./install.sh --no-claude`.
+
+### Modules
+
+On the first install in a terminal the installer shows a menu: every module with a detailed description, how much of
+the agent's context it takes and what this computer lacks for it. Numbers toggle modules, Enter installs. What you
+don't choose isn't installed: its commands, subagents, rules and side panel never reach Antigravity or its context,
+and the hook features of that module stay silent. The choice is saved, and updates ask nothing.
+
+| Module | What it gives | Context | Needs |
+|---|---|---|---|
+| Core | the guard, project context, your instructions after compaction, the working rules, `/init`, `/remember`, `/settings`, `/doctor`, `/hooks` | ≈4,800 | required |
+| Quality | every edit checked, the agent doesn't stop halfway, `/review`, `/security-review`, `/simplify`, 4 subagents | ≈900 | — |
+| Facts and honest answers | the report is held to what happened; an objection means checking | ≈1,500 | — |
+| Memory | auto-memory (shared with Claude Code), `/memory`, `/handoff`, recent conversations | ≈1,500 | — |
+| Parallel work | subagents `explorer`, `researcher`, `worker`, `/parallel` | ≈1,300 | — |
+| Speed and context | the sandbox, the context budget, loops of errors | hints only | — |
+| Git and GitHub | `/git`, `/commit`, `/pr`, `/fix-issue`, `/ci`, `/git-init` | ≈1,350 | git; gh for GitHub |
+| Deploy | `/deploy` | ≈200 | — |
+| Web UI checks | `/ui-check` | ≈150 | Chrome, Chromium, Edge or Brave |
+| Mobile apps | `/mobile` | ≈250 | Xcode and/or the Android SDK |
+| Token usage and reports | `/usage`, the side panel, `/standup`, `/export` | ≈350 | — |
+| Claude Code → Antigravity bridge | the `antigravity` skill for Claude Code | outside the context | Claude Code |
+
+"Context" is roughly how many tokens the module adds to every request of the agent (command descriptions and
+always-on rules). Full descriptions: `./install.sh --list`.
+
+```bash
+./install.sh --choose                  # pick the modules again (menu)
+./install.sh --without mobile,deploy   # the current choice minus these
+./install.sh --modules core,git,memory # exactly these modules (core is always in)
+./install.sh --all                     # every module
+```
+
+A module left out only because a tool was missing (Xcode, a browser, Claude Code) is added by the next update once the
+tool is there; a module you switched off stays off. Agents' terminals (Antigravity, Claude Code) never get the menu:
+they install the saved choice.
 
 - **Update:** `git pull`, then the same install command.
 - **Uninstall:** `./install.sh --uninstall` (Windows: `.\install.cmd --uninstall`). Memory and settings stay;
@@ -152,6 +190,21 @@ When Claude Code is on the computer (a `~/.claude` folder), the installer also a
   Claude Code doesn't approve it itself; it tells you that a decision waits for you in Antigravity.
 - The saving: the agent's reading, editing and test runs come out of the Antigravity quota; Claude Code spends tokens
   only on the brief and the report.
+
+### 🌿 Git and GitHub
+- `/git` — a playbook and a state snapshot: `git_state.py status` shows in one command the branch, ahead/behind, a
+  rebase or merge in progress, conflicts, changes, the stash and this branch's PR (`--github`) — and the exact next
+  commands. The agent takes it on its own for any git work beyond a quick look.
+- Branches and syncing (a rejected push means fetch, rebase, push again — not `--force`), conflicts step by step
+  (`git_state.py conflicts`: blocks, lines, which side is «ours» in a rebase), history — who changed what, when and why
+  (`git log -S`, `blame`, `bisect run`), safe undo, stash and worktrees.
+- GitHub through `gh`: issues, PRs, unresolved review threads (`git_state.py review`), releases, the API. Whatever others
+  see — comments, reviews, merges, releases — only on your request.
+- Nobody answers in Antigravity's terminal: `GIT_EDITOR=false`, and keyboard prompts wait forever. The guard refuses
+  what would hang (`git add -p`, `gh pr create` without a title, `gh pr merge` without a method, `gh auth login`) and
+  gives the form that works — e.g. `GIT_EDITOR=true git rebase --continue`.
+- The agent can't end its turn with a rebase or merge half done or conflict markers in files; unfinished git work from
+  before shows up at the start of a conversation, and it isn't touched without you.
 
 ### 🏎️ Speed and context
 - A command that failed in Antigravity's terminal sandbox and worked with `BypassSandbox` is remembered for the
@@ -257,6 +310,7 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 | `/security-review` | audit of the branch with exploitability checks | ✅ when a change touches auth, secrets, payments |
 | `/ui-check` | screenshots at phone and laptop width, console errors, heavy effects | ✅ after UI changes |
 | `/mobile` | the app in the iOS simulator or the Android emulator: launch, screenshots, taps, typing, logs | ✅ after changes to an app's screens |
+| `/git` | the repository's state in one command, branches and syncing, conflicts, history, safe undo, GitHub: issues, PRs, review threads, releases | ✅ for any git or GitHub work |
 | `/ci` | GitHub Actions and GitLab CI: wait for runs in the background, check status, clean failure logs | ✅ after `git push` and `/pr`, before `/deploy` |
 | `/git-init` | a git repository with a safe first commit | ✅ before the first change in a project without git |
 | `/init` | `AGENTS.md`: commands, architecture, conventions | ✅ in a project without rules |
@@ -556,6 +610,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 | Fact checks of reports, hints to look sources up | "don't fact-check the reports" | `fact-checks` |
 | Objective answers: hints and the check of agreement | "don't double-check what you agree with" | `objective-answers` |
 | Reminder to track CI after push | "don't remind me about CI" | `auto-ci` |
+| Git checks: commands that would hang, a rebase or merge left half done | "don't check git commands" | `git-checks` |
 
 ## Platforms and compatibility
 
@@ -592,16 +647,19 @@ antigravity-plus/
 ├── hooks/       session_start  instructions  guard  check_edit  memory_sync  stop
 │                conversation (the user's messages, full access)  checks (edit checks, secrets)
 │                coord (several agents)  parallel (background work)  speed (sandbox, context, error loops)
+│                gitcheck (git/gh commands that would hang, unfinished rebases, conflict markers)
 │                facts (facts in reports)  objective (objective answers)  memory_hints (auto-memory)
 │                compat (macOS / Linux / Windows)
-├── rules/AGENTS.md                 # always-on working rules
+├── rules/AGENTS.md                 # always-on working rules (core)
+├── rules/MEMORY.md, PARALLEL.md, GIT.md  # rules of the memory, parallel-work and git modules
 ├── rules/FACTS.md                  # facts and sources: don't invent, check, cite
 ├── rules/OBJECTIVE.md              # objective answers: check before you agree
 ├── agents/      explorer  researcher  worker  code-reviewer  security-auditor  debugger  test-writer
 ├── sidecars/usage/                 # the usage side panel
-└── skills/      22 commands: init remember memory handoff parallel review commit pr ci … mobile settings git-init doctor
+└── skills/      23 commands: init remember memory handoff parallel review commit pr git ci … mobile settings git-init doctor
 claude-code/skills/antigravity/     # Claude Code's skill: SKILL.md + scripts/delegate.py (tasks → Antigravity)
 install.py, install.sh, install.cmd # installer for every OS
+modules.py                          # the modules: what each holds, detailed descriptions, what is off without it
 tests/                              # offline tests; CI: .github/workflows/tests.yml
 ```
 

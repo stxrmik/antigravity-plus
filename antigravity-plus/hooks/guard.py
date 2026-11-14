@@ -10,6 +10,9 @@ Stops and asks the user (decision "force_ask", which ignores cached "always allo
     into what decides what the agent may do: Antigravity's settings and projects, MCP servers, installed plugins
     (this guard among them), Antigravity Plus's own settings; also connecting an MCP server (/settings) and turning
     secret protection off — the agent changes these only on the user's explicit request, and the user confirms;
+  * git and gh commands that would wait at the keyboard in Antigravity's terminal (`git add -p`, `gh pr create`
+    without a title and body, `gh auth login`…) or fail on its GIT_EDITOR=false (`git rebase --continue`) — refused
+    ("deny") with the form that works (hooks/gitcheck.py, setting gitChecks);
   * run_command that only prints success and checks nothing (`echo "tests passed"`, hooks/facts.py) — refused
     ("deny"), so the agent runs the real check or says it couldn't;
   * write_file / edit_file over a file that changed since this agent last read or wrote it (hooks/coord.py) —
@@ -51,6 +54,10 @@ try:
     import facts
 except Exception:  # the fake-check rule is optional; the guard must work without it
     facts = None
+try:
+    import gitcheck
+except Exception:  # optional like facts: git commands that would hang the agent
+    gitcheck = None
 
 PLUGIN = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.join(PLUGIN, "skills", "memory", "scripts"))
@@ -601,6 +608,13 @@ def protect_secrets() -> bool:
         return True
 
 
+def git_checks() -> bool:
+    try:
+        return bool(memstore.settings().get("gitChecks", True)) if memstore else True
+    except Exception:
+        return True
+
+
 def memory_elsewhere(payload: dict, path: str, content: str) -> Optional[str]:
     """A new file in the memory format (frontmatter with name, description and metadata.type) outside the memory
     folders: no later conversation would ever see it. The reason names the exact folder to write it to."""
@@ -642,6 +656,10 @@ def decide(payload: dict) -> dict:
         return PASS
     if tool == "run_command":
         subject = unwrap(args.get("CommandLine") or args.get("command") or "")
+        stall = gitcheck.interactive(subject) if gitcheck and git_checks() else None
+        if stall:  # it would wait at the keyboard (or fail on GIT_EDITOR=false): refuse with the form that works
+            log(payload, tool, stall[0], subject)
+            return {"decision": "deny", "reason": f"🛡️ Antigravity Plus: {stall[1]}"}
         hit = analyze_command(subject)
         secret = secret_print(subject) if not hit and protect_secrets() else None
         if secret:  # refuse rather than ask: the agent can do the same without printing the value

@@ -133,6 +133,14 @@ def git_block(ws: str) -> List[str]:
     elif not branch.startswith("("):
         line += " · not pushed (no upstream)"
     out.append(line)
+    try:
+        import gitcheck
+        left = gitcheck.unfinished(top)
+        if left:  # found before any work starts: say whose it is likely to be, never fix it silently
+            out.append("⚠ Unfinished git work from before this conversation: " + gitcheck.describe(left)
+                       + " It isn't yours: ask the user before finishing or undoing it, unless the request is about it.")
+    except Exception as e:  # the snapshot must come through anyway
+        print(f"session_start: gitcheck: {e}", file=sys.stderr)
 
     status = git(["status", "--porcelain=v1", "--untracked-files=normal"], top, timeout=6.0)
     if status is None:
@@ -355,15 +363,17 @@ def setup_hints(ws: str, top: Optional[str]) -> List[str]:
         pass
     out = []
     script = os.path.join(PLUGIN, "skills", "git-init", "scripts", "repo_init.py")
+    repo_init = None
     try:
-        sys.path.insert(0, os.path.dirname(script))
-        import repo_init
-        if repo_init.place_refusal(os.path.realpath(ws)):
-            return []  # the home folder, ~/Downloads and the like: not one project
+        if os.path.isfile(script):  # the git module may not be installed: then only the /init hint
+            sys.path.insert(0, os.path.dirname(script))
+            import repo_init
+            if repo_init.place_refusal(os.path.realpath(ws)):
+                return []  # the home folder, ~/Downloads and the like: not one project
     except Exception as e:
         print(f"session_start: setup: {e}", file=sys.stderr)
         return []
-    if not top:
+    if not top and repo_init:
         if not repo_init.refusal(ws):
             out.append("No git repository yet. Before your first change here, run this command yourself (a "
                        f"run_command call; no need to ask): `{compat.python_cmd()} \"{script}\" --path \"{ws}\"`. It adds a safe "

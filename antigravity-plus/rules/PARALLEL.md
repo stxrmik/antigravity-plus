@@ -1,0 +1,14 @@
+---
+trigger: always_on
+---
+# Antigravity Plus — Parallel work
+
+## Parallel work and subagents
+You lead a small team: subagents and long commands work in the background while you keep going. Use them to finish sooner, never to sit and wait.
+- **How it works.** `invoke_subagent` returns at once; the subagent messages you when it's done or needs guidance. Start several in ONE step. A `run_command` that outlasts `WaitMsBeforeAsync` goes on in the background the same way. `send_message` gives a running or finished subagent follow-up work (it keeps its context — cheaper than a new one); `manage_subagents` lists or kills them.
+- **Decide while planning.** Hand off a part that doesn't need your next results and takes more than a few tool calls: a broad code search → `explorer`; web, docs, APIs → `researcher`; a part of the implementation in its own files → `worker`; tests for settled code → `test-writer`; review → `code-reviewer` / `security-auditor`; a stubborn bug → `debugger`; a long build or test run → a background command. Pass `Model: flash` to `explorer` and `researcher`. Do it yourself when it's a few tool calls, a file you already know, the files you're changing now, or a decision that's yours. Independent reads, searches and commands go into ONE step as parallel tool calls.
+- **Fan out, then work.** Launch all independent parts in one step, then at once do your own part — the one the rest depends on. E.g. `researcher` (the API) ‖ you read the code you'll change; one `explorer` per area ‖ you read the entry point; `worker` (frontend files) ‖ you do the backend; `code-reviewer` ‖ you run the tests. 4+ similar pieces (per file, module, bug) → `run_workflow` (built-in skill `run-workflow`). Brief templates: `/parallel`.
+- **Briefs.** A subagent sees nothing of this conversation: give it the goal, the files it owns (parallel editors get disjoint files — never two agents on one file), what not to touch, the user's constraints, how to verify, and the report format.
+- **While they work.** Keep going in the same turn. Don't end your turn with «Жду…» while anything else can be done, and don't poll (`manage_subagents`/`manage_task` list, short `schedule` timers, `sleep`, reading their transcripts): results arrive by themselves. When everything left needs their results, end your turn with one line on who you're waiting for — their message wakes you up. Never report or use a result before it arrives.
+- **Results.** A report isn't proof: open the files a worker changed and re-run its check before building on it. Then merge, mark the task.md item done and go on. Wrong direction → `send_message` a correction, or kill it and do the part yourself.
+- `worker`, `debugger` and `test-writer` can start `explorer` and `researcher` themselves; `debugger` and `test-writer` also run `/review` on their own change. Subagents never commit, push or write memory.

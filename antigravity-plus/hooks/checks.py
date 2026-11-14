@@ -380,11 +380,28 @@ def checker_for(path: str):
 
 
 def check_file(path: str, root: Optional[str] = None) -> Optional[List[dict]]:
-    """Problems found in `path` ([] = clean), or None when there is nothing to check it with."""
+    """Problems found in `path` ([] = clean), or None when there is nothing to check it with. Conflict markers left
+    by a merge or rebase count in any text file but docs (hooks/gitcheck.py)."""
+    left = conflict_markers(path)
+    if left:
+        return left
     fn = checker_for(path)
     if not fn or not os.path.isfile(path) or os.path.getsize(path) > MAX_BYTES:
         return None
     return fn(path, root or os.path.dirname(path))
+
+
+def conflict_markers(path: str) -> List[dict]:
+    try:
+        import gitcheck
+        lines = gitcheck.file_markers(path) if os.path.isfile(path) else []
+    except Exception:  # an optional check must never break the others
+        return []
+    if not lines:
+        return []
+    where = ", ".join(str(n) for n in lines[:5]) + (" …" if len(lines) > 5 else "")
+    return [problem("git", f"unresolved merge conflict markers (<<<<<<< … >>>>>>>) at line {where}: keep what both "
+                    "sides meant and delete the marker lines", line=lines[0])]  # blocks the turn like a syntax error
 
 
 def main(argv: Optional[List[str]] = None) -> int:

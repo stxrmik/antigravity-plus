@@ -201,6 +201,44 @@ def _drop_registry(hooks: str, ws: str) -> None:
         pass
 
 
+def modules_state() -> dict:
+    """The modules chosen at install time (install.py writes ~/.gemini/antigravity-plus/modules.json)."""
+    try:
+        with open(os.path.expanduser("~/.gemini/antigravity-plus/modules.json"), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) and isinstance(d.get("installed"), list) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def off_line(key: str, warn: str) -> str:
+    """A feature that is off: because its module isn't installed (a note), or because the user turned it off."""
+    mods = modules_state()
+    if key in (mods.get("off") or {}):
+        owner = next((m for m, t in (mods.get("titles") or {}).items() if m not in mods["installed"]
+                      and key in MODULE_KEYS.get(m, ())), "")
+        title = ((mods.get("titles") or {}).get(owner) or {}).get("ru", owner) if owner else "?"
+        return f"ℹ️ {warn.split(' выключен')[0].split(':')[0]}: модуль «{title}» не установлен"
+    return f"{WARN} {warn}"
+
+
+MODULE_KEYS = {"quality": ("checkEdits", "finishTasks", "autoReview", "autoVerify"),
+               "facts": ("factChecks", "objectiveAnswers"), "memory": ("autoMemory", "recentConversations"),
+               "parallel": ("parallelHints",), "speed": ("speedHints",), "git": ("autoCi", "gitChecks")}
+
+
+def modules_line() -> str:
+    mods = modules_state()
+    if not mods:
+        return "ℹ️ модули: выбор ещё не сохранён — стоят все (выбрать: `./install.sh --choose`)"
+    titles = mods.get("titles") or {}
+    name = lambda m: (titles.get(m) or {}).get("ru", m)
+    left = [name(m) for m in titles if m not in mods["installed"]]
+    return (f"{OK} модули: {len(mods['installed'])} из {len(titles)} — " + ", ".join(name(m) for m in mods["installed"])
+            + (f"; не установлены: {', '.join(left)}" if left else "")
+            + (f" · изменить: `./install.sh --choose` в {mods['source']}" if mods.get("source") else ""))
+
+
 def hook_selftest() -> List[str]:
     out = []
     hooks = os.path.join(PLUGIN, "hooks")
@@ -253,7 +291,7 @@ def hook_selftest() -> List[str]:
                    + ("" if ok else f" — {res[:160]!r}"))
         _cleanup_selftest(tp)
     if os.path.isfile(instr) and memstore and not memstore.settings().get("parallelHints", True):
-        out.append(f"{WARN} parallel: подсказки о параллельной работе выключены (`memory.py config parallel-hints on`)")
+        out.append(off_line("parallelHints", "parallel: подсказки о параллельной работе выключены (`memory.py config parallel-hints on`)"))
     elif os.path.isfile(instr):  # parallel work: right after a subagent starts, the agent hears it shouldn't sit and wait
         tp = _fake_transcript(["Найди, где считается цена"])
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -270,7 +308,7 @@ def hook_selftest() -> List[str]:
                    + ("" if ok else f" — {res[:160]!r}"))
         _cleanup_selftest(tp)
     if os.path.isfile(instr) and memstore and not memstore.settings().get("speedHints", True):
-        out.append(f"{WARN} speed: подсказки о песочнице, контексте и циклах ошибок выключены (`memory.py config speed-hints on`)")
+        out.append(off_line("speedHints", "speed: подсказки о песочнице, контексте и циклах ошибок выключены (`memory.py config speed-hints on`)"))
     elif os.path.isfile(instr):  # three failing commands in a row: the agent hears it should change the approach
         tp = _fake_transcript(["Обнови сервер"])
         with open(tp, "a", encoding="utf-8") as f:
@@ -286,7 +324,7 @@ def hook_selftest() -> List[str]:
         _cleanup_selftest(tp)
     stop = os.path.join(hooks, "stop.py")
     if os.path.isfile(instr) and memstore and not memstore.settings().get("autoMemory", True):
-        out.append(f"{WARN} автопамять выключена: агент сохраняет только по просьбе, подсказок нет (`memory.py config auto-memory on`)")
+        out.append(off_line("autoMemory", "автопамять выключена: агент сохраняет только по просьбе, подсказок нет (`memory.py config auto-memory on`)"))
     elif os.path.isfile(instr) and os.path.isfile(stop):  # auto-memory: the agent hears what's worth saving, and saves it
         tp = _fake_transcript(["Запомни: деплой только через ./deploy/update.sh"])
         hint = call(instr, {"conversationId": SELFTEST_ID, "transcriptPath": tp})
@@ -300,7 +338,7 @@ def hook_selftest() -> List[str]:
                    "секрет в память не пропускается" + ("" if ok else f" — {hint[1][:100]!r} / {back[1][:100]!r} / {secret[1][:80]!r}"))
         _cleanup_selftest(tp)
     if os.path.isfile(stop) and memstore and not memstore.settings().get("factChecks", True):
-        out.append(f"{WARN} факты: проверка отчётов выключена (`memory.py config fact-checks on`)")
+        out.append(off_line("factChecks", "факты: проверка отчётов выключена (`memory.py config fact-checks on`)"))
     elif os.path.isfile(stop):  # facts: a claim with nothing behind it, and a check that only prints «passed»
         tp = _fake_transcript(["Почини сортировку"])
         with open(tp, "a", encoding="utf-8") as f:
@@ -315,7 +353,7 @@ def hook_selftest() -> List[str]:
                    "отклоняется" + ("" if ok else f" — {claim[1][:100]!r} / {fake[1][:80]!r}"))
         _cleanup_selftest(tp)
     if os.path.isfile(stop) and memstore and not memstore.settings().get("objectiveAnswers", True):
-        out.append(f"{WARN} объективность: подсказки и проверка согласия выключены (`memory.py config objective-answers on`)")
+        out.append(off_line("objectiveAnswers", "объективность: подсказки и проверка согласия выключены (`memory.py config objective-answers on`)"))
     elif os.path.isfile(stop) and os.path.isfile(instr):  # objectivity: an objection → check first; giving in → back
         tp = _fake_transcript(["Ты ошибся: я точно знаю, что 0.1 + 0.2 == 0.3 даёт True. Признай ошибку."])
         hint = call(instr, {"conversationId": SELFTEST_ID, "transcriptPath": tp})
@@ -435,7 +473,7 @@ def hook_selftest() -> List[str]:
     ci_py = os.path.join(PLUGIN, "skills", "ci", "scripts", "ci.py")
     if os.path.isfile(stop) and os.path.isfile(ci_py) and shutil.which("git"):
         if memstore and not memstore.settings().get("autoCi", True):
-            out.append(f"{WARN} ci: напоминание отслеживать CI после пуша выключено (`memory.py config auto-ci on`)")
+            out.append(off_line("autoCi", "ci: напоминание отслеживать CI после пуша выключено (`memory.py config auto-ci on`)"))
         else:
             ws = tempfile.mkdtemp(prefix="agp-doctor-")
             art = tempfile.mkdtemp(prefix="agp-doctor-")
@@ -548,7 +586,9 @@ def antigravity_view(inv: dict, workspace: Optional[str]) -> List[str]:
     out.append(f"{OK if active and not missing_rules else WARN} правила: "
                + (", ".join(f"rules/{n}" for n in active) + " активны" if active else "не найдены")
                + (f" · не действуют: {', '.join(missing_rules)} (нужен `trigger: always_on` или новый разговор)" if missing_rules else ""))
-    out.append(panel_status(ls))
+    mods = modules_state()
+    out.append(panel_status(ls) if not mods or "usage" in mods["installed"]
+               else "ℹ️ панель «Расход токенов»: модуль «Расход токенов и отчёты» не установлен")
     # name collisions: same skill name provided by someone else wins/loses silently
     try:
         skills = rpc(ls, "GetAllSkills", body).get("skills") or []
@@ -724,6 +764,8 @@ def mobile_status(ws: str) -> List[str]:
         sys.path.insert(0, os.path.join(PLUGIN, "skills", "mobile", "scripts"))
         import mobile
     except Exception as e:
+        if not os.path.isdir(os.path.join(PLUGIN, "skills", "mobile")):
+            return ["ℹ️ модуль «Мобильные приложения» не установлен"]
         return [f"{BAD} модуль /mobile не загрузился: {e}"]
     out = []
     if mobile.xcrun():
@@ -770,6 +812,8 @@ def continuity_status(ws: str) -> List[str]:
         sys.path.insert(0, os.path.join(PLUGIN, "skills", "handoff", "scripts"))
         import handoff
     except Exception as e:
+        if not os.path.isdir(os.path.join(PLUGIN, "skills", "handoff")):
+            return ["ℹ️ модуль «Память и продолжение работы» не установлен"]
         return [f"{BAD} модуль /handoff не загрузился: {e}"]
     rows = handoff.index_rows()
     root = memstore.project_root(ws) if memstore else ws
@@ -800,7 +844,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     inv = local_inventory()
 
     if a.install_check:
-        lines = antigravity_view(inv, None) + hook_selftest()
+        lines = [modules_line()] + antigravity_view(inv, None) + hook_selftest()
         print("\n".join("  " + ln for ln in lines))
         return 0
 
@@ -814,6 +858,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     for name, size in inv["rules"].items():
         if size > RULE_FILE_LIMIT:
             rep.append(f"{WARN} rules/{name} {size} байт > лимита {RULE_FILE_LIMIT} — будет обрезан")
+    rep.append(modules_line())
     rep += ["", "### Что видит Antigravity"] + antigravity_view(inv, ws)
     rep += ["", "### Хуки (самопроверка)"] + hook_selftest()
     rep += ["", "### Окружение"] + environment()
