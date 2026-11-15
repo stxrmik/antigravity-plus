@@ -45,6 +45,12 @@ STATUS_CHECK = re.compile(r"\b(status|progress|done yet|are you done|finished ye
                           r"(answer|result|report)|how(?:'s| is) it going)\b|как\s+(дела|успехи|прогресс)|готов[оа]?\s*\?|"
                           r"\bстатус|\bну\s+что\b", re.I)
 WAIT_CMD = re.compile(r"^\s*(sleep\s+\d|timeout\s+(/t\s+)?\d|start-sleep\b|echo\s+[\"']?(waiting|wait\b|жду))", re.I)
+# A delegated agent talking to Claude Code (claude-code/skills/antigravity/scripts/delegate.py): its questions, and
+# Claude Code's answers, messages and follow-ups, which arrive as agent messages from "system" (delegate.py ANSWER,
+# MESSAGE and FOLLOW_UP start like this).
+CLAUDE_ASK = re.compile(r"delegate\.py[\"']?\s+ask\b")
+CLAUDE_SAYS = re.compile(rb"sender=system\b[^\n]{0,200}?content=(?:Claude Code answers your question|Claude Code says:|"
+                         rb"Follow-up from Claude Code:)")
 POLL_TIMER = 180          # schedule timers shorter than this, set while work is running, are polling
 BG_KEEP = 60              # finished entries kept in the state
 # How the steps go (hooks/speed.py).
@@ -222,6 +228,9 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
     bg = st.setdefault("bg", {})
     calls = st.setdefault("calls", {})
     if kind == b"SYSTEM_MESSAGE":
+        if CLAUDE_SAYS.search(raw):
+            sm = STEP.search(raw[:120])
+            st["claude_said"] = int(sm.group(1)) if sm else st["last_step"]
         for m in REPORT.finditer(raw):
             it = bg.get(m.group(2).decode())
             if it and it.get("st") == "run":
@@ -302,6 +311,8 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
                 polling = False  # reading a subagent's transcript to see how it's doing is polling
         elif not (name == "run_command" and WAIT_CMD.search(str(a.get("CommandLine") or ""))):
             polling = False
+        if name == "run_command" and CLAUDE_ASK.search(str(a.get("CommandLine") or "")):
+            st["claude_ask"] = step  # it asked Claude Code; the answer arrives as a message
     st["bg_pending"] = pending
     if polling:
         calls["poll_step"] = step
@@ -523,6 +534,12 @@ def delegated(st: Optional[dict], payload: Optional[dict] = None) -> bool:
         cur = payload.get("lastUserInput")
         texts = [user_text(cur)] if isinstance(cur, str) and cur.strip() else []
     return bool(texts) and all(t.lstrip().startswith(DELEGATED_MARK) for t in texts)
+
+
+def waiting_for_claude(st: Optional[dict]) -> bool:
+    """A delegated agent asked Claude Code something (`delegate.py ask`) and no answer has come since: ending its
+    turn to wait is right — the answer wakes it up."""
+    return int((st or {}).get("claude_ask", -1)) > int((st or {}).get("claude_said", -1))
 
 
 def with_current(st: Optional[dict], payload: dict) -> List[dict]:

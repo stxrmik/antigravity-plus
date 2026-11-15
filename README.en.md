@@ -184,9 +184,16 @@ they install the saved choice.
 - The Antigravity agent works in the same folder, its conversation shows up in Antigravity ("Claude Code: …"), and
   Claude Code does its own part meanwhile. At the end Claude Code gets a short report: the agent's words, the files it
   changed (+/− lines), its commands with exit codes, and the cost — model calls, tokens, share of the weekly limit.
+- **They talk while they work.** When a wrong guess would cost a redo, the Antigravity agent asks Claude Code
+  (`ask`); what Claude Code should know — the tests were red before it started, the task touches a file outside its
+  scope — it tells (`tell`). Claude Code hears it at once, not at the end: with the Monitor tool (`delegate.py watch`)
+  each question, message, approval wait and the task's end arrive as notifications while it does its own part;
+  without Monitor a background wait returns with exit code 4 as soon as the agent asks. Claude Code answers with
+  `reply` — the answer lands in the same Antigravity conversation between the agent's steps, and wakes an agent that
+  ended its turn to wait. The same `reply` lets Claude Code steer it any time: «also cover X», «leave Y alone».
 - Claude Code checks the result itself (the diff, its own test run) and can send a follow-up into the same
-  conversation — the agent goes on with its context.
-- The agent may not commit, push, deploy or ask questions — nobody reads it. When the guard asks for a confirmation,
+  conversation — the agent goes on with its context. The report includes their talk.
+- The agent may not commit, push or deploy; it asks Claude Code, not you. When the guard asks for a confirmation,
   Claude Code doesn't approve it itself; it tells you that a decision waits for you in Antigravity.
 - The saving: the agent's reading, editing and test runs come out of the Antigravity quota; Claude Code spends tokens
   only on the brief and the report.
@@ -570,14 +577,26 @@ Good to know:
   use"; it reads the instructions once it decides to hand a task over.
 - `delegate.py run --model <tier or id>` finds the running Antigravity (on macOS it opens a closed one in the
   background), takes the Antigravity project that holds the folder (or creates one), and starts the conversation
-  through Antigravity's own `agentapi`. Claude Code's brief gets the run rules: nobody watches, so no questions; no
-  commits, pushes or deploys; check the work after the last change; end with a STATUS / CHANGED / CHECKS / NOTES report.
+  through Antigravity's own `agentapi`. Claude Code's brief gets the run rules: Claude Code watches and answers — ask
+  it with `ask`, tell it what matters with `tell` (the exact commands, with the script's path); no commits, pushes or
+  deploys; check the work after the last change; end with a STATUS / CHANGED / CHECKS / NOTES report.
+- The talk: `ask` and `tell` in the agent's terminal only print a JSON line — no file access, so they work inside
+  the terminal sandbox too. Claude Code reads those lines from the conversation itself (the command's output, or
+  Antigravity's message about a command that went to the background) — `watch` (for Monitor: a line per event, ends
+  with the task), `wait` (exit 4 on a question). `reply` sends the answer with `agentapi send-message`. The guard
+  lets `ask` / `tell` through without asking, but only the installed script in `~/.claude/skills/antigravity` and only
+  as one plain command (no `;`, `&&`, redirection or substitution), and the Stop hook leaves an agent that ended its
+  turn to wait for the answer alone.
 - It waits until the work is over, the agent's background commands and subagents included (up to 30 minutes by
-  default), and when the agent stops at a guard confirmation it reports at once what waits and why. Changed files
-  come from Antigravity (what the agent wrote with its tools), changes made by its commands from `git status`.
+  default), and when the agent stops at a guard confirmation or asks Claude Code something it reports at once.
+  Changed files come from Antigravity (what the agent wrote with its tools), changes made by its commands from
+  `git status`.
 - The rest: `budget` (both sides' limits, what each tier takes now, how much to hand over), `models` (every model:
-  quota left, price, measured speed), `wait`, `result`, `diff`, `send` (a follow-up in the same conversation),
-  `cancel`, `list`. Tasks are recorded in `~/.gemini/antigravity-plus/delegate/`.
+  quota left, price, measured speed), `wait`, `watch`, `reply`, `result`, `diff`, `send` (a follow-up in the same
+  conversation), `cancel`, `list`. Tasks and their talk are recorded in `~/.gemini/antigravity-plus/delegate/`.
+- The «Token usage» panel shows these conversations with their real model (from the task record; for other
+  conversations started through agentapi, from Antigravity's own metadata) and the task's name instead of the run
+  rules; Claude Code's follow-ups are turns of their own.
 - In the Claude desktop app Claude Code takes its own limits from `get_usage` and passes them as `budget --claude-5h
   <%> --claude-week <%>`. In a terminal the status line can remember them: add
   `"statusLine": {"type": "command", "command": "python3 ~/.claude/skills/antigravity/scripts/delegate.py statusline"}`

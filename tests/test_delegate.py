@@ -3,13 +3,18 @@ server and a fake agentapi: tiers and the fallback when a quota is used up, the 
 spent faster than the week lasts, one about to reset unused, everything used up), Claude Code's own limits (given,
 from the statusLine, unknown), measured speed, a new Antigravity project for an unknown folder, the report (changed
 files, commands, cost, the agent's words), an approval the task waits for, a timeout, a follow-up, diff, cancel,
-list, errors — and how the plugin's hooks treat a delegated conversation."""
+list, errors — talking while it works (the agent's ask / tell, in a command's output or in the message of a command
+that went to the background; wait → exit 4 on a question; watch for the Monitor tool; reply; send to a running
+task) — how the plugin's hooks treat a delegated conversation (no nudges while it waits for Claude Code's answer,
+the guard lets the talk commands through and nothing else), and the usage panel naming its model and task."""
 import http.server, json, os, pathlib, shutil, subprocess, sys, threading, time
 PLUGIN, SP = sys.argv[1], sys.argv[2]
 ROOT = os.path.dirname(PLUGIN)
 DELEGATE = os.path.join(ROOT, "claude-code", "skills", "antigravity", "scripts", "delegate.py")
 HOOKS = os.path.join(PLUGIN, "hooks")
+USAGE = os.path.join(PLUGIN, "skills", "usage", "scripts", "usage.py")
 HOME = os.path.expanduser("~")
+INSTALLED = os.path.join(HOME, ".claude", "skills", "antigravity", "scripts", "delegate.py")  # where the guard trusts it
 ok = True
 def check(name, cond, got=""):
     global ok; ok &= bool(cond)
@@ -23,11 +28,21 @@ subprocess.run(["git", "init", "-q"], cwd=ws); subprocess.run(["git", "add", "-A
 subprocess.run(["git", "commit", "-qm", "init"], cwd=ws)
 uri = lambda p: pathlib.Path(p).as_uri()
 EMPTY = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
-C1, C2, C3 = (c * 8 + "-aaaa-4bbb-8ccc-" + c * 12 for c in "abc")
+C1, C2, C3, C4, C5, C6, C7, C8 = (c * 8 + "-aaaa-4bbb-8ccc-" + c * 12 for c in "abcdef78")
 SENT = os.path.join(SP, "agentapi-calls.jsonl")
 
 def step(kind, **kw):
     return dict({"type": "CORTEX_STEP_TYPE_" + kind, "status": "CORTEX_STEP_STATUS_DONE"}, **kw)
+def talk_line(verb, text):
+    return f'python3 "{INSTALLED}" {verb} "{text}"'
+def wire(kind, mid, text):
+    return json.dumps({"to_claude_code": kind, "id": mid, "text": text}, ensure_ascii=False)
+def talk_step(verb, mid, text):  # the agent's ask / tell, its output in the command's own step
+    kind = "question" if verb == "ask" else "note"
+    return step("RUN_COMMAND", runCommand={"commandLine": talk_line(verb, text), "exitCode": 0, "combinedOutput": {
+        "full": f"Command exited with code 0.\n\nCommand output:\n{wire(kind, mid, text)}\nSent to Claude Code.\n"}})
+Q1, N1, Q2 = "Keep parse_date as an alias of the new name?", "Tests already failed before my change: test_y", \
+    "Which port should the dev server use?"
 BASE = {
     C1: [step("USER_INPUT"), step("SYSTEM_MESSAGE"),
          step("PLANNER_RESPONSE", plannerResponse={"response": ""}),
@@ -39,21 +54,49 @@ BASE = {
          dict(step("GENERIC"), status="CORTEX_STEP_STATUS_WAITING", requestedInteraction={"permission": {
              "resource": {"action": "write_file", "target": "/x/.git/hooks/pre-commit"}, "reason": "🛡️ guard says"}})],
     C3: [step("USER_INPUT"), step("PLANNER_RESPONSE", plannerResponse={"response": ""})],
+    # it told Claude Code something, asked a question and ended its turn to wait for the answer
+    C4: [step("USER_INPUT"), step("PLANNER_RESPONSE", plannerResponse={"response": ""}), talk_step("tell", "aaaa1111", N1),
+         talk_step("ask", "bbbb2222", Q1), step("PLANNER_RESPONSE", plannerResponse={"response": "Waiting for Claude Code's answer."})],
+    # it asked from a command that went to the background (the output comes in Antigravity's message) and works on
+    C5: [step("USER_INPUT"), step("PLANNER_RESPONSE", plannerResponse={"response": ""}),
+         step("RUN_COMMAND", runCommand={"commandLine": talk_line("ask", Q2), "combinedOutput": {"full": "running in the background"}}),
+         step("SYSTEM_MESSAGE", systemMessage={"agentMessage": {"sender": C5 + "/task-2", "content":
+              f'Task id "{C5}/task-2" finished with result:\nCommand exited with code 0.\n\nCommand output:\n{wire("question", "cccc3333", Q2)}\n',
+              "sourceMetadata": {"tool": {"toolCall": {"name": "run_command", "argumentsJson": json.dumps({"CommandLine": talk_line("ask", Q2)})}}}}}),
+         step("RUN_COMMAND", status="CORTEX_STEP_STATUS_RUNNING", runCommand={"commandLine": "npm run build"})],
 }
 FOLLOW = [step("SYSTEM_MESSAGE"), step("RUN_COMMAND", runCommand={"commandLine": "pytest -q", "exitCode": 0, "combinedOutput": {
     "full": "Command exited with code 0.\n\nCommand output:\n4 passed in 0.2s\n"}}),
     step("PLANNER_RESPONSE", plannerResponse={"response": "STATUS: done\nCHANGED: src.py — c = 4\nCHECKS: pytest -q → 4 passed\nNOTES: none"})]
+ANSWERED = [step("SYSTEM_MESSAGE"), step("PLANNER_RESPONSE", plannerResponse={"response":
+    "STATUS: done\nCHANGED: src.py — renamed, alias kept\nCHECKS: pytest -q → 5 passed\nNOTES: kept the alias as Claude Code said"})]
+# seen live: tell and ask from one response — while the tell ran, the ask's step was there without its command line
+N7, Q7 = "Found 3 places that use calc.", "Which new name should calc get?"
+FILLED_AFTER = 1.0  # seconds after the first look
+first_look = {}
+def c7_steps():
+    filled = time.time() - first_look.setdefault(C7, time.time()) >= FILLED_AFTER
+    return [step("USER_INPUT"), step("PLANNER_RESPONSE", plannerResponse={"response": ""}), talk_step("tell", "dddd4444", N7),
+            talk_step("ask", "eeee5555", Q7) if filled else step("RUN_COMMAND", status="CORTEX_STEP_STATUS_PENDING", runCommand={})] \
+        + ([step("PLANNER_RESPONSE", plannerResponse={"response": "Waiting for Claude Code's answer."})] if filled else [])
+BASE[C7] = []   # listed among the conversations; its steps come from c7_steps()
+BASE[C8] = BASE[C4][:]  # like C4: a record that once stepped over the question (fixed by a last look over the turn)
 cancelled = set()
 
-def followed_up():
+def messaged(cid):
     try:
-        return any(json.loads(l)["argv"][:1] == ["send-message"] for l in open(SENT, encoding="utf-8"))
+        return any(json.loads(l)["argv"][:1] == ["send-message"] and cid in json.loads(l)["argv"]
+                   for l in open(SENT, encoding="utf-8"))
     except OSError:
         return False
 def steps_of(cid):
-    return BASE.get(cid, []) + (FOLLOW if cid == C1 and followed_up() else [])
+    if cid == C7:
+        return c7_steps()
+    return BASE.get(cid, []) + (FOLLOW if cid == C1 and messaged(C1) else ANSWERED if cid == C4 and messaged(C4) else [])
 def status_of(cid):
-    return "CASCADE_RUN_STATUS_IDLE" if cid == C1 or cid in cancelled else "CASCADE_RUN_STATUS_RUNNING"
+    if cid == C7:
+        return "CASCADE_RUN_STATUS_IDLE" if len(c7_steps()) == 5 else "CASCADE_RUN_STATUS_RUNNING"
+    return "CASCADE_RUN_STATUS_IDLE" if cid in (C1, C4, C8) or cid in cancelled else "CASCADE_RUN_STATUS_RUNNING"
 
 iso = lambda secs: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + secs))
 # what the fake plan has left: weekly fraction (None = used up) and seconds until the week resets, per group
@@ -109,6 +152,9 @@ def answer(method, body):
                            "originalContentHash": EMPTY},
                           {"uri": uri(os.path.join(SP, "brain", "task.md")), "modifiedContent": "- [x] a\n", "isArtifactFile": True}]}
     if method == "GetCascadeTrajectoryGeneratorMetadata":
+        if body.get("cascadeId") == C6:  # a conversation some other tool started through agentapi
+            return {"generatorMetadata": [{"stepIndices": [1], "chatModel": {"modelDisplayName": "Gemini 4 Argon (High)",
+                                                                              "responseModel": "gemini-4-argon"}}]}
         timing = {"modelDisplayName": "Gemini 4 Hydrogen (High)", "timeToFirstToken": "1.5s", "streamingDuration": "0.5s"}
         return {"generatorMetadata": [{"stepIndices": [2], "chatModel": dict(timing, responseModel="gemini-4-hydrogen", usage={
             "inputTokens": "1000", "cacheReadTokens": "20000", "outputTokens": "300"})},
@@ -163,7 +209,7 @@ open(fake, "w", encoding="utf-8").write(
     "    print(json.dumps({'response': {'sendMessage': {'recipientId': sys.argv[2]}}}))\n")
 ENV = dict(os.environ, ANTIGRAVITY_LS_ADDRESS=f"127.0.0.1:{server.server_address[1]}", ANTIGRAVITY_CSRF_TOKEN="tok",
            AGP_DELEGATE_AGENTAPI=json.dumps([sys.executable, fake]), AGP_DELEGATE_POLL="0.3",
-           AGP_DELEGATE_IDLE_GRACE="1", AGP_DELEGATE_NO_LAUNCH="1")
+           AGP_DELEGATE_IDLE_GRACE="1", AGP_DELEGATE_NO_LAUNCH="1", AGP_DELEGATE_WATCH_POLL="0.3")
 def run(*args, cwd=ws, env=None, stdin=None):
     r = subprocess.run([sys.executable, DELEGATE, *args], cwd=cwd, env=dict(ENV, **(env or {})), input=stdin,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
@@ -183,7 +229,7 @@ check("models: quota per group and the tiers", code == 0 and "«Gemini Models»:
 check("models: the Claude tier falls back to a Gemini model with quota left", "claude    gemini-4-carbon-high" in out
       and "Claude Sonnet 5.5 (High): quota used up — resets in 22 h → next with quota left" in out
       and "«Claude and GPT models»: used up — resets in 22 h → unavailable" in out, out)
-check("models: speed measured from recent conversations", "Gemini 4 Hydrogen (High) · ≈2.0 s per call (6 calls)" in out, out)
+check("models: speed measured from recent conversations", f"Gemini 4 Hydrogen (High) · ≈2.0 s per call ({2 * len(BASE)} calls)" in out, out)
 code, out = run("models", "--json")
 check("models --json", code == 0 and json.loads(out)["tiers"]["claude"] == "gemini-4-carbon-high"
       and json.loads(out)["states"]["Gemini Models"]["status"] == "ok", out)
@@ -236,8 +282,8 @@ check("run --no-wait: returns at once with the id", code == 0 and f"delegate.py 
 # follow-up: same conversation, only the new turn's commands; diff; result; list; cancel
 code, out = run("send", C1[:8], "Also set c to 4.")
 call = agentapi_calls()[-1]
-check("send: agentapi send-message to the conversation", call["argv"][:2] == ["send-message", C1]
-      and call["argv"][2].startswith("Follow-up from Claude Code: Also set c to 4."), call)
+check("send: agentapi send-message to the conversation", call["argv"][:3] == ["send-message", "--title=Claude Code", C1]
+      and call["argv"][3].startswith("Follow-up from Claude Code: Also set c to 4."), call)
 check("send: the report covers the follow-up turn only", code == 0 and "CHECKS: pytest -q → 4 passed" in out
       and "✓ pytest -q → 0 · 4 passed in 0.2s" in out and "unittest" not in out, out)
 code, out = run("diff", C1[:8], "--stat")
@@ -255,6 +301,96 @@ code, out = run("cancel", C3[:8])
 check("cancel a running task", code == 0 and f"Stopped Antigravity task {C3}" in out, out)
 code, out = run("cancel", C1[:8])
 check("cancel an idle one", code == 0 and "wasn't running" in out, out)
+
+# talking while it works — the agent's side: ask / tell only print a JSON line for Claude Code's side
+code, out = run("ask", "Keep the old name?", cwd=SP)
+line = next((l for l in out.splitlines() if l.startswith('{"to_claude_code"')), "{}")
+check("ask: a JSON line with the question and an id, then what to do meanwhile", code == 0
+      and json.loads(line).get("to_claude_code") == "question" and json.loads(line).get("text") == "Keep the old name?"
+      and len(json.loads(line).get("id", "")) == 10 and "the answer wakes you up" in out and "Don't poll" in out, out)
+code, out = run("tell", "The", "tests", "were", "red", "before", "me", cwd=SP)
+check("tell: words without quotes become one message", code == 0 and '"text": "The tests were red before me"' in out
+      and '"to_claude_code": "note"' in out, out)
+code, out = run("ask", cwd=SP)
+check("ask: nothing to send → exit 1 with the form", code == 1 and 'ask "' in out and "to_claude_code" not in out, out)
+code, out = run("ask", "Anyone?", cwd=SP, env={"ANTIGRAVITY_CONVERSATION_ID": "77777777-7777-4777-8777-777777777777"})
+check("ask from a conversation Claude Code didn't start: nothing sent, decide yourself",
+      code == 0 and "to_claude_code" not in out and "Decide yourself" in out, out)
+code, out = run("tell", "Note.", cwd=SP, env={"ANTIGRAVITY_CONVERSATION_ID": C1})
+check("tell from a delegated conversation goes out", code == 0 and '"to_claude_code": "note"' in out, out)
+prompt = next(c["argv"][3] for c in agentapi_calls() if c["argv"][0] == "new-conversation")
+check("the brief gives the agent both talk commands, quoted, and says Claude Code answers",
+      f'"{os.path.abspath(DELEGATE)}" ask "<your question>"' in prompt and f'"{os.path.abspath(DELEGATE)}" tell "' in prompt
+      and "Claude Code does, and it answers" in prompt and "Nobody watches" not in prompt, prompt[:1500])
+
+# … and Claude Code's: a question stops the wait with exit 4; reply answers it and wakes the agent; the report has the talk
+code, out = run("run", "--model", "fast", "Rename parse_date to parse_day.", env={"FAKE_CID": C4})
+check("run: the agent asks → exit 4 with its question, what it told you, and how to answer", code == 4
+      and "asks you (Claude Code) — it waits for your answer" in out and Q1 in out and N1 in out
+      and f"delegate.py reply {C4[:8]}" in out and "its words, not the user's" in out, out)
+code, out = run("list")
+check("list: a task waiting for an answer", any(C4[:8] in l and "question" in l for l in out.splitlines()), out)
+code, out = run("wait", C4[:8], "--timeout", "3")
+check("wait: an open question returns at once", code == 4 and Q1 in out, out)
+code, out = run("reply", C4[:8], "Yes,", "keep the alias for one release.")
+call = agentapi_calls()[-1]
+check("reply: answers the open question, wakes the idle agent", code == 0 and "Answered its question" in out
+      and "wakes it up" in out and call["argv"][:3] == ["send-message", "--title=Claude Code", C4]
+      and call["argv"][3].startswith(f"Claude Code answers your question «{Q1}»:\nYes, keep the alias for one release.")
+      and "Go on with the task" in call["argv"][3], (out, call))
+code, out = run("wait", C4[:8], "--timeout", "10")
+check("wait after the answer: its report, with the talk, without the talk commands", code == 0
+      and "✅ Antigravity finished task" in out and "Talk with you while it worked:" in out
+      and f"it told you: {N1}" in out and f"it asked: {Q1}" in out and "you answered: Yes, keep the alias" in out
+      and "NOTES: kept the alias" in out and "delegate.py\" ask" not in out and "Commands it ran" not in out, out)
+code, out = run("watch", C4[:8], "--timeout", "5")
+check("watch after wait: nothing told twice, only its end", code == 0 and N1 not in out and Q1 not in out
+      and "finished (STATUS: done)" in out and f"delegate.py result {C4[:8]}" in out, out)
+
+# a question from a command that went to the background, while the agent keeps working: watch (for Monitor)
+SESSION = {"CLAUDE_CODE_SESSION_ID": "sess-test-1"}
+code, out = run("run", "--model", "fast", "--no-wait", "Start the dev server.", env=dict(SESSION, FAKE_CID=C5))
+check("run --no-wait: says how to follow it (watch with Monitor, or wait)", code == 0
+      and f"delegate.py watch {C5[:8]}" in out and "Monitor" in out, out)
+code, out = run("watch", "--timeout", "2", env=SESSION)
+check("watch (no id: this session's running tasks): the question once, then how to go on", code == 3
+      and out.count(Q2) == 1 and f"asks you" in out and f"delegate.py reply {C5[:8]}" in out
+      and f"Still running: {C5[:8]}" in out and C4[:8] not in out, out)
+code, out = run("watch", C5[:8], "--timeout", "1")
+check("watch again: no repeat", code == 3 and Q2 not in out and "Still running" in out, out)
+code, out = run("watch", "--timeout", "1", env={"CLAUDE_CODE_SESSION_ID": "another-session"})
+check("watch in another session: not its tasks", code == 0 and "No running Antigravity tasks" in out, out)
+code, out = run("wait", C5[:8], "--timeout", "3")
+check("wait: the open question even though the watch showed it", code == 4 and Q2 in out, out)
+code, out = run("reply", C5[:8], "Use 5173.")
+call = agentapi_calls()[-1]
+check("reply to a running agent: the answer, no wake-up note", code == 0 and "between its steps" in out
+      and call["argv"][3] == f"Claude Code answers your question «{Q2}»:\nUse 5173.", call)
+code, out = run("wait", C5[:8], "--timeout", "1")
+check("wait after the answer: no question any more, still running → exit 3", code == 3
+      and "waits for your answer" not in out and "you answered: Use 5173." in out, out)
+code, out = run("send", C5[:8], "Also log the port.", "--no-wait")
+call = agentapi_calls()[-1]
+check("send to a running task: a message, not a new turn", code == 0 and "still working" in out
+      and call["argv"][3] == "Claude Code says:\nAlso log the port.", (out, call))
+rec5 = json.load(open(os.path.join(HOME, ".gemini", "antigravity-plus", "delegate", C5 + ".json"), encoding="utf-8"))
+check("the record keeps the talk and the session", rec5.get("claude_session") == "sess-test-1"
+      and [m["kind"] for m in rec5.get("chat", [])] == ["question", "answer", "message"] and rec5.get("turn") == 0, rec5)
+
+# seen live: the ask's step without its command line yet while the tell ran — the watch must not step over it
+code, out = run("run", "--model", "fast", "--no-wait", "Rename calc.", env={"FAKE_CID": C7})
+code, out = run("watch", C7[:8], "--timeout", "4")
+check("watch: a command step not filled in yet is looked at again — the question isn't lost", code == 3
+      and N7 in out and Q7 in out and "finished" not in out, out)
+code, out = run("run", "--model", "fast", "--no-wait", "Rename parse_date.", env={"FAKE_CID": C8})
+rec_path = os.path.join(HOME, ".gemini", "antigravity-plus", "delegate", C8 + ".json")
+rec8 = json.load(open(rec_path, encoding="utf-8"))
+rec8["heard"] = 99  # as a record from before the fix: its look already went past the question
+json.dump(rec8, open(rec_path, "w", encoding="utf-8"))
+code, out = run("result", C8[:8])
+check("result: one last look over the whole turn finds a question the cursor went past", code == 4 and Q1 in out, out)
+code, out = run("watch", C8[:8], "--timeout", "2")
+check("watch: … and doesn't call such a task finished", "finished" not in out and code == 3, out)
 
 # errors
 code, out = run("run", "--model", "gpt-9", "x", env={"FAKE_CID": C1})
@@ -383,6 +519,90 @@ transcript(hw, brief, [], files={"main.py": "print(1)\n"})
 msg = json.dumps(hook("session_start.py", hw, lastUserInput=brief), ensure_ascii=False)
 check("SessionStart, delegated: no setup hint, the rest is there", "No git repository yet" not in msg
       and "antigravity_plus_session_context" in msg, msg[-400:])
+
+# it asked Claude Code and ended its turn to wait: no nudges until the answer has come
+ask_call = ("run_command", {"CommandLine": talk_line("ask", "Which name?")})
+transcript(hw, brief, edits(1) + [ask_call], answer_text="Жду ответа Claude Code.")
+check("Stop, delegated, waiting for Claude Code's answer: left alone", reason(hook("stop.py", hw)) is None,
+      reason(hook("stop.py", hw)))
+said = "sender=system priority=MESSAGE_PRIORITY_HIGH content=" + delegate.ANSWER.format(question="Which name?", message="parse_day")
+with open(tp, "a", encoding="utf-8") as f:
+    f.write(json.dumps({"step_index": 10, "type": "SYSTEM_MESSAGE", "content": "[Message] timestamp=2026-11-15T10:00:00Z " + said}) + "\n")
+    f.write(json.dumps({"step_index": 11, "type": "PLANNER_RESPONSE", "content": "Готово."}) + "\n")
+got = reason(hook("stop.py", hw))
+check("Stop, delegated, after the answer: the usual checks again", bool(got) and "ran no check" in got, got)
+for text in (delegate.ANSWER.format(question="q", message="a"), delegate.MESSAGE.format(message="m"),
+             delegate.FOLLOW_UP.format(message="f")):
+    check(f"the hooks know Claude Code's message «{text[:28]}…»",
+          conv.CLAUDE_SAYS.search(("[Message] sender=system priority=MESSAGE_PRIORITY_HIGH content=" + text).encode()))
+check("…but not a background task's output that quotes it", not conv.CLAUDE_SAYS.search(
+    b'[Message] sender=x/task-3 priority=MESSAGE_PRIORITY_HIGH content=Task finished: Claude Code says: hi'))
+
+# the guard lets the talk commands through without asking — only the installed script, only as one plain command
+import guard
+os.makedirs(os.path.dirname(INSTALLED), exist_ok=True)
+shutil.copy(DELEGATE, INSTALLED)
+for cmd, want in [(talk_line("ask", "Keep the name?"), True), (talk_line("tell", "a; b && c | d > e"), True),
+                  (f'py -3 "{INSTALLED}" tell "x"', True), (f'python -X utf8 "{INSTALLED}" ask "x"', True),
+                  (f'python3 ~/.claude/skills/antigravity/scripts/delegate.py ask "x"', True),
+                  (talk_line("ask", "x") + "; rm -rf ~", False), (talk_line("ask", "x") + "\nrm -rf ~", False),
+                  (talk_line("ask", "x") + " # ; rm -rf ~", False), (talk_line("ask", "$(rm -rf ~)"), False),
+                  (talk_line("ask", "`id`"), False), (talk_line("ask", "x") + " > ~/.zshrc", False),
+                  (talk_line("ask", "x") + " | sh", False), (talk_line("ask", "x") + " &", False),
+                  (f'python3 "{os.path.join(ws, "delegate.py")}" ask "x"', False), (talk_line("run", "x"), False),
+                  (f'bash -c \'python3 "{INSTALLED}" ask x\'', False), (f'FOO=1 python3 "{INSTALLED}" ask "x"', False)]:
+    check(f"guard: {'lets through' if want else 'leaves to the usual policy'}: {cmd.replace(HOME, '~')[-60:]!r}",
+          guard.talks_to_claude(cmd) is want)
+r = subprocess.run([sys.executable, os.path.join(HOOKS, "guard.py")], capture_output=True, text=True, encoding="utf-8",
+                   input=json.dumps({"conversationId": cid, "transcriptPath": tp, "workspacePaths": [hw],
+                                     "toolCall": {"name": "run_command", "args": {"CommandLine": talk_line("ask", "Which name?")}}}))
+check("guard (hook): auto_approve for the talk command", json.loads(r.stdout or "{}").get("decision") == "auto_approve", r.stdout)
+
+# the usage panel: the real model of a conversation started through agentapi, and the task's title
+def brain(conv_id, rows):
+    logs = os.path.join(HOME, ".gemini", "antigravity", "brain", conv_id, ".system_generated", "logs")
+    os.makedirs(logs, exist_ok=True)
+    with open(os.path.join(logs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+        f.write("\n".join(json.dumps(x, ensure_ascii=False) for x in rows) + "\n")
+def usage_json(conv_id, env=None):
+    r = subprocess.run([sys.executable, USAGE, "--conversation", conv_id, "--json"], capture_output=True, text=True,
+                       encoding="utf-8", env=dict({k: v for k, v in os.environ.items() if not k.startswith("ANTIGRAVITY_")},
+                                                  **(env or {})))
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {"error": r.stdout + r.stderr}
+call_row = lambda i, out=300: {"step_index": i, "type": "PLANNER_RESPONSE", "created_at": "2026-11-15T10:00:%02dZ" % i,
+                               "input_tokens": 5000, "cache_read_tokens": 20000, "output_tokens": out, "content": ""}
+rec1 = json.load(open(record, encoding="utf-8"))
+brain(C1, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-15T10:00:00Z",
+            "content": "<USER_REQUEST>\n" + delegate.compose("Goal: port the parser.", ws, ws) + "\n</USER_REQUEST>"},
+           call_row(1), {"step_index": 2, "type": "SYSTEM_MESSAGE", "created_at": "2026-11-15T10:00:03Z", "content":
+                         "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T10:00:03Z sender=system priority=MESSAGE_PRIORITY_HIGH "
+                         "content=" + delegate.FOLLOW_UP.format(message="Also set c to 4.") + "\n</SYSTEM_MESSAGE>"},
+           call_row(3)])
+d = usage_json(C1)
+check("usage: a delegated task gets the model it ran on (from the bridge's record), not the default",
+      d.get("models") == [rec1["label"]] and d.get("model_guessed_calls") == 0
+      and (d.get("context") or {}).get("model") == rec1["label"] and (d.get("context") or {}).get("window") == 300000, d)
+check("usage: its title is the task, not the run rules; a follow-up is a turn of its own",
+      d.get("title") == rec1["title"] and [t["text"] for t in d.get("turns", [])] == [rec1["title"], "Claude Code: Also set c to 4."], d)
+brain(C6, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-15T10:00:00Z",
+            "content": "<USER_REQUEST>\nSummarize the logs.\n</USER_REQUEST>"}, call_row(1)])
+d = usage_json(C6)
+check("usage: no record and no way to ask Antigravity → priced as the default model, and it says so",
+      d.get("model_guessed_calls") == 1, d)
+d = usage_json(C6, {"ANTIGRAVITY_LS_ADDRESS": ENV["ANTIGRAVITY_LS_ADDRESS"], "ANTIGRAVITY_CSRF_TOKEN": "tok"})
+check("usage (side panel, which can ask Antigravity): the model from Antigravity's own metadata",
+      d.get("models") == ["Gemini 4 Argon (High)"] and d.get("model_guessed_calls") == 0, d)
+d = usage_json(C6)
+check("usage: … remembered for the next time", d.get("models") == ["Gemini 4 Argon (High)"], d)
+r = subprocess.run([sys.executable, USAGE, "--recent", "5"], capture_output=True, text=True, encoding="utf-8")
+recent = json.loads(r.stdout or "{}")
+check("usage --recent: the panel's list and per-model totals carry the real models",
+      {c["id"]: c["title"] for c in recent.get("conversations", [])}.get(C1) == rec1["title"]
+      and {m["model"] for m in recent.get("by_model", [])} >= {rec1["label"], "Gemini 4 Argon (High)"}
+      and not any(m.get("guessed") for m in recent.get("by_model", [])), recent)
 
 server.shutdown()
 print("ALL OK" if ok else "FAILURES")

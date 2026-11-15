@@ -14,13 +14,27 @@ instead of Claude's tokens, and in parallel with Claude's own work.
   delegate.py wait ID [--timeout SEC]          wait for a task, then print its report
   delegate.py result ID [--full]               the report of a task again
   delegate.py diff ID [PATH …] [--stat]        what the agent changed, as a unified diff
+  delegate.py watch [ID …] [--timeout SEC]     for Claude Code's Monitor tool: one line per event while tasks run —
+                                               the agent's questions and messages, an approval it waits for, the end
+  delegate.py reply ID MESSAGE                 answer the agent's question, or tell it something while it works
   delegate.py send ID MESSAGE [--no-wait]      a follow-up in the same conversation (the agent keeps its context)
   delegate.py cancel ID                        stop a task
   delegate.py list                             recent tasks
   delegate.py statusline                       for Claude Code's statusLine in a terminal: remembers its rate_limits
 
+Run by the Antigravity agent in its own terminal, to talk back (the brief gives it the exact commands):
+  delegate.py ask "QUESTION"                   a question for Claude Code; the answer arrives in its conversation
+  delegate.py tell "MESSAGE"                   something Claude Code should know now; no answer needed
+
 An ID may be shortened to a unique prefix (8 characters are plenty). Exit codes: 0 finished, 1 error, 2 needs
-attention (an approval waits in Antigravity, or the task was canceled or failed), 3 still running after --timeout.
+attention (an approval waits in Antigravity, or the task was canceled or failed), 3 still running after --timeout,
+4 the agent asks Claude Code a question and waits for the answer (`reply`, then `wait` again).
+
+Talking while it works: `ask` and `tell` only print — a JSON line `{"to_claude_code": …}` with the text and an id.
+Claude Code's side finds those lines in the conversation itself (the command's output, or the message Antigravity
+sends when a command finished in the background), so they need no file access and work inside the terminal sandbox.
+Replies go back with `agentapi send-message`: between the agent's steps while it works, or waking it up when it
+ended its turn to wait.
 
 Choosing by the limits left: a tier (fast, standard, strong, claude) is a list of models, best first. Each model
 belongs to a quota group of Antigravity's plan (Gemini; Claude and GPT) with a weekly and a 5-hour window. A group is
@@ -91,6 +105,8 @@ KEEP_TASKS = 200
 DEFAULT_TIMEOUT = 1800
 POLL = float(os.environ.get("AGP_DELEGATE_POLL") or 15)              # seconds per wait round
 IDLE_GRACE = float(os.environ.get("AGP_DELEGATE_IDLE_GRACE") or 240)  # turn over, only background work left
+WATCH_POLL = float(os.environ.get("AGP_DELEGATE_WATCH_POLL") or 3)    # seconds between two looks of `watch`
+WATCH_TIMEOUT = 1780  # `watch` stops on its own just before the Monitor tool's 30-minute limit, saying how to go on
 
 # Tiers → model ids, best first; the limits left reorder them (see the docstring). Gemini 4 Hydrogen leads the fast
 # tiers: on the same small task (2026-11-14) Hydrogen (Low) took 20 s and 4 model calls, Gemini 3.8 Flash (Medium)
@@ -123,11 +139,14 @@ FAILED_ENDS = {
     "EXECUTOR_TERMINATION_REASON_HALTED_STEP": "stopped at a halted step",
 }
 
-RULES = """{mark} This task comes from Claude Code, another AI coding agent that works on this project for the same user. Nobody watches this conversation and nobody will answer questions.
+RULES = """{mark} This task comes from Claude Code, another AI coding agent that works on this project for the same user, at the same time as you. The user doesn't watch this conversation; Claude Code does, and it answers.
 
 Rules for this run:
 1. Do exactly the task below. Change only what it covers. No commits, pushes, deploys, global installs or settings changes; don't run /init, /git-init or /handoff and don't save memories.
-2. Don't ask questions or wait for approval. When something is unclear, choose the most reasonable option and say so in your report; if you are truly blocked, stop and explain why in the report.
+2. Talk to Claude Code with these two commands — run them yourself with run_command; they only print and return at once:
+   - a question you need answered: {ask}
+   - something it should know now (a finding that changes the plan, a problem with the task, a file outside the task you need to touch): {tell}
+   Its answers and messages arrive in this conversation as messages starting with "Claude Code"; follow them like this task. Ask only when a wrong guess would cost real rework — otherwise choose the most reasonable option and say so in your report. After asking, go on with what doesn't depend on the answer; if nothing is left, end your turn with one line saying what you wait for — the answer wakes you up. Don't poll, sleep or ask the same thing twice. Don't ask for approvals this way, and never send secrets.
 3. Keep going with tool calls until the task is done — a message without a tool call ends your run.
 4. After your last change, run the checks the task names (or the tests or build of the code you touched) and fix what fails.
 5. Stop any server or watcher you started before you finish.
@@ -142,8 +161,16 @@ NOTES: <choices you made, what is left, risks> (or "none")
 Task:
 {brief}"""
 
-FOLLOW_UP = ("Follow-up from Claude Code: {message}\n\n(Same rules as before: no questions, check your work after the "
-             "last change, end with the STATUS / CHANGED / CHECKS / NOTES report.)")
+FOLLOW_UP = ("Follow-up from Claude Code: {message}\n\n(Same rules as before: questions go to Claude Code with the ask "
+             "command, check your work after the last change, end with the STATUS / CHANGED / CHECKS / NOTES report.)")
+# Claude Code's replies while the agent works. The plugin's hooks know them by these openings (hooks/conversation.py
+# CLAUDE_SAYS): an agent that asked and waits is left alone until one of them arrives.
+ANSWER = "Claude Code answers your question «{question}»:\n{message}"
+MESSAGE = "Claude Code says:\n{message}"
+RESUME = "\n\n(Go on with the task from where you stopped; same rules as before.)"
+WIRE = "to_claude_code"                 # the key of the JSON line `ask` and `tell` print for Claude Code's side
+TALK = re.compile(r"delegate\.py[\"']?\s+(ask|tell)\b")  # a command line of the agent talking to Claude Code
+TALK_KINDS = {"ask": "question", "tell": "note"}
 
 
 class Failure(Exception):
@@ -766,6 +793,35 @@ def save(task: dict) -> None:
     compat.replace(tmp, path)
 
 
+def update(task: dict, **fields) -> dict:
+    """Set fields of a task's record and save it, re-reading the record under a lock first: `watch`, `wait` and
+    `reply` may run at the same time (a Monitor, a background wait, a reply) and each changes only its own fields.
+    `task` gets the record's current fields too."""
+    os.makedirs(TASKS, exist_ok=True)
+    with open(os.path.join(TASKS, ".lock"), "a+", encoding="utf-8") as fh:
+        compat.lock(fh)
+        try:
+            try:
+                with open(os.path.join(TASKS, task["id"] + ".json"), encoding="utf-8") as f:
+                    current = json.load(f)
+            except (OSError, ValueError):
+                current = None
+            rec = dict(current) if isinstance(current, dict) and current.get("id") == task["id"] else dict(task)
+            chat, told = fields.pop("chat_add", None), fields.pop("told_add", None)
+            rec.update(fields)
+            if chat:
+                known = {m.get("id") for m in rec.get("chat") or []}
+                rec["chat"] = (rec.get("chat") or []) + [m for m in chat if m.get("id") not in known]
+            if told:  # events already shown to Claude Code (by watch, wait or result): never twice
+                rec["told"] = sorted(set(rec.get("told") or []) | set(told))
+            save(rec)
+        finally:
+            compat.unlock(fh)
+    task.clear()
+    task.update(rec)
+    return task
+
+
 def records() -> List[dict]:
     out = []
     try:
@@ -808,10 +864,18 @@ def task_for(ident: str) -> dict:
     raise Failure(f"no delegated task {ident!r} (delegate.py list shows them).")
 
 
+def talk_command(verb: str) -> str:
+    """The exact command the agent runs to talk to Claude Code: this script's path quoted (weak models copy a path
+    with a space unquoted and break it), started the way the plugin's hooks start Python on this system."""
+    text = "<your question>" if verb == "ask" else "<what it should know>"
+    return f'{compat.python_cmd()} "{os.path.abspath(__file__)}" {verb} "{text}"'
+
+
 def compose(brief: str, folder: str, root: str) -> str:
     where = f"Working folder: {folder}" + ("" if os.path.normcase(folder) == os.path.normcase(root)
                                            else f" (inside the workspace {root})")
-    return RULES.format(mark=MARK, where=where, brief=brief.strip())
+    return RULES.format(mark=MARK, where=where, brief=brief.strip(), ask=talk_command("ask"),
+                        tell=talk_command("tell"))
 
 
 def title_of(brief: str, given: str) -> str:
@@ -847,11 +911,11 @@ def pending(ls: LS, cid: str, offset: int = 0) -> Tuple[Optional[dict], int]:
         steps = rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": cid, "stepOffset": offset}, timeout=30).get("steps")
     except TIMEOUTS:
         return None, offset
-    steps = [s for s in steps or [] if isinstance(s, dict)]
-    for s in steps:
-        ask = s.get("requestedInteraction")
+    steps = steps if isinstance(steps, list) else []
+    for i, s in enumerate(steps, offset):
+        ask = s.get("requestedInteraction") if isinstance(s, dict) else None
         if s.get("status") == "CORTEX_STEP_STATUS_WAITING" and isinstance(ask, dict) and ask:
-            return approval(ask), offset
+            return dict(approval(ask), step=i), offset
     return None, offset + max(len(steps) - 1, 0)  # the last one again next time: it may still change
 
 
@@ -865,19 +929,30 @@ def answered(ls: LS, cid: str, turn: int) -> bool:
     return any(isinstance(s, dict) and s.get("type") == "CORTEX_STEP_TYPE_PLANNER_RESPONSE" for s in steps or [])
 
 
-def wait(ls: LS, cid: str, timeout: float, turn: int = 0) -> Tuple[str, dict]:
-    """("done" | "approval" | "background" | "timeout", details). "background": the agent ended its turn but
-    something it started (a subagent, a command) still runs for longer than IDLE_GRACE."""
+def wait(ls: LS, task: dict, timeout: float) -> Tuple[str, dict]:
+    """("done" | "approval" | "question" | "background" | "timeout", details). "question": the agent asked Claude
+    Code something (`ask`) that no reply has answered yet. "background": the agent ended its turn but something it
+    started (a subagent, a command) still runs for longer than IDLE_GRACE."""
+    cid = task["id"]
+    since = max(int(task.get("turn") or 0), int(task.get("since") or 0))  # it must answer after this step
     began = time.time()
     deadline = began + max(timeout, 1.0)
-    offset, idle_since = turn, None
+    offset, idle_since = since, None
     while True:
+        listen(ls, task)
+        asked = open_questions(task)
+        if asked:
+            return "question", {"questions": asked}
         left = deadline - time.time()
         if left <= 0:
             return "timeout", {}
         try:
             rpc(ls, "WaitForConversationFullyIdle", {"conversationId": cid}, timeout=min(POLL, max(left, 1.0)))
-            if answered(ls, cid, turn) or time.time() - began > 30:
+            listen(ls, task, start=int(task.get("turn") or 0))  # once more over the whole turn before calling it done
+            asked = open_questions(task)
+            if asked:
+                return "question", {"questions": asked}
+            if answered(ls, cid, since) or time.time() - began > 30:
                 return "done", {}
             time.sleep(1)
             continue
@@ -894,12 +969,175 @@ def wait(ls: LS, cid: str, timeout: float, turn: int = 0) -> Tuple[str, dict]:
             idle_since = None
 
 
-def state_now(ls: LS, cid: str) -> Tuple[str, dict]:
-    """Without waiting: "running", "approval" or "done"."""
-    if summary(ls, cid).get("status") in ("CASCADE_RUN_STATUS_RUNNING", "CASCADE_RUN_STATUS_BUSY"):
-        ask, _ = pending(ls, cid)
+def state_now(ls: LS, task: dict) -> Tuple[str, dict]:
+    """Without waiting: "question", "running", "approval" or "done"."""
+    running = summary(ls, task["id"]).get("status") in ("CASCADE_RUN_STATUS_RUNNING", "CASCADE_RUN_STATUS_BUSY")
+    listen(ls, task, start=None if running else int(task.get("turn") or 0))
+    asked = open_questions(task)
+    if asked:
+        return "question", {"questions": asked}
+    if running:
+        ask, _ = pending(ls, task["id"])
         return ("approval", ask) if ask else ("running", {})
     return "done", {}
+
+
+# ─────────────────────────────── talking while it works ───────────────────────────────
+
+TALK_LIMIT = 4000  # characters of one message either way
+UNFINISHED = {"CORTEX_STEP_STATUS_RUNNING", "CORTEX_STEP_STATUS_WAITING", "CORTEX_STEP_STATUS_PENDING",
+              "CORTEX_STEP_STATUS_QUEUED", "CORTEX_STEP_STATUS_GENERATING", "CORTEX_STEP_STATUS_UNSPECIFIED", ""}
+
+
+def wire_lines(text: str) -> List[dict]:
+    """The messages `ask` and `tell` printed: JSON lines {"to_claude_code": "question" | "note", "id", "text"}."""
+    out = []
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith('{"' + WIRE + '"'):
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(d, dict) and d.get(WIRE) in ("question", "note") and isinstance(d.get("text"), str)
+                and d["text"].strip() and re.fullmatch(r"[0-9a-f]{6,32}", str(d.get("id") or ""))):
+            out.append(d)
+    return out
+
+
+def talk_in(steps: List[dict], base: int) -> Tuple[List[dict], int]:
+    """What the agent said to Claude Code in `steps` (numbered from `base`): its `ask` and `tell` commands' output —
+    in the command's step, or in the message Antigravity sends when a command that went to the background finished.
+    Returns the messages and the step to look from next time: the first one that may still turn into a message — a
+    command step not filled in yet (seen live: two commands from one response, the second without its command line
+    while the first ran), an `ask` still running or waiting for approval, or one that exited 0 with no output yet."""
+    out: List[dict] = []
+    nxt = base + len(steps)
+    for i, st in enumerate(steps, base):
+        texts = []
+        unfinished = str(st.get("status") or "") in UNFINISHED
+        kind = str(st.get("type") or "")
+        if kind == "CORTEX_STEP_TYPE_RUN_COMMAND":
+            rc = st.get("runCommand") or {}
+            line = str(rc.get("commandLine") or rc.get("proposedCommandLine") or "")
+            if not TALK.search(line):
+                if unfinished and not line.strip():
+                    nxt = min(nxt, i)  # not filled in yet: it may be an ask
+                continue
+            said = output_text(rc)
+            if not wire_lines(said) and (unfinished or rc.get("exitCode") == 0):
+                nxt = min(nxt, i)  # its output isn't in yet (one that went to the background reports in a message)
+                continue
+            texts.append(said)
+        elif st.get("type") == "CORTEX_STEP_TYPE_SYSTEM_MESSAGE":
+            msg = (st.get("systemMessage") or {}).get("agentMessage") or {}
+            call = (((msg.get("sourceMetadata") or {}).get("tool") or {}).get("toolCall") or {}) if isinstance(msg, dict) else {}
+            try:
+                args = json.loads(str(call.get("argumentsJson") or "{}"))
+            except ValueError:
+                args = {}
+            line = str(args.get("CommandLine") or "") if isinstance(args, dict) else ""
+            if call.get("name") == "run_command" and TALK.search(line):
+                texts.append(str(msg.get("content") or ""))
+        elif unfinished and kind in ("", "CORTEX_STEP_TYPE_UNSPECIFIED"):
+            nxt = min(nxt, i)  # a step still being set up
+        for said in texts:
+            for d in wire_lines(said):
+                out.append({"id": str(d["id"]), "from": "antigravity", "kind": d[WIRE],
+                            "text": d["text"].strip()[:TALK_LIMIT], "step": i, "at": time.time()})
+    return out, nxt
+
+
+def listen(ls: LS, task: dict, start: Optional[int] = None) -> List[dict]:
+    """Read what the agent said to Claude Code since the last look, keep it in the task's record (`chat`), and
+    return what is new. `start`: look again from that step (before calling a task finished), cursor untouched."""
+    off = int(task.get("heard") or 0) if start is None else max(int(start), 0)
+    try:
+        steps = rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": task["id"], "stepOffset": off}, timeout=30).get("steps")
+    except SOFT:
+        return []
+    found, nxt = talk_in([s for s in steps or [] if isinstance(s, dict)], off)
+    known = {m.get("id") for m in task.get("chat") or []}
+    new = [m for m in found if m["id"] not in known]
+    if start is None and (new or nxt != off):
+        update(task, heard=nxt, chat_add=new)
+    elif new:
+        update(task, chat_add=new)
+    return new
+
+
+def open_questions(task: dict) -> List[dict]:
+    """The agent's questions that no message from Claude Code has followed: asked at or after the step the
+    conversation had reached when Claude Code last wrote to it."""
+    chat = task.get("chat") or []
+    mine = [m for m in chat if m.get("from") == "claude"]
+    asked = [m for m in chat if m.get("from") == "antigravity" and m.get("kind") == "question"]
+    if any(not isinstance(m.get("step"), int) for m in mine):  # an older record: the order it was heard in
+        last = max((i for i, m in enumerate(chat) if m.get("from") == "claude"), default=-1)
+        return [m for m in chat[last + 1:] if m in asked]
+    last_step = max((m["step"] for m in mine), default=-1)
+    return [m for m in asked if int(m.get("step") or 0) >= last_step]
+
+
+def indent(text: str, limit: int = TALK_LIMIT) -> str:
+    text = text if len(text) <= limit else text[:limit].rstrip() + " …"
+    return "\n".join("  " + ln for ln in text.strip().splitlines())
+
+
+def chat_lines(task: dict, since_step: int = 0) -> List[str]:
+    """The talk between the agent and Claude Code in this turn, for the report: one line each, newest last."""
+    out = []
+    chat = sorted(task.get("chat") or [], key=lambda m: (int(m.get("step") or 0) if isinstance(m.get("step"), int)
+                                                         else 0, float(m.get("at") or 0)))
+    for m in chat:
+        if m.get("from") == "antigravity" and int(m.get("step") or 0) < since_step:
+            continue
+        text = re.sub(r"\s+", " ", str(m.get("text") or "")).strip()
+        text = text if len(text) <= 220 else text[:219] + "…"
+        who = {"question": "it asked", "note": "it told you"}.get(m.get("kind"), "") if m.get("from") == "antigravity" \
+            else {"answer": "you answered", "follow-up": "your follow-up"}.get(m.get("kind"), "you said")
+        out.append(f"  {who}: {text}")
+    return out[-8:]
+
+
+def deliver(ls: LS, task: dict, message: str, kind: str = "") -> Tuple[dict, bool]:
+    """Send Claude Code's message into the agent's conversation: the answer to its open question, a message while
+    it works, or (kind "follow-up") more work after it finished. Returns the conversation's summary as it was before,
+    and whether this answered a question."""
+    s = summary(ls, task["id"])
+    if not s:
+        raise Failure(f"Antigravity doesn't know conversation {task['id']}.")
+    listen(ls, task)
+    asked = open_questions(task)
+    message = message.strip()[:TALK_LIMIT]
+    if kind == "follow-up":
+        text = FOLLOW_UP.format(message=message)
+    elif asked:
+        q = re.sub(r"\s+", " ", asked[-1]["text"]).strip()
+        text = ANSWER.format(question=q if len(q) <= 100 else q[:99] + "…", message=message)
+    else:
+        text = MESSAGE.format(message=message)
+    if kind != "follow-up" and s.get("status") == "CASCADE_RUN_STATUS_IDLE":
+        text += RESUME  # it ended its turn to wait: this message wakes it up
+    project = task.get("project") or ((find_project(task.get("cwd") or os.getcwd()) or ({"id": ""}, ""))[0]["id"])
+    agentapi(ls, ["send-message", "--title=Claude Code", task["id"], text], project)
+    entry = {"id": "c" + uuid.uuid4().hex[:8], "from": "claude", "text": message, "at": time.time(),
+             "kind": kind or ("answer" if asked else "message"), "step": int(s.get("stepCount") or 0)}
+    update(task, chat_add=[entry], since=int(s.get("stepCount") or 0), state="running")
+    return s, bool(asked) and kind != "follow-up"
+
+
+def nobody_watches(cid: str) -> bool:
+    """Run by the agent: its conversation wasn't started by Claude Code (when Antigravity names it in the terminal and
+    the task records can be read — inside a sandbox they may not be, and then the message goes out anyway)."""
+    if not re.fullmatch(r"[\w-]{8,80}", cid or ""):
+        return False
+    try:
+        names = os.listdir(TASKS)
+    except OSError:
+        return False
+    return cid + ".json" not in names
 
 
 # ─────────────────────────────── the report ───────────────────────────────
@@ -1047,7 +1285,7 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
         elif st.get("type") == "CORTEX_STEP_TYPE_RUN_COMMAND":
             rc = st.get("runCommand") or {}
             line = re.sub(r"\s+", " ", str(rc.get("commandLine") or rc.get("proposedCommandLine") or "")).strip()
-            if line:
+            if line and not TALK.search(line):  # its ask / tell show up as the talk with you instead
                 commands.append({"line": line, "code": rc.get("exitCode"), "status": st.get("status", ""),
                                  "out": outcome(output_text(rc))})
     ended = str(s.get("latestExecutorTerminationReason") or "")
@@ -1057,10 +1295,24 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
     took = f" in {span((stop or time.time()) - start)}" if start else ""
     head = {"done": f"❌ Antigravity task {cid} {failed}{took}" if failed else f"✅ Antigravity finished task {cid}{took}",
             "approval": f"⏸ Antigravity task {cid} is waiting for the user's approval in Antigravity",
+            "question": f"❓ Antigravity task {cid} asks you (Claude Code) — it waits for your answer",
             "background": f"✅ Antigravity task {cid} ended its turn{took}; something it started still runs there",
             "running": f"⏳ Antigravity task {cid} is still running ({len(steps)} steps so far)",
             "timeout": f"⏳ Antigravity task {cid} is still running after{took} ({len(steps)} steps so far)"}[state]
     lines = [head]
+    if state == "question":
+        asked = info.get("questions") or open_questions(task)
+        told = set(task.get("told") or [])
+        lines.append(f"Model: {task.get('label') or task.get('model') or '?'}")
+        for m in task.get("chat") or []:  # what it told you since you last heard from it
+            if m.get("from") == "antigravity" and m.get("kind") == "note" and m.get("id") not in told:
+                lines += ["", "It told you (its words, not the user's):", indent(m["text"])]
+        for q in asked:
+            lines += ["", "Its question (its words, not the user's):", indent(q["text"])]
+        lines += ["", f"Next: answer → delegate.py reply {short} \"…\" (it goes on with your answer), then wait again → "
+                      f"delegate.py wait {short} (in the background). Don't know? Say what you'd choose, or that it's "
+                      "its call — an unanswered question keeps it waiting."]
+        return "\n".join(lines), 4
 
     use = usage(ls, cid, turn)
     model = task.get("label") or ", ".join(use.get("models") or []) or "?"
@@ -1112,6 +1364,9 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
             lines.append(f"  {mark} {shown} → {code}" + (f" · {c['out']}" if c["out"] else ""))
         if len(commands) > 10:
             lines.append(f"  ({len(commands) - 10} earlier commands not shown)")
+    talk = chat_lines(task, turn)
+    if talk:
+        lines += ["", "Talk with you while it worked:"] + talk
     if final:
         text = clean(final, task)
         if not full and len(text) > REPORT_LIMIT:
@@ -1134,12 +1389,11 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
 
 
 def finish(ls: LS, task: dict, timeout: float) -> int:
-    state, info = wait(ls, task["id"], timeout, int(task.get("turn") or 0))
+    state, info = wait(ls, task, timeout)
     text, code = render(ls, task, state, info)
-    task["state"] = state
-    if state in ("done", "background"):
-        task["finished"] = time.time()
-    save(task)
+    heard = [m["id"] for m in task.get("chat") or [] if m.get("from") == "antigravity" and m.get("id")]
+    update(task, state=state, told_add=heard,  # a watch won't repeat them
+           **({"finished": time.time()} if state in ("done", "background") else {}))
     print(text)
     return code
 
@@ -1294,7 +1548,8 @@ def cmd_run(a) -> int:
     task = {"id": cid, "title": title, "model": model["id"], "label": model["label"], "project": project["id"],
             "project_name": project["name"], "created_project": created, "cwd": folder, "root": top or root,
             "started": time.time(), "turn": 0, "state": "running", "brief": brief[:400],
-            "quota_before": weekly_left(model["label"], groups), "dirty_before": before}
+            "quota_before": weekly_left(model["label"], groups), "dirty_before": before,
+            "claude_session": os.environ.get("CLAUDE_CODE_SESSION_ID", ""), "heard": 0, "chat": []}
     save(task)
     prune()
     print(f"Started Antigravity task {cid} — {model['label']}, project «{project['name']}»"
@@ -1303,7 +1558,8 @@ def cmd_run(a) -> int:
         print("  " + n, flush=True)
     print(f"  Why this model: {why}", flush=True)
     if a.no_wait:
-        print(f"Wait for it with: delegate.py wait {cid[:8]}  (run that in the background)")
+        print(f"Follow it with: delegate.py watch {cid[:8]} (with the Monitor tool: its questions and messages reach "
+              f"you as it works), or delegate.py wait {cid[:8]} in the background.")
         return 0
     return finish(ls, task, a.timeout)
 
@@ -1316,10 +1572,184 @@ def cmd_wait(a) -> int:
 def cmd_result(a) -> int:
     task = task_for(a.id)
     ls = connect()
-    state, info = state_now(ls, task["id"])
+    state, info = state_now(ls, task)
     text, code = render(ls, task, state, info, full=a.full)
+    shown = [m["id"] for m in task.get("chat") or [] if m.get("from") == "antigravity" and m.get("id")]
+    if shown:
+        update(task, told_add=shown)  # a watch won't repeat them
     print(text)
     return code
+
+
+def read_message(a, what: str) -> str:
+    text = " ".join(a.message) if isinstance(a.message, list) else (a.message or "")
+    if text.strip() in ("", "-"):
+        text = "" if sys.stdin is None or sys.stdin.isatty() else sys.stdin.read()
+    if not text.strip():
+        raise Failure(f"the {what} is empty.")
+    return text.strip()
+
+
+def cmd_reply(a) -> int:
+    """Answer the agent's question, or tell it something while it works: delivered at once, no waiting."""
+    task = task_for(a.id)
+    message = read_message(a, "reply")
+    s, asked = deliver(connect(), task, message)
+    short = task["id"][:8]
+    idle = s.get("status") == "CASCADE_RUN_STATUS_IDLE"
+    print(("Answered its question" if asked else "Sent your message") + f" to Antigravity task {task['id']}"
+          + (" — it had ended its turn, so this wakes it up." if idle else " — it reads it between its steps."))
+    print(f"Next: delegate.py wait {short} in the background (or keep your watch running) for its report.")
+    return 0
+
+
+def watched(ids: List[str]) -> List[dict]:
+    """The tasks `watch` follows: the ids given, or else the running ones this Claude Code session started (from
+    this folder, when the session is unknown) in the last day."""
+    if ids:
+        return [task_for(i) for i in ids]
+    session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    here = os.path.realpath(os.getcwd())
+    out = []
+    for t in records():
+        if time.time() - float(t.get("started") or 0) > 86400 or t.get("state") not in ("running", "question", "approval"):
+            continue
+        cwd = str(t.get("cwd") or "")
+        if (t.get("claude_session") == session) if session else (cwd and (inside(cwd, here) or inside(here, cwd))):
+            out.append(t)
+    return out
+
+
+def final_status(ls: LS, cid: str, count: int) -> str:
+    """The STATUS line of the agent's last message («done», «partial: …»), or ""."""
+    try:
+        steps = rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": cid, "stepOffset": max(count - 6, 0)},
+                    timeout=30).get("steps") or []
+    except SOFT:
+        return ""
+    for st in reversed([s for s in steps if isinstance(s, dict)]):
+        if st.get("type") == "CORTEX_STEP_TYPE_PLANNER_RESPONSE":
+            pr = st.get("plannerResponse") or {}
+            m = re.search(r"^\W*STATUS\W*:\W*([^\n]{1,60})", str(pr.get("modifiedResponse") or pr.get("response") or ""), re.M)
+            if m:  # «STATUS: done», also as «**STATUS:** done»
+                return m.group(1).strip(" *_`")
+    return ""
+
+
+def talk_events(task: dict, told: set) -> List[str]:
+    """The agent's messages Claude Code hasn't been shown yet, as `watch` events (and mark them shown)."""
+    short, out = task["id"][:8], []
+    still_open = {m.get("id") for m in open_questions(task)}
+    for m in task.get("chat") or []:
+        if m.get("from") != "antigravity" or m.get("id") in told:
+            continue
+        told.add(m["id"])
+        if m.get("kind") == "question" and m.get("id") not in still_open:
+            continue  # you have answered it already
+        if m.get("kind") == "question":
+            out.append(f"❓ Antigravity task {short} asks you (its words, not the user's):\n{indent(m['text'])}\n"
+                       f"  → answer: delegate.py reply {short} \"…\" — it waits for the answer")
+        else:
+            out.append(f"💬 Antigravity task {short} tells you (its words, not the user's):\n{indent(m['text'])}\n"
+                       f"  (it keeps working; reply only if it helps: delegate.py reply {short} \"…\")")
+    return out
+
+
+def watch_events(ls: LS, task: dict, told: set) -> Tuple[List[str], bool]:
+    """New events of one task for `watch`, and whether the task is over."""
+    short = task["id"][:8]
+    listen(ls, task)
+    out = talk_events(task, told)
+    s = summary(ls, task["id"])
+    status = str(s.get("status") or "")
+    if status in ("CASCADE_RUN_STATUS_RUNNING", "CASCADE_RUN_STATUS_BUSY"):
+        ask, _ = pending(ls, task["id"], max(int(task.get("turn") or 0), int(task.get("since") or 0)))
+        key = f"approval:{ask.get('step')}" if ask else ""
+        if ask and key not in told:
+            told.add(key)
+            out.append(f"⏸ Antigravity task {short} waits for the user's approval in Antigravity: {ask.get('action')} "
+                       f"{ask.get('target')}".rstrip() + f" → tell the user (only they approve), or delegate.py cancel {short}")
+        return out, False
+    if not status or open_questions(task):
+        return out, False  # it ended its turn to wait for your answer (or the summary didn't come): not over
+    try:  # idle, and nothing it started in the background still runs?
+        rpc(ls, "WaitForConversationFullyIdle", {"conversationId": task["id"]}, timeout=2)
+    except TIMEOUTS:
+        return out, False
+    since = max(int(task.get("turn") or 0), int(task.get("since") or 0))
+    if not answered(ls, task["id"], since):
+        return out, False  # a message to it hasn't been picked up yet
+    listen(ls, task, start=int(task.get("turn") or 0))  # once more over the whole turn before calling it over
+    out += talk_events(task, told)
+    if open_questions(task):
+        return out, False  # it ended its turn to wait for your answer
+    ended = str(s.get("latestExecutorTerminationReason") or "")
+    failed = FAILED_ENDS.get(ended)
+    if failed:
+        out.append(f"❌ Antigravity task {short} {failed} → delegate.py result {short}")
+    else:
+        verdict = final_status(ls, task["id"], int(s.get("stepCount") or 0))
+        out.append(f"✅ Antigravity task {short} finished" + (f" (STATUS: {verdict})" if verdict else "")
+                   + f" → read its report: delegate.py result {short}, then check it (delegate.py diff {short})")
+    update(task, state="canceled" if ended.endswith("USER_CANCELED") else "done", finished=time.time())
+    return out, True
+
+
+def cmd_watch(a) -> int:
+    """For Claude Code's Monitor tool: every stdout line is an event, so print only what to act on — the agent's
+    questions and messages, an approval it waits for, its end — and exit when every watched task is over."""
+    tasks = watched(a.ids)
+    if not tasks:
+        print("No running Antigravity tasks to watch (delegate.py list shows the recent ones).")
+        return 0
+    ls = connect()
+    told = {t["id"]: set(t.get("told") or []) for t in tasks}
+    deadline = time.time() + max(a.timeout, 1.0)
+    live = list(tasks)
+    while live:
+        for t in list(live):
+            told[t["id"]] |= set(t.get("told") or [])  # what a wait or result has shown meanwhile
+            events, over = watch_events(ls, t, told[t["id"]])
+            if events:
+                print("\n".join(events), flush=True)
+            if events or over:
+                update(t, told_add=sorted(told[t["id"]]))
+            if over:
+                live.remove(t)
+        if not live:
+            break
+        if time.time() >= deadline:
+            print("⏳ Still running: " + ", ".join(t["id"][:8] for t in live) + " — watch again: delegate.py watch "
+                  + " ".join(t["id"][:8] for t in live), flush=True)
+            return 3
+        time.sleep(WATCH_POLL)
+    return 0
+
+
+def cmd_talk(a) -> int:
+    """Run by the Antigravity agent: a question (`ask`) or a message (`tell`) for Claude Code. It only prints — a
+    JSON line that Claude Code's side reads from the conversation — so it works anywhere, sandbox included."""
+    kind = TALK_KINDS[a.cmd]
+    text = " ".join(a.text or []).strip()
+    if text in ("", "-") and sys.stdin is not None and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    if not text:
+        print(f'Nothing to send: put the text in quotes, e.g. {a.cmd} "Should the old function keep its name?"')
+        return 1
+    if nobody_watches(os.environ.get("ANTIGRAVITY_CONVERSATION_ID", "")):
+        print("This conversation wasn't started by Claude Code, so nobody reads this — nothing was sent. Decide "
+              "yourself and say so in your report.")
+        return 0
+    print(json.dumps({WIRE: kind, "id": uuid.uuid4().hex[:10], "text": text[:TALK_LIMIT]}, ensure_ascii=False))
+    if kind == "question":
+        print("Sent to Claude Code. Its answer arrives in this conversation as a message starting with \"Claude Code "
+              "answers\", usually within minutes. Meanwhile go on with what doesn't depend on it; if nothing is left, "
+              "end your turn with one line saying what you wait for — the answer wakes you up. Don't poll, sleep or "
+              "ask again.")
+    else:
+        print("Sent to Claude Code. Go on with the task — no answer needed; if it replies, the message arrives in "
+              "this conversation.")
+    return 0
 
 
 def cmd_diff(a) -> int:
@@ -1351,24 +1781,22 @@ def cmd_diff(a) -> int:
 
 def cmd_send(a) -> int:
     task = task_for(a.id)
-    message = a.message if a.message and a.message != "-" else ("" if sys.stdin.isatty() else sys.stdin.read())
-    if not message.strip():
-        raise Failure("the follow-up message is empty.")
+    message = read_message(a, "follow-up message")
     ls = connect()
     s = summary(ls, task["id"])
     if not s:
         raise Failure(f"Antigravity doesn't know conversation {task['id']}.")
-    if s.get("status") == "CASCADE_RUN_STATUS_RUNNING":
-        print("(It is still working; the message reaches it between its steps.)", flush=True)
-    project = task.get("project") or ((find_project(task.get("cwd") or os.getcwd()) or ({"id": ""}, ""))[0]["id"])
-    task["turn"] = int(s.get("stepCount") or 0)
-    task["sent"] = time.time()
-    if task.get("label"):
-        task["quota_before"] = weekly_left(task["label"], quota(ls))
-    agentapi(ls, ["send-message", task["id"], FOLLOW_UP.format(message=message.strip())], project)
-    task["state"] = "running"
-    save(task)
-    print(f"Sent the follow-up to Antigravity task {task['id']}.", flush=True)
+    listen(ls, task)
+    if open_questions(task) or s.get("status") in ("CASCADE_RUN_STATUS_RUNNING", "CASCADE_RUN_STATUS_BUSY"):
+        # it waits for an answer or still works: a reply, and the report keeps covering the whole task
+        _, asked = deliver(ls, task, message)
+        print(("Answered its question" if asked else "It is still working — sent as a message it reads between its "
+               "steps") + f" (Antigravity task {task['id']}).", flush=True)
+    else:
+        before = weekly_left(task["label"], quota(ls)) if task.get("label") else task.get("quota_before")
+        s, _ = deliver(ls, task, message, kind="follow-up")
+        update(task, turn=int(s.get("stepCount") or 0), sent=time.time(), quota_before=before)
+        print(f"Sent the follow-up to Antigravity task {task['id']}.", flush=True)
     if a.no_wait:
         print(f"Wait for it with: delegate.py wait {task['id'][:8]}  (run that in the background)")
         return 0
@@ -1385,8 +1813,7 @@ def cmd_cancel(a) -> int:
         if "not currently running" not in e.message:
             raise
         print(f"Antigravity task {task['id']} wasn't running.")
-    task["state"] = "canceled"
-    save(task)
+    update(task, state="canceled")
     return 0
 
 
@@ -1404,7 +1831,9 @@ def cmd_list(a) -> int:
     for t in tasks:
         status = str((live.get(t["id"]) or {}).get("status") or "")
         state = "running" if status.endswith(("RUNNING", "BUSY")) else t.get("state") or "?"
-        if state == "running" and status.endswith("IDLE"):
+        if open_questions(t) and state in ("running", "question", "done"):
+            state = "question"  # it asked Claude Code something and waits for the answer
+        elif state in ("running", "question") and status.endswith("IDLE"):
             state = "done"
         age = span(time.time() - (t.get("started") or time.time())) + " ago"
         lines.append(f"  {t['id'][:8]}  {state:10} {age:12} {t.get('label') or t.get('model') or '?'}  "
@@ -1452,6 +1881,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("message", nargs="?")
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     p.add_argument("--no-wait", action="store_true")
+    p = sub.add_parser("watch", help="for the Monitor tool: one line per event (questions, messages, approvals, the "
+                                     "end) until the tasks are over")
+    p.add_argument("ids", nargs="*", help="task ids (default: the running tasks this session started)")
+    p.add_argument("--timeout", type=float, default=WATCH_TIMEOUT, help="seconds before it stops (default 1780)")
+    p = sub.add_parser("reply", help="answer the agent's question, or tell it something while it works")
+    p.add_argument("id")
+    p.add_argument("message", nargs="*", help="the text ('-' or nothing: read stdin)")
+    for verb in TALK_KINDS:
+        p = sub.add_parser(verb, help=("run by the Antigravity agent: " + ("a question for Claude Code" if verb == "ask"
+                                                                           else "a message for Claude Code")))
+        p.add_argument("text", nargs="*")
     p = sub.add_parser("cancel", help="stop a task")
     p.add_argument("id")
     p = sub.add_parser("list", help="recent tasks")
@@ -1459,8 +1899,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser("statusline", help="as Claude Code's statusLine command: remember its rate_limits for budget")
     a = ap.parse_args(argv)
     handlers = {"budget": cmd_budget, "models": cmd_models, "run": cmd_run, "wait": cmd_wait, "result": cmd_result,
-                "diff": cmd_diff, "send": cmd_send, "cancel": cmd_cancel, "list": cmd_list,
-                "statusline": cmd_statusline}
+                "diff": cmd_diff, "send": cmd_send, "watch": cmd_watch, "reply": cmd_reply, "ask": cmd_talk,
+                "tell": cmd_talk, "cancel": cmd_cancel, "list": cmd_list, "statusline": cmd_statusline}
     if a.cmd not in handlers:
         ap.print_help()
         return 1

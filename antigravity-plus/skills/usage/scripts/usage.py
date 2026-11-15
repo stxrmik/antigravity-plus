@@ -37,6 +37,15 @@ UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 MODEL_CHANGE_RE = re.compile(r"Model Selection`\s+from\s+(.*?)\s+to\s+(.*?)\.(?:\s|$)")
 USER_REQ_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
 NBSP = "\u00a0"
+# Conversations started through agentapi (Claude Code's bridge, sidecars, scripts) have no \u00abModel Selection\u00bb message:
+# their model comes from the bridge's task record, or from Antigravity's own metadata (cached here).
+DELEGATE_DIR = os.path.expanduser("~/.gemini/antigravity-plus/delegate")
+MODEL_CACHE = os.path.expanduser("~/.gemini/antigravity-plus/conversation-models.json")
+MODEL_CACHE_KEEP = 2000
+DELEGATED_MARK = "[Delegated from Claude Code]"  # = hooks/conversation.py DELEGATED_MARK
+FOLLOW_UP_RE = re.compile(r"sender=system\b.{0,200}?content=Follow-up from Claude Code:\s*(.*?)"
+                          r"(?:\n\n\(Same rules as before|</SYSTEM_MESSAGE>|$)", re.S)
+ALIASES = ("flash_lite", "flash", "pro")
 
 
 # ─────────────────────────────── data model ────────────────────────────────
@@ -237,6 +246,96 @@ def short(text: str, n: int = 60) -> str:
     return t if len(t) <= n else t[: n - 1] + "…"
 
 
+def delegated_task(conv_id: str) -> dict:
+    """The record Claude Code's bridge (claude-code/skills/antigravity/scripts/delegate.py) keeps of a task it started
+    as this conversation: {model, label, title, …}, or {}."""
+    if not UUID_RE.fullmatch(conv_id or ""):
+        return {}
+    try:
+        with open(os.path.join(DELEGATE_DIR, conv_id + ".json"), encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) and d.get("id") == conv_id else {}
+
+
+def _model_cache() -> Dict[str, str]:
+    try:
+        with open(MODEL_CACHE, encoding="utf-8") as f:
+            d = json.load(f)
+        return {k: v for k, v in d.items() if isinstance(v, str)} if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_model(conv_id: str, model: str) -> None:
+    cache = _model_cache()
+    cache[conv_id] = model
+    if len(cache) > MODEL_CACHE_KEEP:
+        cache = dict(list(cache.items())[-MODEL_CACHE_KEEP:])
+    try:
+        os.makedirs(os.path.dirname(MODEL_CACHE), exist_ok=True)
+        tmp = f"{MODEL_CACHE}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+        os.replace(tmp, MODEL_CACHE)
+    except OSError:
+        pass
+
+
+def _ls_model(conv_id: str) -> str:
+    """The model Antigravity ran a conversation's first call on («Gemini 4 Carbon (High)»), asked from its language
+    server — only where Antigravity hands over the address and token (its side panel). "" when it can't tell."""
+    addr, token = os.environ.get("ANTIGRAVITY_LS_ADDRESS", ""), os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "")
+    if not addr or not token:
+        return ""
+    import urllib.request
+    base = addr if re.match(r"^https?://", addr) else f"http://{addr}"
+    req = urllib.request.Request(f"{base}/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata",
+                                 data=json.dumps({"cascadeId": conv_id}).encode("utf-8"), method="POST",
+                                 headers={"Content-Type": "application/json", "Connect-Protocol-Version": "1",
+                                          "X-Codeium-Csrf-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            data = json.loads(r.read().decode("utf-8") or "{}")
+    except Exception:  # unreachable, refused or unreadable: the caller falls back to the default model
+        return ""
+    for g in (data.get("generatorMetadata") or []) if isinstance(data, dict) else []:
+        cm = (g or {}).get("chatModel") if isinstance(g, dict) else None
+        name = str((cm or {}).get("modelDisplayName") or (cm or {}).get("responseModel") or "") if isinstance(cm, dict) else ""
+        if name:
+            return name
+    return ""
+
+
+def started_on(conv_id: str, pricing: Pricing) -> str:
+    """The model of a conversation whose transcript names none (started through agentapi): the bridge's task record
+    («Gemini 4 Carbon (High)»; an alias like flash_lite → its model), else Antigravity's metadata, cached."""
+    rec = delegated_task(conv_id)
+    model = str(rec.get("model") or "")
+    if model in ALIASES:
+        return pricing.alias(model) or model
+    if rec.get("label"):
+        return str(rec["label"])
+    known = _model_cache().get(conv_id)
+    if known:
+        return known
+    found = _ls_model(conv_id) if UUID_RE.fullmatch(conv_id or "") else ""
+    if found:
+        _remember_model(conv_id, found)
+    return found
+
+
+def delegated_title(text: str, rec: dict) -> str:
+    """A task Claude Code handed over starts with the bridge's run rules: name it by its title in Antigravity
+    («Claude Code: …») or by the first line of the task itself."""
+    if rec.get("title"):
+        return str(rec["title"])
+    m = re.search(r"\nTask:\s*\n(.*)", text, re.S)
+    first = next((ln.strip(" #*->") for ln in (m.group(1) if m else "").splitlines() if ln.strip(" #*->")), "")
+    return "Claude Code: " + (first or "задача")
+
+
 def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str],
                   inherited_model: Optional[str] = None, depth: int = 0,
                   seen: Optional[set] = None) -> Session:
@@ -244,6 +343,7 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
     seen.add(conv_id)
     s = Session(conv_id=conv_id, path=logs_dir)
     model = inherited_model or ""
+    asked_antigravity = False  # the model of an agentapi-started conversation is looked up once, at its first call
     turn: Optional[Turn] = None
     pending_subagents: List[dict] = []
     sub_ids: List[Tuple[str, dict]] = []
@@ -264,12 +364,22 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
             m = USER_REQ_RE.search(content)
             text = m.group(1) if m else content
             if st.get("source") == "USER_EXPLICIT" or m:
+                if text.lstrip().startswith(DELEGATED_MARK):  # Claude Code's brief: its task, not the run rules
+                    text = delegated_title(text, delegated_task(conv_id))
                 turn = Turn(idx=len(s.turns) + 1, text=text, ts=ts)
                 s.turns.append(turn)
                 if not s.title:
                     s.title = short(text, 80)
             pending_subagents = []
             continue
+
+        if typ == "SYSTEM_MESSAGE" and "Follow-up from Claude Code:" in content:
+            fm = FOLLOW_UP_RE.search(content)
+            if fm:  # more work Claude Code sent into the same conversation: a turn of its own
+                turn = Turn(idx=len(s.turns) + 1, text="Claude Code: " + fm.group(1).strip(), ts=ts)
+                s.turns.append(turn)
+                pending_subagents = []
+                continue
 
         if typ == "PLANNER_RESPONSE":
             pending_subagents = []
@@ -281,6 +391,9 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
                 if turn is None:
                     turn = Turn(idx=1, text="(начало)", ts=ts)
                     s.turns.append(turn)
+                if not model and not asked_antigravity:
+                    asked_antigravity = True
+                    model = started_on(conv_id, pricing)
                 if not model:
                     s.guessed_calls += 1
                 c = Call(step=st.get("step_index", -1), ts=ts, model=model or pricing.cfg.get("default_model", "?"),
@@ -701,7 +814,7 @@ def render_all(roots: List[str], pricing: Pricing, days: Optional[int], limit: i
 # ─────────────────────────────── JSON (side panel) ─────────────────────────
 
 CACHE_PATH = os.path.expanduser("~/.gemini/antigravity-plus/usage-cache.json")
-CACHE_VERSION = 3
+CACHE_VERSION = 4  # 4: agentapi conversations get their real model and Claude Code tasks their title
 
 
 def _iso(ts: Optional[dt.datetime]) -> Optional[str]:

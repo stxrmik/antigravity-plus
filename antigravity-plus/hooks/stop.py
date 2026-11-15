@@ -705,6 +705,8 @@ def decide(payload: dict) -> Optional[str]:
     st = conv.load(payload)
     if not st:
         return None
+    if conv.delegated(st) and conv.waiting_for_claude(st):
+        return None  # it asked Claude Code and waits: the answer arrives as a message and wakes it up
     hints = setting("parallelHints")
     run = parallel.running(st) if hints else []
     work = parallel.busy(run)

@@ -25,6 +25,8 @@ into every later conversation, so that write is refused and the agent writes whe
 (protectSecrets). A new file in the memory format written anywhere else (weak models shorten the long path to
 `<project>/memory/…`) is refused with the exact folder it belongs in. Under full access (one grant from the user, hooks/conversation.py) every command and edit not
 listed above gets "auto_approve" too; the destructive ones and the user's explicit bans still stop.
+A delegated agent's `delegate.py ask|tell` (its questions and messages for Claude Code, which only print a line) gets
+"auto_approve" — only the installed script in ~/.claude/skills/antigravity, and only as one plain command.
 
 Everything else gets "allow", which in Antigravity means "no objection — delegate to the next hook or the
 default policy" (it is NOT auto-approval; that is "auto_approve"), so your permission settings apply unchanged.
@@ -226,6 +228,40 @@ def split_heredocs(cmd: str) -> Tuple[str, List[Tuple[str, str]]]:
         return "<<" + m.group(2) + "\n"
 
     return HEREDOC.sub(repl, cmd), docs
+
+
+# A delegated agent talking to Claude Code (claude-code/skills/antigravity/scripts/delegate.py ask|tell, the commands
+# the brief gives it): they only print a line for Claude Code, so they never need the user's approval.
+CLAUDE_TALK = os.path.join(os.path.expanduser("~"), ".claude", "skills", "antigravity", "scripts", "delegate.py")
+PYTHON_EXE = re.compile(r"^(?:.*/)?(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?$", re.I)
+PYTHON_FLAGS = {"-3", "-I", "-u", "-B", "-E", "-s", "-X", "utf8"}
+
+
+def talks_to_claude(cmd: str) -> bool:
+    """`python3 "~/.claude/skills/antigravity/scripts/delegate.py" ask|tell "<text>"` and nothing else: only that
+    installed script (not a delegate.py from the project), no second command, redirection or substitution."""
+    text = (cmd or "").strip()
+    if not text or "$(" in text or "${" in text or "`" in text:
+        return False
+    if text.startswith("& "):  # PowerShell runs a quoted program with &
+        text = text[2:]
+    if compat.WINDOWS:  # a backslash is a path separator there, not an escape
+        text = text.replace("\\", "/")
+    try:
+        lex = shlex.shlex(text, posix=True, punctuation_chars="();<>|&\n")
+        lex.whitespace, lex.whitespace_split, lex.commenters = " \t\r", True, ""  # «#» is no comment in every shell
+        tokens = list(lex)
+    except ValueError:
+        return False
+    if len(tokens) < 3 or not PYTHON_EXE.match(tokens[0]) or any(t and not t.strip("();<>|&\n") for t in tokens):
+        return False
+    rest = tokens[1:]
+    while rest and rest[0] in PYTHON_FLAGS:
+        rest = rest[1:]
+    if len(rest) < 2 or rest[1] not in ("ask", "tell"):
+        return False
+    norm = lambda p: os.path.normcase(os.path.realpath(os.path.expanduser(p)))  # noqa: E731
+    return norm(rest[0]) == norm(CLAUDE_TALK)
 
 
 def strip_prefixes(tokens: List[str]) -> List[str]:
@@ -656,6 +692,8 @@ def decide(payload: dict) -> dict:
         return PASS
     if tool == "run_command":
         subject = unwrap(args.get("CommandLine") or args.get("command") or "")
+        if talks_to_claude(subject):
+            return AUTO  # a delegated agent's question or message for Claude Code: it only prints a line
         stall = gitcheck.interactive(subject) if gitcheck and git_checks() else None
         if stall:  # it would wait at the keyboard (or fail on GIT_EDITOR=false): refuse with the form that works
             log(payload, tool, stall[0], subject)
