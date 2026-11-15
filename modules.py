@@ -30,7 +30,8 @@ MODULES: List[Dict] = [
                   "CLAUDE.md с @импортами и .claude/rules, — а ваши указания («ничего не пушь») снова видит после "
                   "каждого сжатия контекста, так что они не тонут в длинных разговорах. Правила работы: понять запрос, "
                   "спланировать, сделать, проверить; несколько агентов в одном проекте не затирают правки друг друга. "
-                  "Команды: /init (правила проекта в AGENTS.md), /remember, /settings, /doctor, /hooks. "
+                  "Команды: /init (правила проекта в AGENTS.md), /remember, /settings, /doctor, /hooks, /update (новая версия "
+                  "одной командой: раз в сутки агент сам скажет, что она вышла; откат одной командой). "
                   "Обязательна: остальные модули работают поверх неё.",
             "en": "The guard stops what is irreversible or dangerous (rm -rf, git reset --hard, force-push, sudo, "
                   "curl | sh, DROP TABLE…), keeps secrets out of the conversation (cat .env) and never lets the agent "
@@ -41,9 +42,10 @@ MODULES: List[Dict] = [
                   "instructions («don't push anything») again after every context compaction, so they don't get lost "
                   "in long conversations. Working rules: understand the request, plan, do, verify; several agents on "
                   "one project don't overwrite each other's edits. Commands: /init (project rules in AGENTS.md), "
-                  "/remember, /settings, /doctor, /hooks. Required: every other module builds on it.",
+                  "/remember, /settings, /doctor, /hooks, /update (a new release in one command: once a day the agent tells you "
+                  "one is out; rolls back in one command). Required: every other module builds on it.",
         },
-        "skills": ["doctor", "settings", "init", "remember", "hooks"],
+        "skills": ["doctor", "settings", "init", "remember", "hooks", "update"],
         "rules": ["AGENTS.md"],
     },
     {

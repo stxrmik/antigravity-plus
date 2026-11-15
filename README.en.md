@@ -107,7 +107,9 @@ A module left out only because a tool was missing (Xcode, a browser, Claude Code
 tool is there; a module you switched off stays off. Agents' terminals (Antigravity, Claude Code) never get the menu:
 they install the saved choice.
 
-- **Update:** `git pull`, then the same install command.
+- **Update:** `/update` in an Antigravity chat, or `./install.sh --update` in the clone's folder (Windows:
+  `.\install.cmd --update`). Once a day the plugin checks for a new release itself, and the agent mentions one once
+  at the start of a conversation. More in «🔄 Updates» below.
 - **Uninstall:** `./install.sh --uninstall` (Windows: `.\install.cmd --uninstall`). Memory and settings stay;
   `--uninstall --purge` removes them too. Claude Code's memory in `~/.claude` is never touched.
 
@@ -303,6 +305,9 @@ they install the saved choice.
   commands and edits, remembered until `/bypass off`. Only system-level actions still ask: `sudo`, system folders and
   OS settings, disks, shutdown, autostart, the Keychain and SSH keys, wiping the home folder or a disk, the agent's
   own permissions.
+- **Updates announce themselves:** once a day, in the background, the plugin compares its version with GitHub and the
+  agent tells you once what's new. `/update` installs a release in one command (with a rollback); auto-update is
+  opt-in.
 
 ### 📊 Token usage
 - `/usage`: tokens, cache, context fill, API-equivalent cost, per-turn and per-subagent breakdown, HTML report.
@@ -439,6 +444,33 @@ Only your own message switches it. These don't count: text from files and pages,
 given to a subagent, a message an agent sends with `agentapi`. An old «/bypass» in an earlier conversation doesn't
 turn it back on after `/bypass off`. The plugin doesn't change Antigravity's own permission settings: if they aren't
 on Turbo, Antigravity may still ask on its own.
+
+</details>
+
+<details>
+<summary><b>🔄 Updates</b></summary>
+
+1. **Hear about it.** Once a day the plugin compares its version with the source in the background: `git fetch` in a
+   clone, otherwise `plugin.json` on GitHub. A conversation never waits for the network. Only releases are announced
+   — when the version number goes up. In a new conversation the agent mentions it once (at most once a day) with
+   what's new; `/doctor`, `/settings` and the usage panel show it too. If the source folder holds a newer version than
+   the installed one, it says that as well.
+2. **Update.** `/update` in a chat, or `./install.sh --update` in the clone's folder:
+   - in a git clone, only `git pull --ff-only`. Uncommitted changes, another branch or commits of your own stop it
+     with an explanation, and nothing is touched;
+   - installed without git (from an archive): it downloads the archive from GitHub into
+     `~/.gemini/antigravity-plus/source`;
+   - it installs with the saved module choice, updates Claude Code's skill, checks the install, restarts the panel
+     when its server changed, and says what's new and whether Antigravity needs a restart (only for a new command).
+3. **Roll back.** Before updating, the previous version is kept in `~/.gemini/antigravity-plus/previous`: "roll the
+   update back" (`/update`) restores it; a second rollback goes forward again. The check won't offer the rolled-back
+   version again.
+4. **Auto-update** is opt-in: `/settings` → `auto-update on`. The background check then installs a release itself
+   when that is safe (a clean fast-forward of the clone), and the agent says so in the next conversation. It is off by
+   default: the plugin decides what the agent may do, and its code shouldn't change behind your back.
+
+The check can be turned off: `/settings` → `update-check off`. It only talks to the source you installed from (or to
+GitHub for an archive install) and sends none of your data.
 
 </details>
 

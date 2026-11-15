@@ -46,7 +46,7 @@ PLUGIN_KEYS = [("auto-memory", "autoMemory"), ("share-with-claude-code", "shareW
                ("protect-secrets", "protectSecrets"), ("auto-setup", "autoSetup"),
                ("parallel-hints", "parallelHints"), ("speed-hints", "speedHints"), ("fact-checks", "factChecks"),
                ("objective-answers", "objectiveAnswers"), ("auto-ci", "autoCi"),
-               ("git-checks", "gitChecks")]
+               ("git-checks", "gitChecks"), ("update-check", "updateCheck"), ("auto-update", "autoUpdate")]
 
 
 def load_json(path: str) -> dict:
@@ -135,6 +135,15 @@ def show(ws: str) -> str:
                                  for k, v in PLUGIN_KEYS if v in s))
     since = conv._project_grant(ws, None)
     out.append(f"- Full access for this project: {'on since ' + since if since else 'off (per conversation only)'}")
+    try:  # skills/update: what the daily check found (no network here)
+        sys.path.insert(0, os.path.join(PLUGIN, "skills", "update", "scripts"))
+        import update
+        u = update.status()
+        out.append(f"- Version: {u.get('installed') or '?'}" + (
+            f" — {u.get('best')} is out: /update" if u.get("available") else " — the latest known" if u.get("checked")
+            else " — not checked yet") + " (update-check: the daily check, auto-update: installs by itself)")
+    except Exception:
+        pass
     bypass = conv.bypass_record()
     out.append("- Bypass Mode (every conversation): " + (
         f"on since {bypass.get('since') or '?'} — commands and edits run without asking, only system-level actions "

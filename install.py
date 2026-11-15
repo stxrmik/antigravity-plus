@@ -2,6 +2,7 @@
 """Antigravity Plus installer for macOS, Linux and Windows.
 
   python3 install.py                       install or update into ~/.gemini/config/plugins/antigravity-plus
+  python3 install.py --update              the newest release: `git pull --ff-only` here (or a download), then install
   python3 install.py --choose              pick the modules again (a menu with a detailed description of each)
   python3 install.py --list                describe every module and exit
   python3 install.py --modules core,git    exactly these modules (core is always in)
@@ -12,7 +13,9 @@
   python3 install.py --uninstall --purge  also remove its memory and settings (~/.claude memory is never touched)
 
 Modules (modules.py): the first install in a terminal shows a menu; the choice is saved in
-~/.gemini/antigravity-plus/modules.json and reused by every update, so `git pull && ./install.sh` asks nothing.
+~/.gemini/antigravity-plus/modules.json and reused by every update, so `git pull && ./install.sh` asks nothing;
+`--update` does that pull itself (only a fast-forward of a clean clone) and says what's new — the same as /update
+in Antigravity (skills/update/scripts/update.py).
 What isn't chosen isn't copied — its skills, subagents, rules and side panel never reach Antigravity's context —
 and the hook features it owns stay off (settings forced in modules.json). No menu where nobody can answer: an agent's
 terminal (TERM=dumb in Antigravity, CLAUDECODE in Claude Code), CI, or no terminal at all.
@@ -534,6 +537,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--uninstall", action="store_true", help="remove the plugin")
+    ap.add_argument("--update", action="store_true",
+                    help="update to the newest release (fast-forward pull of this clone, or a download) and install it")
     ap.add_argument("--purge", action="store_true", help="with --uninstall: also remove memory and settings")
     ap.add_argument("--choose", action="store_true", help="pick the modules again in a menu")
     ap.add_argument("--list", action="store_true", help="describe every module and exit")
@@ -546,6 +551,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     lang = language(a.lang)
     if a.uninstall:
         return uninstall(a.purge)
+    if a.update:  # the same as /update in Antigravity: pull (fast-forward only), then the new install.py installs
+        return subprocess.run([sys.executable, os.path.join(SRC, "skills", "update", "scripts", "update.py"),
+                               "run", "--source", HERE]).returncode
     if a.list:
         prev = saved()
         print(describe_all(set(prev["installed"]) if prev else default_choice(), lang))

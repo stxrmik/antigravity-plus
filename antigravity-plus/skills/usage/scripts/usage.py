@@ -1023,7 +1023,20 @@ def recent_json(roots: List[str], pricing: Pricing, limit: int = 15, days: int =
         "conversations": [{k_: v for k_, v in summ.items() if k_ != "buckets"} for summ in summaries[:limit]],
         "errors": errors,
         "pricing_updated": pricing.cfg.get("_updated", ""),
+        "update": update_info(),
     }
+
+
+def update_info() -> dict:
+    """For the side panel: a newer Antigravity Plus release the daily check found (skills/update; no network)."""
+    try:
+        sys.path.insert(0, os.path.join(HERE, "..", "..", "update", "scripts"))
+        import update
+        s = update.status()
+        return {"installed": s.get("installed") or "", "latest": s.get("best") or "", "available": bool(s.get("available")),
+                "notes": list(s.get("notes") or [])[:5]}
+    except Exception:
+        return {}
 
 
 # ─────────────────────────────── main ──────────────────────────────────────

@@ -644,6 +644,8 @@
     const kids = [];
     if (state.error) kids.push(h('div', { class: 'card err' }, h('div', { style: 'font-weight:600' }, 'Не удалось получить данные'),
       h('div', { class: 'small muted' }, state.error), h('div', { class: 'small muted' }, 'Проверьте /doctor в Antigravity: нужен python3 и доступ к ~/.gemini/antigravity/brain.')));
+    const up = state.recent && state.recent.update;
+    if (up && up.available) kids.push(h('div', { class: 'card' }, note('info', `Вышла Antigravity Plus ${up.latest} (у вас ${up.installed || '?'}) — напишите /update в чате: обновление в один шаг, с откатом.`)));
     kids.push(...(state.tab === 'session' ? renderSession() : renderAll()));
     view.replaceChildren(...kids);
     const pu = (state.session && state.session.pricing_updated) || (state.recent && state.recent.pricing_updated) || '?';

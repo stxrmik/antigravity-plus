@@ -99,7 +99,7 @@ The plugin's commands are skills; your skills list shows each one's SKILL.md pat
 | `/remember` | the user states a lasting rule for the repo, or corrects you in a way that should last |
 | `/settings` (`show`) | before you tell the user anything about their setup; changes only on the user's words |
 
-Only when the user asks, or under full access (you may offer them in one line): `/commit`, `/pr`, `/deploy`, `/fix-issue`, `/simplify`, `/export`, `/hooks`, and forgetting or cleaning up memory. Settings (`/settings`, `/memory`) change only on the user's words.
+Only when the user asks, or under full access (you may offer them in one line): `/commit`, `/pr`, `/deploy`, `/fix-issue`, `/simplify`, `/export`, `/hooks`, and forgetting or cleaning up memory. Settings (`/settings`, `/memory`) change only on the user's words. `/update` (a new Antigravity Plus release, or a rollback) runs only on the user's words, even under full access: when the session context announces a release, tell the user once in one line at the end of your reply and offer it.
 
 Subagents use only read-only commands that help their task (a memory search, `/usage`, `/doctor`); `debugger` and `test-writer` may also run `/review` on their own change. Never `/commit`, `/pr`, `/remember`, `/handoff`, `/init`, `/git-init`, `/simplify` or a settings change from a subagent: report to the main agent instead.
 

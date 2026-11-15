@@ -9,6 +9,8 @@ Injects a compact snapshot at the start of every conversation, like Claude Code'
   * memory: personal and project auto-memory (skills/memory/scripts/memory.py — shared with Claude Code);
   * terminal sandbox: the commands this project needed BypassSandbox for, while the sandbox is on (hooks/speed.py);
   * full access for the project, and Bypass Mode when the user has it on (hooks/conversation.py);
+  * updates (skills/update/scripts/update.py): starts the daily check for a new release in the background and tells
+    the main agent about one at most once a day, so it tells the user and offers /update;
   * Claude Code bridge (Antigravity doesn't load these natively): CLAUDE.md / CLAUDE.local.md with their
     @path imports, .claude/rules (always-on inlined, path-scoped listed), ~/.claude/CLAUDE.md, and pointers to
     .claude/commands, .claude/skills and .claude/agents.
@@ -499,6 +501,16 @@ def build(payload: dict) -> str:
         if claude:
             bridge.append(f"\n## Claude Code files in {top or ws}")
             bridge.extend(claude)
+    try:  # updates (skills/update): the daily check runs in a process of its own; a new release is told once a day
+        sys.path.insert(0, os.path.join(PLUGIN, "skills", "update", "scripts"))
+        import update
+        update.spawn_background()
+        lines = update.notice(sub or handed)
+        if lines:
+            head.append("\n## Antigravity Plus")
+            head.extend(lines)
+    except Exception as e:  # the session context must come through anyway
+        print(f"session_start: update: {e}", file=sys.stderr)
     bridge.extend(user_claude_md())
     query = (st["users"][0]["text"] if st and st["users"] else "") or str(payload.get("lastUserInput") or "")
     memory = [] if sub else memory_section(paths, tops, query)  # subagents don't talk to the user or write memory

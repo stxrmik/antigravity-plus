@@ -53,7 +53,7 @@ TYPES = ("user", "feedback", "project", "reference")
 DEFAULTS = {"autoMemory": True, "shareWithClaudeCode": True, "recentConversations": 3, "finishTasks": True,
             "checkEdits": True, "autoReview": True, "autoVerify": True, "protectSecrets": True, "autoSetup": True,
             "parallelHints": True, "speedHints": True, "factChecks": True, "objectiveAnswers": True, "autoCi": True,
-            "gitChecks": True}
+            "gitChecks": True, "updateCheck": True, "autoUpdate": False}
 
 MAX_FILE = 64_000            # bytes read per memory file
 INDEX_LINES = 200            # like Claude Code: only the head of MEMORY.md goes into the conversation
@@ -614,7 +614,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "check-edits": "checkEdits", "auto-review": "autoReview", "auto-verify": "autoVerify",
                 "protect-secrets": "protectSecrets", "auto-setup": "autoSetup", "parallel-hints": "parallelHints",
                 "speed-hints": "speedHints", "fact-checks": "factChecks", "objective-answers": "objectiveAnswers",
-                "auto-ci": "autoCi", "git-checks": "gitChecks"}
+                "auto-ci": "autoCi", "git-checks": "gitChecks",
+                "update-check": "updateCheck", "auto-update": "autoUpdate"}
         p = a.pairs
         if len(p) % 2:
             ap.error("config takes pairs: <key> <value>")
@@ -630,7 +631,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "recent-conversations N, finish-tasks on|off, check-edits on|off, auto-review on|off, "
                          "auto-verify on|off, protect-secrets on|off, auto-setup on|off, parallel-hints on|off, "
                          "speed-hints on|off, fact-checks on|off, objective-answers on|off, auto-ci on|off, "
-                         "git-checks on|off)")
+                         "git-checks on|off, update-check on|off, auto-update on|off)")
         s = save_settings(**changes) if changes else settings()
         print(json.dumps(s, ensure_ascii=False, indent=2))
     return 0

@@ -239,6 +239,24 @@ def modules_line() -> str:
             + (f" · изменить: `./install.sh --choose` в {mods['source']}" if mods.get("source") else ""))
 
 
+def update_line() -> str:
+    """The installed version against the newest known release (skills/update; no network here)."""
+    try:
+        sys.path.insert(0, os.path.join(PLUGIN, "skills", "update", "scripts"))
+        import update
+        s = update.status()
+    except Exception as e:
+        return f"{WARN} обновления: не удалось прочитать ({e})"
+    if not s.get("checked"):
+        return "ℹ️ обновления: ещё не проверялись (проверка идёт сама раз в сутки; сейчас — `/update`)"
+    when = time.strftime("%d.%m %H:%M", time.localtime(float(s["checked"])))
+    if s.get("available"):
+        return (f"⬆️ доступна Antigravity Plus {s.get('best')} (установлена {s.get('installed') or '?'}) — /update"
+                + (": " + "; ".join(s.get("notes") or []) if s.get("notes") else ""))
+    return f"{OK} версия {s.get('installed') or '?'} — последняя (проверено {when})" + (
+        f" · последняя проверка: {s['error']}" if s.get("error") else "")
+
+
 def hook_selftest() -> List[str]:
     out = []
     hooks = os.path.join(PLUGIN, "hooks")
@@ -877,6 +895,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if size > RULE_FILE_LIMIT:
             rep.append(f"{WARN} rules/{name} {size} байт > лимита {RULE_FILE_LIMIT} — будет обрезан")
     rep.append(modules_line())
+    rep.append(update_line())
     rep += ["", "### Что видит Antigravity"] + antigravity_view(inv, ws)
     rep += ["", "### Хуки (самопроверка)"] + hook_selftest()
     rep += ["", "### Окружение"] + environment()
