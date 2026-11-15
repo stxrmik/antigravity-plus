@@ -254,9 +254,23 @@ def hook_selftest() -> List[str]:
         if memstore:
             mem = call(guard, {"toolCall": {"name": "write_file", "args": {"Path": os.path.join(memstore.PERSONAL, "x.md")}}})
             mem_ok = '"auto_approve"' in mem[1]
-        ok = '"allow"' in safe[1] and '"force_ask"' in bad[1] and mem_ok
-        out.append(f"{OK if ok else BAD} guard (PreToolUse): безопасная команда → allow, `git reset --hard` → подтверждение, "
-                   "запись в память → без вопросов" + ("" if ok else f" — вывод: {safe[1][:100]!r} / {bad[1][:100]!r}"))
+        try:
+            sys.path.insert(0, hooks)
+            import conversation as conv
+            bypass = conv.bypass_record().get("on") is True
+        except Exception:
+            bypass = False
+        if bypass:  # Bypass Mode is on: no questions, except for what touches the system
+            sysc = call(guard, {"toolCall": {"name": "run_command", "args": {"CommandLine": "sudo rm -rf /Library/Caches/agp-selftest"}},
+                                "conversationId": SELFTEST_ID})
+            ok = '"auto_approve"' in safe[1] and '"auto_approve"' in bad[1] and '"force_ask"' in sysc[1] and mem_ok
+            out.append(f"{OK if ok else BAD} guard (PreToolUse, Bypass Mode): команды без вопросов (и `git reset --hard`), "
+                       "системные (`sudo …`) → подтверждение, запись в память → без вопросов"
+                       + ("" if ok else f" — вывод: {safe[1][:100]!r} / {bad[1][:100]!r} / {sysc[1][:100]!r}"))
+        else:
+            ok = '"allow"' in safe[1] and '"force_ask"' in bad[1] and mem_ok
+            out.append(f"{OK if ok else BAD} guard (PreToolUse): безопасная команда → allow, `git reset --hard` → подтверждение, "
+                       "запись в память → без вопросов" + ("" if ok else f" — вывод: {safe[1][:100]!r} / {bad[1][:100]!r}"))
         tp = _fake_transcript(["Сделай фичу", "Самое главное, пока что ничего не пушь на сервер"])
         push = call(guard, {"toolCall": {"name": "run_command", "args": {"CommandLine": "git push"}},
                             "conversationId": SELFTEST_ID, "transcriptPath": tp})
@@ -746,6 +760,10 @@ def agents_status(ws: str) -> List[str]:
         since = conv._project_grant(os.path.realpath(ws), None)
         out.append(f"ℹ️ полный доступ для проекта: " + (f"включён с {since} (отозвать: «верни вопросы»)" if since else
                    "не выдан (агент спросит один раз, когда понадобится)"))
+        bypass = conv.bypass_record()
+        out.append("ℹ️ Bypass Mode: " + (f"включён с {bypass.get('since') or '?'} во всех разговорах — guard спрашивает "
+                                         "только о системных действиях (выключить: «/bypass off»)"
+                                         if bypass.get("on") is True else "выключен (включить: «/bypass» в чате)"))
     except Exception as e:
         out.append(f"{WARN} не удалось прочитать состояние агентов: {e}")
     try:

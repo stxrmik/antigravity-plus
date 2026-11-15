@@ -13,6 +13,8 @@ Subagents (no user messages in their transcript) get nothing of that. Everyone, 
 problems hooks/check_edit.py found in files written since the previous step, the other agents working in the
 project (hooks/coord.py), hints that keep it working while its subagents and background commands run
 (hooks/parallel.py), and hints on the sandbox, the context budget and loops of failing commands (hooks/speed.py).
+When the user switches Bypass Mode («/bypass», «/bypass off»), this hook applies it for every conversation
+(hooks/conversation.py) and tells the agent once; a switch made in another conversation is mentioned once too.
 The main agent also gets, with a new user message, the saved memories it is about, and hears when the message sounds
 worth remembering (hooks/memory_hints.py), asks for facts it has to look up and cite (hooks/facts.py), or calls for
 a straight answer — an objection, a guess at a cause, a request for an opinion (hooks/objective.py).
@@ -48,6 +50,43 @@ ACCESS_ON = ("Full access is ON{how}: run any plugin command yourself without as
              "it. The user's explicit restrictions still win, destructive operations still stop at the guard, and you "
              "say in one line what you ran.")
 ACCESS_OFF = "Full access was revoked{how}: on-request commands (/commit, /pr, /deploy …) need the user's request again."
+
+
+BYPASS_ON = ("The user turned Bypass Mode ON (message {n}). From now on, in every conversation and until they turn it "
+             "off, Antigravity Plus approves your commands, edits and reads itself — no permission prompts. It still "
+             "asks the user before system-level actions: sudo or admin rights, system folders and OS settings, disks, "
+             "shutdown, autostart, the Keychain and private SSH keys, wiping the home folder or a disk, and changes to "
+             "your own permissions; their explicit bans («не пушь») still hold. Your rules don't change: commits, "
+             "pushes, deploys and deleting data still need the user's request. Confirm in one line, in the user's "
+             "language, and say it stays on until «/bypass off».")
+BYPASS_OFF = ("The user turned Bypass Mode OFF (message {n}): permission prompts are back as before, in every "
+              "conversation. Confirm in one line, in the user's language.")
+BYPASS_ELSEWHERE = ("Bypass Mode was turned {state} in another conversation: {what}")
+
+
+def bypass_work(payload: dict) -> Optional[str]:
+    """Bypass Mode (hooks/conversation.py): apply a switch the user just typed here, and tell the agent once when it
+    changed — here or in another conversation. Subagents and Claude Code's delegated agents are never told."""
+    st = conv.load(payload)
+    if not st or not st["users"] or conv.delegated(st, payload):
+        return None
+    users = conv.with_current(st, payload)
+    before = int(st.get("bypass_applied") or 0)
+    now = "on" if conv.bypass_mode(payload, st, users) else "off"
+    msg = None
+    if int(st.get("bypass_applied") or 0) > before:
+        ev = next(e for e in reversed(conv.bypass_events(users)) if e["n"] == st["bypass_applied"])
+        msg = (BYPASS_ON if ev["on"] else BYPASS_OFF).format(n=ev["n"])
+        if (now == "on") != ev["on"]:  # a later switch from another conversation won
+            msg = None
+    if msg is None and st.get("bypass_seen") not in (None, now):
+        msg = BYPASS_ELSEWHERE.format(state=now.upper(), what=(
+            "Antigravity Plus approves your commands and edits itself and asks the user only before system-level "
+            "actions (rules: \"Bypass Mode\")." if now == "on" else "permission prompts are back as before."))
+    if st.get("bypass_seen") != now:
+        st["bypass_seen"] = now
+        conv.store(payload["conversationId"], st)
+    return msg
 
 
 def access_line(access: Optional[dict], revoked: Optional[dict]) -> Optional[str]:
@@ -222,7 +261,7 @@ def main() -> None:
         payload = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         payload = None
-    for part in (decide, edit_checks, other_agents, parallel_work, speed_work, memory_work, facts_work,
+    for part in (bypass_work, decide, edit_checks, other_agents, parallel_work, speed_work, memory_work, facts_work,
                  objective_work) if isinstance(payload, dict) else ():
         try:
             msg = part(payload)

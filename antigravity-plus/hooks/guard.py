@@ -5,11 +5,14 @@ Stops and asks the user (decision "force_ask", which ignores cached "always allo
   * run_command (sh/bash/zsh on macOS and Linux, PowerShell or cmd on Windows): irreversible or outward-facing
     commands — rm -rf / Remove-Item -Recurse -Force on /, ~, C:\, . or *, git reset --hard,
     git clean -f, force-push, --no-verify, DROP/TRUNCATE via a DB client, mkfs/dd to a device,
-    curl | sh, sudo, terraform destroy, kubectl delete, npm publish, gh pr merge, keychain/SSH-key reads…
-  * write_file / edit_file: writes into .git/ internals, shell startup files, SSH keys, LaunchAgents, /etc, and
-    into what decides what the agent may do: Antigravity's settings and projects, MCP servers, installed plugins
-    (this guard among them), Antigravity Plus's own settings; also connecting an MCP server (/settings) and turning
-    secret protection off — the agent changes these only on the user's explicit request, and the user confirms;
+    curl | sh, sudo, terraform destroy, kubectl delete, npm publish, gh pr merge, keychain/SSH-key reads,
+    changes to system folders (/System, /usr, /etc, /Library, C:\Windows…) by rm/mv/cp/chmod/tee/sed -i/redirection…
+  * write_file / edit_file: writes into .git/ internals, shell startup files, SSH keys, LaunchAgents, /etc and other
+    system folders, and into what decides what the agent may do: Antigravity's settings and projects, MCP servers,
+    installed plugins (this guard among them), Antigravity Plus's own settings — by file tools or by commands; also
+    connecting an MCP server (/settings), turning secret protection off, and starting a conversation (agentapi) with
+    a message that would switch Bypass Mode or full access on — the agent changes these only on the user's explicit
+    request, and the user confirms;
   * git and gh commands that would wait at the keyboard in Antigravity's terminal (`git add -p`, `gh pr create`
     without a title and body, `gh auth login`…) or fail on its GIT_EDITOR=false (`git rebase --continue`) — refused
     ("deny") with the form that works (hooks/gitcheck.py, setting gitChecks);
@@ -25,6 +28,12 @@ into every later conversation, so that write is refused and the agent writes whe
 (protectSecrets). A new file in the memory format written anywhere else (weak models shorten the long path to
 `<project>/memory/…`) is refused with the exact folder it belongs in. Under full access (one grant from the user, hooks/conversation.py) every command and edit not
 listed above gets "auto_approve" too; the destructive ones and the user's explicit bans still stop.
+Bypass Mode (the user's «/bypass», kept in settings for every conversation until «/bypass off»; hooks/conversation.py)
+goes further: every command, edit and read gets "auto_approve", and of the stops above only the system-level ones
+remain (SYSTEM_RULES: admin rights, system folders and OS settings, disks, power, autostart, the Keychain and private
+SSH keys, wiping the home folder or a disk, the agent's own permissions) together with the user's explicit bans;
+refusals that aren't questions (secrets printed, fake checks, stale files, git commands that would hang) stay.
+What it lets through is still logged, as "bypass:<rule>".
 A delegated agent's `delegate.py ask|tell` (its questions and messages for Claude Code, which only print a line) gets
 "auto_approve" — only the installed script in ~/.claude/skills/antigravity, and only as one plain command.
 
@@ -33,7 +42,7 @@ default policy" (it is NOT auto-approval; that is "auto_approve"), so your permi
 An empty decision would be treated as deny, so every path below returns an explicit decision.
 Matches are appended to ~/.gemini/antigravity-plus/guard.log (shown by /doctor).
 
-    guard.py --test "<command>" [--said "<user message>" …]   # print the verdict for a command (no stdin)
+    guard.py --test "<command>" [--said "<user message>" …] [--bypass]   # the verdict for a command (no stdin)
 
 Stdlib only, Python 3.8+.
 """
@@ -45,7 +54,7 @@ import os
 import re
 import shlex
 import sys
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import checks
 import compat
@@ -160,10 +169,13 @@ SQL_PROGRAMS = {"psql", "mysql", "mariadb", "sqlite3", "sqlcmd", "clickhouse", "
                 "mongo", "mongosh", "duckdb", "bq", "turso", "wrangler", "prisma", "supabase"}
 SQL_DESTRUCTIVE = re.compile(r"\b(drop\s+(table|database|schema|view|index)|truncate\s+(table\s+)?[\w.\"`]+)|\bdelete\s+from\s+[\w.\"`]+\s*(;|$|\"|')|\.dropDatabase\(|\bdb\.\w+\.drop\(", I)
 
-# Rules for the whole command line (they span pipes).
+# Rules for the whole command line (they span pipes). `curl … | sh` itself is pipe_runs_download(): only a program
+# that runs what it reads (`sh`, `bash -s`, `python3 -`) counts — `| python3 -c '…'` or `| jq` just reads data.
+CURL_REASON = "скрипт из интернета выполняется без проверки (`curl | sh`)."
 PIPE_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
-    ("curl-pipe-shell", re.compile(r"\b(curl|wget)\b[^;&]*\|\s*(sudo\s+)?(ba|z|da|fi|k)?sh\b|\b(ba|z)?sh\s+(-c\s+)?[\"']?\$\((curl|wget)\b|\b(curl|wget)\b[^;&]*\|\s*(sudo\s+)?(python3?|node|ruby|perl)\b"),
-     "скрипт из интернета выполняется без проверки (`curl | sh`)."),
+    ("curl-pipe-shell", re.compile(r"\b(ba|z)?sh\s+(-\w+\s+)*[\"']?\$\((curl|wget)\b"
+                                   r"|(\bsource|(^|[;&|]\s*)\.|\b(ba|z|da|k)?sh|\bpython3?|\bnode|\bruby|\bperl)\s+<\(\s*(curl|wget)\b"),
+     CURL_REASON),
     ("fork-bomb", re.compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),
      "fork-бомба положит систему."),
     ("download-run", re.compile(  # PowerShell's `curl | sh`
@@ -172,6 +184,14 @@ PIPE_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
         r"invoke-restmethod)\b", re.I),
      "команда скачивает код из интернета и сразу его выполняет."),
 ]
+
+# The stops that hold in Bypass Mode too: what can break the computer or hand the agent more power than the user gave —
+# admin rights, system folders and OS settings, disks, power, autostart, the Keychain and private SSH keys, wiping
+# the home folder or a disk, the agent's own permissions. Everything else (git reset --hard, force-push, curl | sh,
+# DROP TABLE, cloud deletions, publishing, rm -rf of the current folder…) Bypass Mode lets through, and logs.
+SYSTEM_RULES = {"disk-format", "disk-format-win", "system-power", "system-power-win", "security-off", "security-off-win",
+                "sudo", "run-as-admin", "autostart", "kill-all", "fork-bomb", "secrets-read", "agent-tools",
+                "protection-off", "rm-dangerous", "system-files", "protected-file", "agent-settings"}
 
 # Programs whose arguments are just text (a commit message or a search pattern can mention `rm -rf /`).
 TEXT_PROGRAMS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "git-grep", ":", "true", "test", "["}
@@ -183,20 +203,58 @@ INTERPRETER = re.compile(r"\b((ba|z|da|k)?sh|fish)\s+(-\w+\s+)*-c\b|\beval\b|\bx
 QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][\w-]*)\1[^\n]*\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
 
-DANGEROUS_RM_TARGETS = {"/", "/*", "~", "~/", "~/*", ".", "./", "./*", "..", "../", "../*", "*", ".*",
+DANGEROUS_RM_TARGETS = {"/", "/*", "~", "~/", "~/*", "..", "../", "../*",
                         "$HOME", "${HOME}", "$HOME/", "${HOME}/", "$HOME/*", "${HOME}/*", "/Users", "/home"}
-TOP_LEVEL = re.compile(r"^/(Applications|Library|System|Users|Volumes|bin|cores|dev|etc|home|opt|private|sbin|tmp|usr|var)/?\*?$")
+FOLDER_RM_TARGETS = {".", "./", "./*", "*", ".*"}  # the current folder — the project, not the system
+TOP_LEVEL = re.compile(r"^/(Applications|Library|System|Users|Volumes|bin|cores|dev|etc|home|opt|private|sbin|tmp|usr|var"
+                       r"|usr/local|opt/homebrew)/?\*?$")
 VAR_ROOT = re.compile(r"^\$\{?\w+\}?/")  # "$DIR/…" — deletes from / when the variable is empty
+VAR_REF = re.compile(r"^\$\{?([A-Za-z_]\w*)\}?(?=/|$)")
 
+GIT_INTERNALS = re.compile(r"(^|/)\.git/(?!COMMIT_EDITMSG$)")
 PROTECTED_FILE = re.compile(
-    r"(^|/)\.git/(?!COMMIT_EDITMSG$)|(^|/)\.(zshrc|zprofile|zshenv|bashrc|bash_profile|profile)$"
+    r"(^|/)\.(zshrc|zprofile|zshenv|bashrc|bash_profile|profile)$"
     r"|/\.ssh/(?!(config|known_hosts)$)|/Library/LaunchAgents/|/Library/LaunchDaemons/|^/etc/|^/private/etc/"
     r"|/\.config/(autostart|systemd/user)/|(^|/)(Microsoft\.PowerShell_|Microsoft\.VSCode_)?profile\.ps1$"
     r"|/Start Menu/Programs/Startup/|^[A-Za-z]:/Windows/", re.I)
 # What decides what the agent may do: Antigravity's settings and projects (permission grants), MCP servers,
-# installed plugins (this guard among them) and Antigravity Plus's settings (full access, secret protection).
+# installed plugins (this guard among them), Antigravity Plus's settings (full access, Bypass Mode, secret protection)
+# and the script whose «ask|tell» the guard approves for Claude Code's delegated agents.
 AGENT_CONTROL = re.compile(r"/\.gemini/config/(config\.json|mcp_config\.json|projects/|plugins/)"
-                           r"|/\.gemini/antigravity/mcp_config\.json$|/\.gemini/antigravity-plus/settings\.json$")
+                           r"|/\.gemini/antigravity/mcp_config\.json$|/\.gemini/antigravity-plus/settings\.json$"
+                           r"|/\.claude/skills/antigravity/")
+AGENT_CONTROL_DIR = re.compile(r"/\.gemini(/config(/(projects|plugins)(/antigravity-plus)?)?|/antigravity-plus)?/?$"
+                               r"|/\.claude/skills/antigravity/?$")  # a whole folder of them (rm -rf, mv, chmod -R)
+# Folders of the operating system itself. Not the user's ~/Library, not /usr/local or /opt (Homebrew), not the temp
+# folders (/tmp, /var/folders, /var/tmp) or /dev/null.
+SYSTEM_DIR = re.compile(
+    r"^/(System|bin|sbin|etc|Library|boot|proc|sys|lib|lib32|lib64|libx32|root|cores|usr(?!/local(/|$))|private/etc"
+    r"|var(?!/(folders|tmp)(/|$))|private/var(?!/(folders|tmp)(/|$))"
+    r"|dev(?!/(null|zero|random|urandom|stdin|stdout|stderr|tty)$|/fd/))(/|$)"
+    r"|^[a-z]:/(windows|program files|program files \(x86\)|programdata|recovery|system volume information)(/|$)", re.I)
+WIN_ENV = [(re.compile(r"^(\$env:(windir|systemroot)|%(windir|systemroot)%)", re.I), "C:/Windows"),
+           (re.compile(r"^(\$\{env:programfiles\(x86\)\}|%programfiles\(x86\)%)", re.I), "C:/Program Files (x86)"),
+           (re.compile(r"^(\$env:programfiles|%programfiles%)", re.I), "C:/Program Files"),
+           (re.compile(r"^(\$env:programdata|%programdata%)", re.I), "C:/ProgramData")]
+HOME_REF = re.compile(r"^(~|\$\{?HOME\}?|\$env:userprofile|%userprofile%|\$home)(?=/|$)", re.I)
+HOME = compat.slashes(os.path.expanduser("~"))
+# Programs and the arguments they change: every path (rm, mv, chmod, tee…), only the destination (cp, ln, install,
+# rsync), or the files they edit in place (sed -i, perl -i).
+CHANGES_ALL = {"rm", "grm", "rmdir", "unlink", "srm", "shred", "truncate", "touch", "mkdir", "chmod", "chown", "chgrp",
+               "chflags", "chattr", "setfacl", "tee", "mv", "gmv", "remove-item", "ri", "del", "erase", "rd",
+               "move-item", "mi", "move", "new-item", "ni", "set-content", "add-content", "ac", "out-file",
+               "clear-content", "clc", "set-acl", "icacls", "icacls.exe", "takeown", "takeown.exe", "attrib",
+               "attrib.exe", "mklink"}
+CHANGES_DEST = {"cp", "gcp", "install", "ginstall", "ln", "gln", "rsync", "ditto", "copy-item", "cpi", "copy", "xcopy",
+                "xcopy.exe", "robocopy", "robocopy.exe"}
+RECURSIVE_OWNERS = {"chmod", "chown", "chgrp", "chflags", "setfacl"}  # -R on / or ~ changes the whole system or home
+REDIRECT_TARGET = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|(?<![<>&\d])(?:\d|&)?>{1,2}\|?\s*('[^']*'|"(?:\\.|[^"\\])*"|[^\s;|&<>()'"]+)""")
+# An Antigravity conversation started or messaged from the terminal with words that switch Bypass Mode or full access
+# on: only the user's own message may do that (hooks/conversation.py).
+SELF_SWITCH = re.compile(r"\bagentapi\b[^\n]*?\b(new-conversation|send-message)\b.*?(/bypass\b|\bbypass\b|байпас"
+                         r"|полн\w*\s+доступ|full[\s-]*access)", re.I | re.S)
+SELF_SWITCH_REASON = ("команда пишет в разговор Antigravity сообщение, которое включает Bypass Mode или полный доступ: "
+                      "их включает только сам пользователь своим сообщением.")
 
 
 def split_segments(cmd: str) -> List[str]:
@@ -278,7 +336,34 @@ def strip_prefixes(tokens: List[str]) -> List[str]:
     return tokens
 
 
-def check_rm(segment: str) -> Optional[str]:
+def note_assignments(segment: str, known: Dict[str, str]) -> None:
+    """A segment that only sets variables (`S=/path`, `export APP="…"`): remember the ones that can't be empty, so
+    `S=/path && rm -rf $S/x` isn't taken for `rm -rf /x`. A value from `$(…)` or another variable is unknown."""
+    tokens = tokenize(segment)
+    if tokens and tokens[0] in ("export", "local", "declare", "typeset", "readonly"):
+        tokens = [t for t in tokens[1:] if not t.startswith("-")]
+    pairs = [re.match(r"^([A-Za-z_]\w*)=(.*)$", t, re.S) for t in tokens]
+    if not pairs or not all(pairs):
+        return
+    for m in pairs:
+        name, value = m.group(1), m.group(2)
+        if value and "`" not in value and ("$" not in value or re.match(r"^\$\{?HOME\}?(/|$)", value)):
+            known[name] = value
+        else:
+            known.pop(name, None)
+
+
+def with_known(token: str, known: Optional[Dict[str, str]]) -> str:
+    """`$S/x` → `/path/x` when S was set earlier in the same command (note_assignments)."""
+    m = VAR_REF.match(token)
+    if m and known and m.group(1) in known:
+        return re.sub(r"/{2,}", "/", known[m.group(1)] + token[m.end():])
+    return token
+
+
+def check_rm(segment: str, known: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str]]:
+    """`rm -r` on / or a top-level folder, the home folder, the parent folder or `$VAR/…` with VAR unknown
+    ("rm-dangerous"), or on everything in the current folder ("rm-folder": inside the project)."""
     tokens = strip_prefixes(tokenize(segment))
     if not tokens or os.path.basename(tokens[0]) not in ("rm", "grm"):
         return None
@@ -293,26 +378,31 @@ def check_rm(segment: str) -> Optional[str]:
         else:
             targets.append(t)
     if "!" in flags:
-        return "`rm --no-preserve-root` может удалить всю систему."
+        return "rm-dangerous", "`rm --no-preserve-root` может удалить всю систему."
     if not re.search(r"[rR]", flags):
         return None
+    folder = None
     for t in targets:  # shlex keeps ~ and $VAR literal, which is what we want to inspect
-        if t in DANGEROUS_RM_TARGETS or t.rstrip("/") in DANGEROUS_RM_TARGETS or TOP_LEVEL.match(t):
-            return f"`rm -r {t}` удалит всё содержимое `{t}` без корзины."
-        if VAR_ROOT.match(t) and not re.match(r"^\$\{?HOME\}?/", t):
-            return f"`rm -r {t}`: если переменная пустая, удаление пойдёт от корня `/`."
-    return None
+        t = with_known(t, known)
+        if t in FOLDER_RM_TARGETS or t.rstrip("/") in FOLDER_RM_TARGETS:
+            folder = folder or ("rm-folder", f"`rm -r {t}` удалит всё содержимое текущей папки без корзины.")
+        elif t in DANGEROUS_RM_TARGETS or t.rstrip("/") in DANGEROUS_RM_TARGETS or TOP_LEVEL.match(t):
+            return "rm-dangerous", f"`rm -r {t}` удалит всё содержимое `{t}` без корзины."
+        elif VAR_ROOT.match(t) and not re.match(r"^\$\{?HOME\}?/", t):
+            return "rm-dangerous", f"`rm -r {t}`: если переменная пустая, удаление пойдёт от корня `/`."
+    return folder
 
 
 WIN_RM = {"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir", "rmdir.exe"}
 WIN_BROAD = re.compile(r"^([a-z]:)?[\\/]?\*?$|^[a-z]:[\\/](users|windows|program files( \(x86\))?)[\\/]?\*?$"
                        r"|^(~|\$home|\$env:(userprofile|homepath|systemdrive|systemroot)|%userprofile%|%systemdrive%)[\\/]?\*?$"
                        r"|^\.{1,2}[\\/]?\*?$", re.I)
+WIN_FOLDER = re.compile(r"^(\.[\\/]?\*?|\*)$")  # the current folder
 
 
-def check_win_rm(segment: str) -> Optional[str]:
+def check_win_rm(segment: str) -> Optional[Tuple[str, str]]:
     """PowerShell `Remove-Item -Recurse -Force …` / `rm -r -fo …` and cmd `rd /s /q …` / `del /s /q …` on a whole
-    drive, the user folder or the current folder."""
+    drive, the user folder or the parent folder ("rm-dangerous"), or on the current folder ("rm-folder")."""
     tokens = tokenize(segment)
     if not tokens or os.path.basename(tokens[0]).lower() not in WIN_RM:
         return None
@@ -320,55 +410,212 @@ def check_win_rm(segment: str) -> Optional[str]:
     recursive = any(f in ("-r", "-recurse", "/s") or f.startswith("-rec") for f in flags)
     if not recursive:
         return None
+    folder = None
     for t in tokens[1:]:
         if t.lower() in ("-path", "-literalpath"):
             continue
-        if (not t.startswith(("-", "/")) or WIN_BROAD.match(t)) and WIN_BROAD.match(t.strip("'\"")):
-            return f"`{tokens[0]} {t}` рекурсивно удалит всё содержимое `{t}` без корзины."
+        bare = t.strip("'\"")
+        if (not t.startswith(("-", "/")) or WIN_BROAD.match(t)) and WIN_BROAD.match(bare):
+            if WIN_FOLDER.match(bare):
+                folder = folder or ("rm-folder", f"`{tokens[0]} {t}` рекурсивно удалит всё содержимое текущей папки без корзины.")
+            else:
+                return "rm-dangerous", f"`{tokens[0]} {t}` рекурсивно удалит всё содержимое `{t}` без корзины."
+    return folder
+
+
+def expand_path(p: str, known: Optional[Dict[str, str]] = None) -> str:
+    """A path as a command writes it → absolute with forward slashes where it can be told: ~, $HOME, %USERPROFILE%,
+    %WINDIR%, $env:ProgramFiles and variables set earlier in the command; anything else stays as it is."""
+    p = with_known(p.strip().strip("'\"").replace("\\", "/"), known).strip("'\"")
+    for rx, repl in WIN_ENV:
+        p = rx.sub(repl, p, count=1)
+    p = HOME_REF.sub(lambda _m: HOME, p, count=1)
+    return re.sub(r"/{2,}", "/", p)
+
+
+def changed_paths(segment: str, known: Optional[Dict[str, str]] = None) -> Tuple[List[str], List[str]]:
+    """(paths a segment changes, paths it changes recursively with chmod/chown -R): the arguments of rm/mv/chmod/
+    touch/tee…, the destination of cp/ln/install/rsync, files edited in place (sed -i, perl -i), dd of=…, and the
+    targets of > / >> outside quotes."""
+    paths = [m.group(1) for m in REDIRECT_TARGET.finditer(segment) if m.group(1)]
+    deep: List[str] = []
+    tokens = strip_prefixes(tokenize(segment))
+    if tokens:
+        prog, args = os.path.basename(tokens[0]).lower(), tokens[1:]
+        pos = [a for a in args if a and not a.startswith("-")]
+        if prog in CHANGES_ALL:
+            paths += pos
+            if prog in RECURSIVE_OWNERS and any(re.match(r"^-[a-zA-Z]*R", a) for a in args):
+                deep = pos
+        elif prog in CHANGES_DEST:
+            low = [a.lower() for a in args]
+            dest = next((args[i + 1] for i, a in enumerate(low[:-1]) if a in ("-t", "--target-directory", "-destination")),
+                        next((a.split("=", 1)[1] for a in args if a.startswith("--target-directory=")), None))
+            if dest is None and len(pos) >= 2:
+                dest = pos[-1]
+            paths += [dest] if dest else []
+        elif prog in ("sed", "gsed", "perl") and any(a == "--in-place" or re.match(r"^-[a-zA-Z]*i", a) for a in args):
+            paths += pos
+        elif prog == "dd":
+            paths += [a[3:] for a in args if a.startswith("of=")]
+    return ([expand_path(p, known) for p in paths if p and p != "-"], [expand_path(p, known) for p in deep])
+
+
+def check_writes(segment: str, known: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str]]:
+    """A command that changes the agent's own permissions ("agent-settings"), files that start programs or hold keys —
+    shell startup files, SSH keys, LaunchAgents ("protected-file") — or the system's own folders ("system-files")."""
+    paths, deep = changed_paths(segment, known)
+    perms_only = program(segment).lower() in RECURSIVE_OWNERS | {"chattr"}  # chmod 600 ~/.ssh/id_x is a fix, not a risk
+    for p in paths:
+        if AGENT_CONTROL.search(p) or AGENT_CONTROL_DIR.search(p):
+            return "agent-settings", (f"команда меняет `{p}`: эти файлы решают, что агенту разрешено (разрешения "
+                                      "Antigravity, MCP-серверы, плагины, настройки Antigravity Plus).")
+        if PROTECTED_FILE.search(p) and not perms_only:
+            return "protected-file", f"команда меняет служебный файл `{p}` (автозапуск, SSH-ключи, профиль оболочки, /etc)."
+        if SYSTEM_DIR.search(p):
+            return "system-files", f"команда меняет системные файлы: `{p}`."
+    for p in deep:
+        if p in ("/", "/*") or TOP_LEVEL.match(p) or p.rstrip("/*") == HOME.rstrip("/"):
+            return "system-files", f"команда рекурсивно меняет права или владельца всего `{p}`."
     return None
+
+
+def pipelines(cmd: str) -> List[List[str]]:
+    """The command line's pipelines, each a list of its stages (`a | b`); separators inside quotes don't count."""
+    out: List[List[str]] = [[]]
+    buf: List[str] = []
+    q, i, n = "", 0, len(cmd)
+
+    def cut(new_pipeline: bool) -> None:
+        out[-1].append("".join(buf).strip())
+        buf.clear()
+        if new_pipeline:
+            out.append([])
+
+    while i < n:
+        c = cmd[i]
+        if q:
+            buf.append(c)
+            if c == "\\" and q == '"' and i + 1 < n:
+                buf.append(cmd[i + 1])
+                i += 1
+            elif c == q:
+                q = ""
+        elif c in "'\"":
+            q = c
+            buf.append(c)
+        elif c == "\\" and i + 1 < n:
+            buf += [c, cmd[i + 1]]
+            i += 1
+        elif c in "|&" and i + 1 < n and cmd[i + 1] == c:  # || and &&
+            cut(True)
+            i += 1
+        elif c == "|":
+            cut(False)
+        elif c in ";\n" or (c == "&" and (i == 0 or cmd[i - 1] not in "<>") and (i + 1 == n or cmd[i + 1] != ">")):
+            cut(True)
+        else:
+            buf.append(c)
+        i += 1
+    cut(False)
+    return [[s for s in p if s] for p in out if any(p)]
+
+
+DOWNLOADER = re.compile(r"^(curl|wget|fetch|aria2c|http|https|xh)(\.exe)?$", re.I)  # http/https: HTTPie
+SH_RUNNERS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
+CODE_RUNNERS = {"python", "node", "ruby", "perl", "php"}
+
+
+def runs_stdin(prog: str, args: List[str]) -> bool:
+    """Does `prog args` run the program it reads on stdin (`sh`, `bash -s`, `python3 -`) — rather than code or a
+    script named in its arguments (`python3 -c '…'`, `python3 -m json.tool`, `node script.js`, `bash -c '…'`)?"""
+    base = re.sub(r"(\d+(\.\d+)*)?(\.exe)?$", "", prog.lower())
+    if base in SH_RUNNERS:
+        if any(re.match(r"^-[a-zA-Z]*c[a-zA-Z]*$", a) for a in args):
+            return False
+        if any(re.match(r"^-[a-zA-Z]*s", a) for a in args):
+            return True
+    elif base in CODE_RUNNERS:
+        if any(a in ("-c", "-m", "-e", "-E", "-r", "-p", "--eval", "--print") for a in args):
+            return False
+    else:
+        return False
+    pos = [a for a in args if not a.startswith("-") or a == "-"]
+    return not pos or pos[0] == "-"
+
+
+def pipe_runs_download(cmd: str) -> bool:
+    """`curl … | sh`, `wget -qO- … | sudo bash -s`, `curl … | python3`: what was just downloaded runs as code."""
+    for stages in pipelines(cmd):
+        fetched = False
+        for stage in stages:
+            tokens = strip_prefixes(tokenize(stage))
+            if not tokens:
+                continue
+            prog = os.path.basename(tokens[0])
+            if DOWNLOADER.match(prog):
+                fetched = True
+            elif fetched and runs_stdin(prog, tokens[1:]):
+                return True
+    return False
 
 
 SQL_REASON = "SQL-команда удаляет таблицы или данные (DROP/TRUNCATE/DELETE без WHERE)."
 SQL_IN_EXEC = re.compile(r"\b(psql|mysql|mariadb|sqlite3|mongosh?|clickhouse-client)\b")
 
 
-def analyze_command(cmd: str, depth: int = 0) -> Optional[Tuple[str, str]]:
+def analyze_command(cmd: str, depth: int = 0, system_only: bool = False) -> Optional[Tuple[str, str]]:
+    """The command's first stop as (rule id, reason), or None. system_only (Bypass Mode): only the stops that hold
+    there (SYSTEM_RULES), looked for in the whole command — past any project-level match."""
     if not cmd or not cmd.strip() or depth > 2:
         return None
+    keep = (lambda rid: rid in SYSTEM_RULES) if system_only else (lambda rid: True)  # noqa: E731
     if compat.WINDOWS:  # PowerShell/cmd: backslashes are path separators, also inside quotes
         cmd = cmd.replace("\\", "/")
     cmd = re.sub(r"\\\r?\n", " ", cmd)
+    if SELF_SWITCH.search(cmd):
+        return "agent-settings", SELF_SWITCH_REASON
     cmd, heredocs = split_heredocs(cmd)
     # Quoted text is data (commit messages, search patterns) unless it is handed to an interpreter.
     text = cmd if INTERPRETER.search(cmd) else QUOTED.sub("''", cmd)
     for rid, rx, reason in PIPE_RULES:
-        if rx.search(text):
+        if keep(rid) and rx.search(text):
             return rid, reason
+    if keep("curl-pipe-shell") and pipe_runs_download(cmd):
+        return "curl-pipe-shell", CURL_REASON
+    known: Dict[str, str] = {}
     for seg in split_segments(cmd):
+        note_assignments(seg, known)
         prog = program(seg)
-        if prog in TEXT_PROGRAMS:
+        if prog in TEXT_PROGRAMS:  # its arguments are text, but `echo … >> ~/.zshrc` still writes a file
+            w = check_writes(seg, known)
+            if w:
+                return w
             continue
-        if (prog in SQL_PROGRAMS or prog in ("docker", "kubectl", "ssh") and SQL_IN_EXEC.search(seg)) \
-                and SQL_DESTRUCTIVE.search(seg):
+        if keep("sql-destructive") and (prog in SQL_PROGRAMS or prog in ("docker", "kubectl", "ssh")
+                                         and SQL_IN_EXEC.search(seg)) and SQL_DESTRUCTIVE.search(seg):
             return "sql-destructive", SQL_REASON
-        r = check_rm(seg) or check_win_rm(seg)
-        if r:
-            return "rm-dangerous", r
+        r = check_rm(seg, known) or check_win_rm(seg)
+        if r and keep(r[0]):
+            return r
         target = seg if INTERPRETER.search(seg) else QUOTED.sub("''", seg)
         for rid, rx, reason in SEGMENT_RULES:
-            if rx.search(target):
+            if keep(rid) and rx.search(target):
                 return rid, reason
+        w = check_writes(seg, known)
+        if w:
+            return w
         if prog in SHELLS:  # bash -c '…', ssh host '…', eval "…": the quoted text is a command
             for q in QUOTED.findall(seg):
-                hit = analyze_command(q[1:-1], depth + 1)
+                hit = analyze_command(q[1:-1], depth + 1, system_only)
                 if hit:
                     return hit
     for owner, body in heredocs:  # bodies fed to a shell or a DB client are code
         prog = program(owner)
-        if prog in SQL_PROGRAMS and SQL_DESTRUCTIVE.search(body):
+        if keep("sql-destructive") and prog in SQL_PROGRAMS and SQL_DESTRUCTIVE.search(body):
             return "sql-destructive", SQL_REASON
         if prog in SHELLS:
-            hit = analyze_command(body, depth + 1)
+            hit = analyze_command(body, depth + 1, system_only)
             if hit:
                 return hit
     return None
@@ -597,12 +844,20 @@ def secret_print(cmd: str) -> Optional[Tuple[str, str]]:
 
 
 def analyze_path(path: str) -> Optional[Tuple[str, str]]:
+    """A file write's stop: startup files, SSH keys and /etc ("protected-file"), the agent's own permissions
+    ("agent-settings"), the system's folders ("system-files"), git's internals ("git-internals": the project's)."""
     p = compat.slashes(os.path.expanduser(path or ""))
-    if p and PROTECTED_FILE.search(p):
-        return "protected-file", f"запись в служебный/системный файл `{path}` (git-внутренности, автозапуск, SSH, /etc)."
-    if p and AGENT_CONTROL.search(p):
+    if not p:
+        return None
+    if PROTECTED_FILE.search(p):
+        return "protected-file", f"запись в служебный/системный файл `{path}` (автозапуск, SSH-ключи, профиль оболочки, /etc)."
+    if AGENT_CONTROL.search(p):
         return "agent-settings", (f"запись в `{path}`: эти настройки решают, что агенту разрешено (разрешения "
                                   "Antigravity, MCP-серверы, плагины, настройки Antigravity Plus).")
+    if SYSTEM_DIR.search(p):
+        return "system-files", f"запись в системную папку: `{path}`."
+    if GIT_INTERNALS.search(p):
+        return "git-internals", f"запись во внутренние файлы git `{path}` — так можно испортить репозиторий."
     return None
 
 
@@ -682,6 +937,7 @@ def decide(payload: dict) -> dict:
             args = {}
     hit, subject = None, ""
     st = conv.load(payload)
+    bypass = bypass_on(payload, st)
     full = lambda: conv.full_access(payload, st) is not None  # noqa: E731 — only computed when nothing else decided
     if tool == "read_file":
         subject = unwrap(args.get("Path") or args.get("path") or "")
@@ -689,7 +945,7 @@ def decide(payload: dict) -> dict:
             log(payload, tool, "secret-read", subject)
             return {"decision": "deny", "reason": f"🛡️ Antigravity Plus: в {os.path.basename(subject)} секреты. "
                                                   + SECRET_HINT.format(f=subject)}
-        return PASS
+        return AUTO if bypass else PASS
     if tool == "run_command":
         subject = unwrap(args.get("CommandLine") or args.get("command") or "")
         if talks_to_claude(subject):
@@ -698,7 +954,11 @@ def decide(payload: dict) -> dict:
         if stall:  # it would wait at the keyboard (or fail on GIT_EDITOR=false): refuse with the form that works
             log(payload, tool, stall[0], subject)
             return {"decision": "deny", "reason": f"🛡️ Antigravity Plus: {stall[1]}"}
-        hit = analyze_command(subject)
+        hit = analyze_command(subject, system_only=bypass)
+        if bypass and not hit:  # what Bypass Mode lets through still goes to the log
+            skipped = analyze_command(subject)
+            if skipped:
+                log(payload, tool, "bypass:" + skipped[0], subject)
         secret = secret_print(subject) if not hit and protect_secrets() else None
         if secret:  # refuse rather than ask: the agent can do the same without printing the value
             log(payload, tool, secret[0], subject)
@@ -730,14 +990,29 @@ def decide(payload: dict) -> dict:
             log(payload, tool, "stale-write", subject)
             return {"decision": "deny", "reason": stale}
         hit = analyze_path(subject)
+        if hit and bypass and hit[0] not in SYSTEM_RULES:
+            log(payload, tool, "bypass:" + hit[0], subject)
+            hit = None
     if not hit:
-        return AUTO if tool in ("run_command", "write_file", "edit_file") and full() else PASS
+        return AUTO if tool in ("run_command", "write_file", "edit_file") and (bypass or full()) else PASS
     rid, reason = hit
     log(payload, tool, rid, subject)
     shown = subject if len(subject) <= 160 else subject[:159] + "…"
     if not rid.startswith("user-said"):
         reason += " Подтвердите, если это действительно нужно."
+    if bypass:
+        reason += (" (Bypass Mode включён, но о системных действиях guard спрашивает всегда.)" if rid in SYSTEM_RULES
+                   else " (Bypass Mode включён, но это ваш запрет из разговора.)")
     return {"decision": "force_ask", "reason": f"🛡️ Antigravity Plus: {reason} → {shown}"}
+
+
+def bypass_on(payload: dict, st: Optional[dict]) -> bool:
+    """Bypass Mode (hooks/conversation.py). A broken switch counts as off: it must never hide a stop."""
+    try:
+        return conv.bypass_mode(payload, st) is not None
+    except Exception as e:
+        print(f"guard: bypass: {e}", file=sys.stderr)
+        return False
 
 
 def main() -> None:
@@ -747,9 +1022,13 @@ def main() -> None:
             i = rest.index("--said")
             said.append(rest[i + 1] if i + 1 < len(rest) else "")
             rest = rest[:i] + rest[i + 2:]
+        bypass = "--bypass" in rest
+        rest = [r for r in rest if r != "--bypass"]
         cmd = " ".join(rest)
         users = [{"text": s} for s in said]
-        verdict = analyze_command(cmd) or analyze_path(cmd) or restriction(users, cmd)
+        path = analyze_path(cmd)
+        verdict = (analyze_command(cmd, system_only=bypass)
+                   or (path if path and (not bypass or path[0] in SYSTEM_RULES) else None) or restriction(users, cmd))
         if not verdict and memstore and memstore.memory_dir_of(cmd):
             verdict = ("memory-file", "auto_approve")
         print(json.dumps(verdict, ensure_ascii=False))

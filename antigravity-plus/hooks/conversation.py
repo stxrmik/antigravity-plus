@@ -15,6 +15,7 @@ hooks/memory_hints.py. Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -631,6 +632,104 @@ def _project_grant(ws: str, grant: Optional[bool], drop: bool = False) -> Option
     except OSError:
         pass
     return grants.get(ws)
+
+
+# Bypass Mode: the user's own message switches it on or off for every conversation (settings "bypassMode"); the guard
+# then approves commands and edits itself and stops only at system-level danger (hooks/guard.py, SYSTEM_RULES).
+# Only messages the user typed count — not a brief from Claude Code, not tools, pages or files, not a subagent's task.
+BYPASS_ON = re.compile(
+    r"^\s*/bypass(\s+on)?\s*[.!]?\s*$"
+    r"|(?<!не\s)\b(включи|включаю|вруби|активируй)\s+(мне\s+)?(режим\s+)?(bypass|байпас)"
+    r"|(?<!не\s)\b(включи|включаю|вруби|активируй)\s+режим\s+без\s+(вопросов|подтверждений|разрешений)"
+    r"|(?<!not\s)(?<!n't\s)\b(enable|turn\s+on|switch\s+on)\s+(the\s+)?bypass"
+    r"|^\s*bypass(\s+mode)?\s*[:—-]?\s*(on|вкл\w*)\s*[.!]?\s*$", re.I)
+BYPASS_OFF = re.compile(
+    r"^\s*/bypass\s+off\s*[.!]?\s*$"
+    r"|\b(выключи|выключаю|отключи|отключаю|выруби|деактивируй|убери)\s+(режим\s+)?(bypass|байпас)"
+    r"|\b(выключи|отключи|убери)\s+режим\s+без\s+(вопросов|подтверждений|разрешений)"
+    r"|\b(disable|turn\s+off|switch\s+off)\s+(the\s+)?bypass"
+    r"|^\s*bypass(\s+mode)?\s*[:—-]?\s*(off|выкл\w*)\s*[.!]?\s*$"
+    r"|верни\s+(вопросы|подтверждени\w*|запросы\s+разрешени\w*)", re.I)
+SLASH_LINK = re.compile(r"\[(/[\w-]+)\]\(slash_command://[^)]*\)")  # a command picked from the menu
+SETTINGS = os.path.expanduser("~/.gemini/antigravity-plus/settings.json")
+
+
+def bypass_events(users: List[dict]) -> List[dict]:
+    """Bypass Mode switches in the user's own messages, in order: [{"n", "on", "ts", "text"}]."""
+    out = []
+    for i, u in enumerate(users, 1):
+        text = SLASH_LINK.sub(r"\1", u.get("text") or "")
+        if text.lstrip().startswith(DELEGATED_MARK):
+            continue  # Claude Code's brief, not the user's words
+        on = False if BYPASS_OFF.search(text) else (True if BYPASS_ON.search(text) else None)
+        if on is not None:
+            out.append({"n": i, "on": on, "ts": u.get("ts") or "", "text": text})
+    return out
+
+
+def _epoch(ts: str) -> float:
+    """Transcript time ("2026-11-04T10:00:00Z", fractions allowed) → seconds; 0 when it can't be read."""
+    try:
+        t = re.sub(r"(\.\d{6})\d+", r"\1", (ts or "").strip()).replace("Z", "+00:00")
+        return datetime.datetime.fromisoformat(t).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def bypass_record() -> dict:
+    """The saved switch: {"on": bool, "at": epoch of the message that set it, "since", "conversation", "n"} or {}."""
+    try:
+        with open(SETTINGS, encoding="utf-8") as f:
+            rec = (json.load(f) or {}).get("bypassMode")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def _save_bypass(rec: dict) -> bool:
+    """Write the switch unless a newer one is already saved (two conversations switching at once). True if written."""
+    try:
+        os.makedirs(os.path.dirname(SETTINGS), exist_ok=True)
+        with open(SETTINGS + ".lock", "a+", encoding="utf-8") as lk:
+            compat.lock(lk)
+            try:
+                try:
+                    with open(SETTINGS, encoding="utf-8") as f:
+                        data = json.load(f)
+                except (OSError, ValueError):
+                    data = {}
+                data = data if isinstance(data, dict) else {}
+                old = data.get("bypassMode") if isinstance(data.get("bypassMode"), dict) else {}
+                if float(old.get("at") or 0) >= rec["at"]:
+                    return False
+                data["bypassMode"] = rec
+                tmp = f"{SETTINGS}.{os.getpid()}.tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                compat.replace(tmp, SETTINGS)
+                return True
+            finally:
+                compat.unlock(lk)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def bypass_mode(payload: dict, st: Optional[dict], users: Optional[List[dict]] = None) -> Optional[dict]:
+    """The saved switch while Bypass Mode is on, else None. A switch in this conversation's user messages that is
+    newer than the saved one is applied first — once (st["bypass_applied"]), so an old «/bypass» never undoes a later
+    «/bypass off» from another conversation. Subagents have no user messages: they follow the saved switch."""
+    if st is not None and st.get("users") and not delegated(st, payload):
+        events = bypass_events(users if users is not None else with_current(st, payload))
+        last = events[-1] if events else None
+        if last and last["n"] > int(st.get("bypass_applied") or 0):
+            at = _epoch(last["ts"]) if last["ts"] else time.time()
+            _save_bypass({"on": last["on"], "at": at, "since": time.strftime("%Y-%m-%d %H:%M", time.localtime(at)),
+                          "conversation": str(payload.get("conversationId") or ""), "n": last["n"]})
+            st["bypass_applied"] = last["n"]
+            if isinstance(payload.get("conversationId"), str):
+                store(payload["conversationId"], st)
+    rec = bypass_record()
+    return rec if rec.get("on") is True else None
 
 
 def _state(cid: str) -> Optional[dict]:

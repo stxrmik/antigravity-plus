@@ -135,6 +135,11 @@ def show(ws: str) -> str:
                                  for k, v in PLUGIN_KEYS if v in s))
     since = conv._project_grant(ws, None)
     out.append(f"- Full access for this project: {'on since ' + since if since else 'off (per conversation only)'}")
+    bypass = conv.bypass_record()
+    out.append("- Bypass Mode (every conversation): " + (
+        f"on since {bypass.get('since') or '?'} — commands and edits run without asking, only system-level actions "
+        "still ask; the user turns it off with «/bypass off»" if bypass.get("on") is True
+        else "off — the user turns it on with «/bypass» (only their own message does)"))
     out.append("\n## Project rules and automation")
     rules = [n for n in ("AGENTS.md", "GEMINI.md", "CLAUDE.md") if os.path.isfile(os.path.join(ws, n))]
     out.append("- Rules files: " + (", ".join(rules) if rules else "none — /init creates AGENTS.md"))

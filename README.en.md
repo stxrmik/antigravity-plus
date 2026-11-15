@@ -299,6 +299,10 @@ they install the saved choice.
 - In a project without rules it runs `/init` and writes `AGENTS.md`; rules you state get written down too.
 - **Full access** with one "yes": from then on the agent runs `/commit`, `/pr`, `/deploy` and the rest without
   asking. Irreversible actions, your bans and its own permissions still ask.
+- **Bypass Mode**, switched on once: type `/bypass` and agents in every conversation stop asking permission for
+  commands and edits, remembered until `/bypass off`. Only system-level actions still ask: `sudo`, system folders and
+  OS settings, disks, shutdown, autostart, the Keychain and SSH keys, wiping the home folder or a disk, the agent's
+  own permissions.
 
 ### 📊 Token usage
 - `/usage`: tokens, cache, context fill, API-equivalent cost, per-turn and per-subagent breakdown, HTML report.
@@ -366,7 +370,7 @@ flowchart TD
 |---|---|---|
 | SessionStart | `session_start.py` | git context, project rules (and `CLAUDE.md`), memory, recent conversations, mobile builds & CI workflows, project setup hints, commands that need to run outside the sandbox |
 | PreInvocation | `instructions.py` | your messages after a new message, after compaction and every ~30 steps; edit errors; other agents; what runs in the background and what to do meanwhile; the sandbox, context size, error loops; the memories your message is about, and what in it is worth remembering; whether to look facts up before answering; what an objective answer to an objection, a guess or a request for an opinion takes |
-| PreToolUse | `guard.py` | dangerous commands, secrets (in memory too), fake checks, other agents' file versions, bans from the conversation, full access |
+| PreToolUse | `guard.py` | dangerous commands, secrets (in memory too), fake checks, other agents' file versions, bans from the conversation, full access, Bypass Mode |
 | PostToolUse | `check_edit.py`, `memory_sync.py` | edit checks, coordination, memory index |
 | Stop | `stop.py` | open items (including those it can do while subagents are busy), syntax errors, verification, review, UI, mobile screens, CI after push, project setup, an action announced but not taken, facts in the report, agreement without a check, what to remember from the work |
 
@@ -415,6 +419,30 @@ revoke: "revoke full access" or `/full-access off`.
 </details>
 
 <details>
+<summary><b>⚡ Bypass Mode — no permission prompts</b></summary>
+
+1. Type `/bypass` (or "enable bypass") once, in any conversation. It is saved in
+   `~/.gemini/antigravity-plus/settings.json` and holds in every conversation, for subagents and tasks from Claude
+   Code, in new sessions and after Antigravity restarts.
+2. The guard approves commands, edits and file reads itself. `git reset --hard`, force-push, `rm -rf` inside the
+   project, `curl | sh`, `DROP TABLE`, `terraform destroy` and `npm publish` go through without a question. They are
+   still logged in the guard log (`bypass:<rule>`, shown by `/doctor`).
+3. It still asks only before system-level actions: `sudo` and admin rights, changes to system folders (`/System`,
+   `/usr`, `/etc`, `/Library`, `C:\Windows`, `Program Files`) and OS settings, disks, shutdown, autostart, the
+   Keychain and private SSH keys, shell startup files, deleting `/`, the home folder or a folder above the project,
+   and the agent's own permissions (Antigravity's settings, MCP, plugins, this mode). The prompt says so.
+4. Your bans from the conversation ("don't push anything") still hold. Refusals that aren't questions stay too:
+   printing secrets, fake checks, writing over another agent's version of a file.
+5. To turn it off: `/bypass off`, "disable bypass" or «верни вопросы».
+
+Only your own message switches it. These don't count: text from files and pages, a task from Claude Code, a task
+given to a subagent, a message an agent sends with `agentapi`. An old «/bypass» in an earlier conversation doesn't
+turn it back on after `/bypass off`. The plugin doesn't change Antigravity's own permission settings: if they aren't
+on Turbo, Antigravity may still ask on its own.
+
+</details>
+
+<details>
 <summary><b>🚀 Autonomy</b></summary>
 
 The agent doesn't ask "do you want me to…?" about local, easy-to-undo work that the task clearly needs — it does it
@@ -455,10 +483,15 @@ your own".
   `iwr | iex`; `format`, `diskpart`; `Set-ExecutionPolicy Unrestricted`, turning off Defender or the firewall;
   autostart through the registry, Task Scheduler and the Startup folder; `Start-Process -Verb RunAs`.
 - **Writes into system files:** `.git/`, `~/.zshrc` and other shell startup files, the PowerShell profile, SSH keys
-  and `authorized_keys`, LaunchAgents, `~/.config/autostart`, `/etc`, `C:\Windows`.
+  and `authorized_keys`, LaunchAgents, `~/.config/autostart`, `/etc`, `C:\Windows`. Also when a command does it:
+  `rm`, `mv`, `cp`, `chmod`, `tee`, `sed -i` or `>` into `/System`, `/usr` (not `/usr/local`), `/etc`, `/Library`,
+  `C:\Windows`, `Program Files`, Antigravity's settings or the plugin itself.
 - Quoted text is data: `git commit -m "…rm -rf…"` and `rg "DROP TABLE"` pass, while `bash -c '…'`,
-  `powershell -Command "…"` and `ssh host '…'` are checked.
+  `powershell -Command "…"` and `ssh host '…'` are checked. `curl … | python3 -c '…'` and `curl … | jq` read data
+  and pass; `| sh`, `| bash -s` and `| python3` run what was downloaded and stop. A variable set in the same command
+  (`S=/path && rm -rf $S/x`) isn't taken for an empty one.
 - Everything else follows your Antigravity permission settings: the guard says "no objection", it doesn't approve.
+  In Bypass Mode it approves.
 - Check a command by hand: `python3 antigravity-plus/hooks/guard.py --test "git push --force"`.
 
 </details>

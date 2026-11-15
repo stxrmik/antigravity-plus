@@ -24,7 +24,9 @@ MODULES: List[Dict] = [
         "details": {
             "ru": "Guard останавливает необратимое и опасное (rm -rf, git reset --hard, force-push, sudo, curl | sh, "
                   "DROP TABLE…), не выводит секреты в разговор (cat .env) и не даёт агенту менять собственные "
-                  "разрешения. В начале разговора агент получает снимок git и правила проекта — AGENTS.md, а также "
+                  "разрешения. Bypass Mode: один раз «/bypass» в чате — и агенты во всех разговорах работают без "
+                  "запросов разрешения, пока вы не напишете «/bypass off»; спрашивают только о системном (sudo, "
+                  "системные папки, диски, автозапуск, ключи, права агента). В начале разговора агент получает снимок git и правила проекта — AGENTS.md, а также "
                   "CLAUDE.md с @импортами и .claude/rules, — а ваши указания («ничего не пушь») снова видит после "
                   "каждого сжатия контекста, так что они не тонут в длинных разговорах. Правила работы: понять запрос, "
                   "спланировать, сделать, проверить; несколько агентов в одном проекте не затирают правки друг друга. "
@@ -32,7 +34,9 @@ MODULES: List[Dict] = [
                   "Обязательна: остальные модули работают поверх неё.",
             "en": "The guard stops what is irreversible or dangerous (rm -rf, git reset --hard, force-push, sudo, "
                   "curl | sh, DROP TABLE…), keeps secrets out of the conversation (cat .env) and never lets the agent "
-                  "change its own permissions. At the start of a conversation the agent gets a git snapshot and the "
+                  "change its own permissions. Bypass Mode: type «/bypass» once and agents in every conversation work "
+                  "without permission prompts until «/bypass off»; only system-level actions still ask (sudo, system "
+                  "folders, disks, autostart, keys, the agent's permissions). At the start of a conversation the agent gets a git snapshot and the "
                   "project's rules — AGENTS.md, plus CLAUDE.md with its @imports and .claude/rules — and sees your "
                   "instructions («don't push anything») again after every context compaction, so they don't get lost "
                   "in long conversations. Working rules: understand the request, plan, do, verify; several agents on "

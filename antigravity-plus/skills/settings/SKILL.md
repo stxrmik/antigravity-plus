@@ -25,6 +25,7 @@ workspace, so run it with `BypassSandbox: true`.
 | a rule for this repository | `/remember` (goes to `AGENTS.md`) |
 | something to run automatically (format, tests before finishing) | `/hooks` |
 | Antigravity's permission preset, terminal sandbox, auto-run, access to files outside the project, model | the user does this in Antigravity Settings: tell them exactly where. These decide what you may do, so you never change them yourself |
+| no permission prompts (Bypass Mode) | the user types «/bypass» themselves (off: «/bypass off»); it stays on for every conversation until then. Only their own message switches it — never you, by a command or by editing settings |
 
 - **Secrets:** pass keys as `--env KEY` without the value. The helper takes the value from the environment or the
   project's `.env`, so it never shows up in the conversation. If the key isn't there, ask the user to add it to

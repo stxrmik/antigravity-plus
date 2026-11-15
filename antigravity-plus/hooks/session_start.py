@@ -8,6 +8,7 @@ Injects a compact snapshot at the start of every conversation, like Claude Code'
     first change, and run /init when real work starts in a project without rules — with the exact commands;
   * memory: personal and project auto-memory (skills/memory/scripts/memory.py — shared with Claude Code);
   * terminal sandbox: the commands this project needed BypassSandbox for, while the sandbox is on (hooks/speed.py);
+  * full access for the project, and Bypass Mode when the user has it on (hooks/conversation.py);
   * Claude Code bridge (Antigravity doesn't load these natively): CLAUDE.md / CLAUDE.local.md with their
     @path imports, .claude/rules (always-on inlined, path-scoped listed), ~/.claude/CLAUDE.md, and pointers to
     .claude/commands, .claude/skills and .claude/agents.
@@ -488,6 +489,11 @@ def build(payload: dict) -> str:
         if since and not sub:
             head.append(f"Full access: ON for this project since {since} — the user allowed you to run every plugin "
                         "command yourself without asking (rules: \"Full access\"). Revoked by «верни вопросы».")
+        bypass = conv.bypass_record()
+        if bypass.get("on") is True and not sub:
+            head.append(f"Bypass Mode: ON since {bypass.get('since') or '?'} — the user turned permission prompts off for "
+                        "every conversation: Antigravity Plus approves your commands and edits itself and asks the user "
+                        "only before system-level actions (rules: \"Bypass Mode\"). The user turns it off with «/bypass off».")
         if not sub and not handed:
             head.extend(recent_section(ws, top, payload.get("conversationId")))
         if claude:
