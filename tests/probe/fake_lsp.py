@@ -25,6 +25,7 @@ from pathlib import Path
 
 ROOT = ""
 DOCS = {}
+DOCS_LOCK = threading.Lock()
 READY = threading.Event()
 LOCK = threading.Lock()
 PULL = os.environ.get("FAKE_LSP_PULL") == "1"
@@ -94,7 +95,9 @@ def files(open_only=False):
                     p = os.path.realpath(os.path.join(d, n))
                     with open(p, encoding="utf-8") as f:
                         out[p] = f.read()
-    for p, text in DOCS.items():
+    with DOCS_LOCK:
+        docs = list(DOCS.items())
+    for p, text in docs:
         if "unresolved" not in p.split(os.sep):
             out[p] = text
     return out
@@ -184,7 +187,10 @@ def item(path, s):
 
 def diagnostics(path):
     out = []
-    for n, line in enumerate(lines(DOCS.get(path, files().get(path, "")))):
+    with DOCS_LOCK:
+        doc_text = DOCS.get(path)
+    text = doc_text if doc_text is not None else files().get(path, "")
+    for n, line in enumerate(lines(text)):
         for m in re.finditer(r"\boops\b", line):
             out.append({"range": {"start": {"line": n, "character": u16(line, m.start())},
                                   "end": {"line": n, "character": u16(line, m.end())}},
@@ -234,16 +240,19 @@ def handle(msg):
         return None
     if method == "textDocument/didOpen":
         td = params["textDocument"]
-        DOCS[path_of(td["uri"])] = td["text"]
+        with DOCS_LOCK:
+            DOCS[path_of(td["uri"])] = td["text"]
         publish(path_of(td["uri"]), td.get("version"))
         return None
     if method == "textDocument/didChange":
         p = path_of(params["textDocument"]["uri"])
-        DOCS[p] = params["contentChanges"][-1]["text"]
+        with DOCS_LOCK:
+            DOCS[p] = params["contentChanges"][-1]["text"]
         publish(p, params["textDocument"].get("version"))
         return None
     if method == "textDocument/didClose":
-        DOCS.pop(path_of(params["textDocument"]["uri"]), None)
+        with DOCS_LOCK:
+            DOCS.pop(path_of(params["textDocument"]["uri"]), None)
         return None
     if method in ("workspace/didChangeWatchedFiles", "workspace/didChangeConfiguration", "$/cancelRequest", "exit"):
         if method == "exit":

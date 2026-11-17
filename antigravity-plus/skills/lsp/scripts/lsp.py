@@ -1904,7 +1904,7 @@ def read_state(key: str) -> Optional[dict]:
 
 def write_state(key: str, data: dict) -> None:
     os.makedirs(STATE, exist_ok=True)
-    tmp = f"{state_path(key)}.{os.getpid()}.tmp"
+    tmp = f"{state_path(key)}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f)
     if not WINDOWS:
@@ -1954,7 +1954,8 @@ def call(st: dict, request: dict, timeout: float, connect_timeout: float = 5.0) 
 
 def ping(st: dict) -> Optional[dict]:
     try:
-        return call(st, {"op": "ping"}, 3.0)
+        reply = call(st, {"op": "ping"}, 3.0)
+        return reply if isinstance(reply, dict) and reply.get("ok") else None
     except (OSError, ValueError, LspError):
         return None
 
@@ -2030,6 +2031,10 @@ class Daemon:
     def __init__(self, key: str, sid: str, lang: str, root: str, first: str):
         self.key, self.sid, self.lang, self.root, self.first = key, sid, lang, root, first
         self.lock = threading.Lock()
+        self.state_lock = threading.Lock()
+        self.inflight = 0
+        self.inflight_cond = threading.Condition()
+        self.active_reqs = 0
         self.used = time.time()
         self.stopping = threading.Event()
         self.ready = threading.Event()
@@ -2065,33 +2070,48 @@ class Daemon:
             addr, transport = srv.getsockname()[1], "tcp"
         srv.listen(16)
         srv.settimeout(1.0)
-        self.state = {"pid": os.getpid(), "server": self.sid, "lang": self.lang, "root": self.root,
-                      "transport": transport, "address": addr, "token": self.token, "version": VERSION,
-                      "started": time.time(), "used": time.time(), "cmd": self.sess.cmd}
-        write_state(self.key, self.state)
+        with self.state_lock:
+            self.state = {"pid": os.getpid(), "server": self.sid, "lang": self.lang, "root": self.root,
+                          "transport": transport, "address": addr, "token": self.token, "version": VERSION,
+                          "started": time.time(), "used": self.used, "cmd": self.sess.cmd}
+            write_state(self.key, dict(self.state))
         return srv
 
     def boot(self) -> None:
         try:
             self.sess.start()
-            self.state["server_pid"] = self.sess.proc.pid if self.sess.proc else None
-            write_state(self.key, self.state)
+            with self.state_lock:
+                self.state["server_pid"] = self.sess.proc.pid if self.sess.proc else None
+                if not self.stopping.is_set():
+                    try:
+                        write_state(self.key, dict(self.state))
+                    except OSError:
+                        pass
         except Exception as e:  # noqa: BLE001
             self.error = str(e)
             self.sess.note(f"start failed: {e}")
         self.ready.set()
+
+    def _idle(self) -> bool:
+        with self.state_lock:
+            return (self.ready.is_set() and time.time() - self.used > IDLE
+                    and not self.active_reqs and not self.lock.locked())
+
+    def _dying(self) -> bool:
+        return (self.stopping.is_set()
+                or (self.ready.is_set() and (bool(self.error) or not self.sess.alive))
+                or self._idle())
 
     def serve(self) -> None:
         srv = self.listen()
         threading.Thread(target=self.boot, daemon=True).start()
         try:
             while not self.stopping.is_set():
-                if time.time() - self.used > IDLE and not self.lock.locked():
+                if self._idle():
                     self.sess.note(f"idle for {int(IDLE)} s — stopping")
                     break
                 if self.ready.is_set() and (self.error or not self.sess.alive):
                     self.sess.note("the server is gone — stopping" + (f": {self.error}" if self.error else ""))
-                    time.sleep(2)  # let a waiting client read the error first
                     break
                 try:
                     conn, _ = srv.accept()
@@ -2099,10 +2119,28 @@ class Daemon:
                     continue
                 except OSError:
                     break
-                threading.Thread(target=self.handle, args=(conn,), daemon=True).start()
+                with self.inflight_cond:
+                    self.inflight += 1
+                try:
+                    threading.Thread(target=self.handle, args=(conn,), daemon=True).start()
+                except Exception:  # noqa: BLE001
+                    with self.inflight_cond:
+                        self.inflight -= 1
+                        self.inflight_cond.notify_all()
+                    conn.close()
+                    raise
         finally:
-            srv.close()
+            with self.state_lock:
+                self.stopping.set()
             cleanup(self.key, os.getpid())  # first: a command arriving now starts a fresh daemon instead of waiting
+            srv.close()
+            deadline = time.time() + 2.0  # let a waiting client read its reply before closing the session
+            with self.inflight_cond:
+                while self.inflight > 0:
+                    left = deadline - time.time()
+                    if left <= 0:
+                        break
+                    self.inflight_cond.wait(left)
             self.sess.stop()
             self.log.close()
 
@@ -2120,54 +2158,72 @@ class Daemon:
                 return
             conn.settimeout(None)
             reply = self.answer(req)
-            conn.sendall(json.dumps(reply, ensure_ascii=False).encode("utf-8") + b"\n")
+            if reply is not None:
+                conn.sendall(json.dumps(reply, ensure_ascii=False).encode("utf-8") + b"\n")
         except (OSError, ValueError) as e:
             self.sess.note(f"client: {e!r}")
         finally:
             conn.close()
+            with self.inflight_cond:
+                self.inflight -= 1
+                self.inflight_cond.notify_all()
 
-    def answer(self, req: dict) -> dict:
+    def answer(self, req: dict) -> Optional[dict]:
         op = req.get("op")
         if op == "ping":
+            if self._dying():
+                return {"ok": False, "alive": False, "ready": False, "error": self.error or "stopping"}
+            with self.state_lock:
+                spid = self.state.get("server_pid")
+                used = self.used
             return {"ok": True, "alive": self.sess.alive, "ready": self.sess.ready_once, "busy": self.sess.busy(),
-                    "docs": len(self.sess.docs), "used": self.used, "error": self.error}
+                    "docs": len(self.sess.docs), "used": used, "error": self.error, "server_pid": spid}
         if op == "stop":
             self.stopping.set()
             return {"ok": True}
-        self.used = time.time()
-        self.state["used"] = self.used
-        try:
-            write_state(self.key, self.state)
-        except OSError:
-            pass
-        startup = float(self.sess.spec.get("startup") or 60)
-        if not self.ready.wait(startup + 30) or self.error:
-            return {"code": 1, "out": f"{self.sid} didn't start: {self.error or 'timed out'}"
-                                      f" (log: {state_path(self.key, '.log')})"}
-        if op == "edit-check":  # "problems": None = couldn't say this time (busy, not ready) — never «no errors»
-            budget = float(req.get("budget") or 8)
-            if not self.lock.acquire(timeout=max(0.5, budget / 3)):
-                return {"problems": None}
-            try:
-                if not self.sess.ready_once and not self.sess.wait_ready(0.1):
-                    return {"problems": None}
-                self.sess.sync()
-                return {"problems": edit_check(self.sess, str(req.get("path") or ""), budget * 2 / 3)}
-            except (LspError, OSError, UserError) as e:
-                self.sess.note(f"edit-check: {e}")
-                return {"problems": None}
-            finally:
-                self.lock.release()
-        with self.lock:
-            try:
-                code, out = execute(self.sess, list(req.get("argv") or []), str(req.get("cwd") or self.root))
-            except Exception as e:  # noqa: BLE001 — answer the client whatever happens
-                code, out = 1, f"lsp.py: {e!r}"
+        with self.state_lock:
+            if self.stopping.is_set():
+                return None
+            self.active_reqs += 1
             self.used = time.time()
-            return {"code": code, "out": out}
+            self.state["used"] = self.used
+            try:
+                write_state(self.key, dict(self.state))
+            except OSError:
+                pass
+        try:
+            startup = float(self.sess.spec.get("startup") or 60)
+            if not self.ready.wait(startup + 30) or self.error:
+                return {"code": 1, "out": f"{self.sid} didn't start: {self.error or 'timed out'}"
+                                          f" (log: {state_path(self.key, '.log')})"}
+            if op == "edit-check":  # "problems": None = couldn't say this time (busy, not ready) — never «no errors»
+                budget = float(req.get("budget") or 8)
+                if not self.lock.acquire(timeout=max(0.5, budget / 3)):
+                    return {"problems": None}
+                try:
+                    if not self.sess.ready_once and not self.sess.wait_ready(0.1):
+                        return {"problems": None}
+                    self.sess.sync()
+                    return {"problems": edit_check(self.sess, str(req.get("path") or ""), budget * 2 / 3)}
+                except (LspError, OSError, UserError) as e:
+                    self.sess.note(f"edit-check: {e}")
+                    return {"problems": None}
+                finally:
+                    self.lock.release()
+            with self.lock:
+                try:
+                    code, out = execute(self.sess, list(req.get("argv") or []), str(req.get("cwd") or self.root))
+                except Exception as e:  # noqa: BLE001 — answer the client whatever happens
+                    code, out = 1, f"lsp.py: {e!r}"
+                return {"code": code, "out": out}
+        finally:
+            with self.state_lock:
+                self.active_reqs -= 1
+                self.used = time.time()
+                self.state["used"] = self.used
 
 
-def spawn(key: str, sid: str, lang: str, root: str, first: str) -> None:
+def spawn(key: str, sid: str, lang: str, root: str, first: str) -> subprocess.Popen:
     os.makedirs(STATE, exist_ok=True)
     cmd = [sys.executable, os.path.abspath(__file__), "daemon", "--key", key, "--server", sid, "--lang", lang,
            "--root", root, "--first", first]
@@ -2177,7 +2233,7 @@ def spawn(key: str, sid: str, lang: str, root: str, first: str) -> None:
         kw["creationflags"] = 0x00000008 | 0x00000200 | 0x08000000  # detached, own group, no window
     else:
         kw["start_new_session"] = True  # outlives the agent's command and its terminal
-    subprocess.Popen(cmd, **kw)
+    return subprocess.Popen(cmd, **kw)
 
 
 def make_room() -> None:
@@ -2203,12 +2259,14 @@ def ensure_daemon(sid: str, lang: str, root: str, first: str) -> dict:
             elif st:
                 cleanup(key, st.get("pid"))
             make_room()
-            spawn(key, sid, lang, root, first)
+            proc = spawn(key, sid, lang, root, first)
             deadline = time.time() + 15
             while time.time() < deadline:
                 st = read_state(key)
                 if st and st.get("pid") and ping(st):
                     return st
+                if proc.poll() is not None:
+                    break
                 time.sleep(0.05)
             raise OSError("the background server didn't come up (log: " + state_path(key, ".log") + ")")
         finally:
@@ -2392,19 +2450,36 @@ def run_command(args, argv: List[str], cwd: str) -> Tuple[int, str]:
             root = below[0]
     use_daemon = not args.no_daemon and os.environ.get("AGP_LSP_DAEMON", "1") != "0"
     if use_daemon:
-        try:
-            st = ensure_daemon(sid, lang, root, path or root)
-            if not ping(st) or (not (read_state(daemon_key(sid, root)) or {}).get("server_pid")):
-                print(f"(starting {sid} for {root} — the first command waits for it)", file=sys.stderr, flush=True)
-            startup = float(SERVERS[sid].get("startup") or 60)
-            reply = call(st, {"op": "run", "argv": argv, "cwd": cwd}, startup + 600)
-            return int(reply.get("code") or 0), str(reply.get("out") or "")
-        except (OSError, ValueError, LspError) as e:
-            print(f"(no background server: {e} — running {sid} just for this command)", file=sys.stderr, flush=True)
+        key = daemon_key(sid, root)
+        startup = float(SERVERS[sid].get("startup") or 60)
+        announced = False
+        for attempt in range(2):
+            st = None
+            try:
+                st = ensure_daemon(sid, lang, root, path or root)
+                info = ping(st)
+                if not info:
+                    cleanup(key, st.get("pid"))
+                    if attempt == 0:
+                        continue
+                    raise LspError("the background server stopped")
+                if not announced and not info.get("ready") and not info.get("server_pid"):
+                    print(f"(starting {sid} for {root} — the first command waits for it)", file=sys.stderr, flush=True)
+                    announced = True
+                reply = call(st, {"op": "run", "argv": argv, "cwd": cwd}, startup + 600)
+                return int(reply.get("code") or 0), str(reply.get("out") or "")
+            except (OSError, ValueError, LspError) as e:
+                if attempt == 0 and st is not None and isinstance(e, (ConnectionError, FileNotFoundError, LspError)):
+                    cleanup(key, st.get("pid"))
+                    continue
+                print(f"(no background server: {e} — running {sid} just for this command)", file=sys.stderr, flush=True)
+                break
     sess = Session(sid, lang, root, first=path or root)
     try:
         sess.start()
         return execute(sess, argv, cwd)
+    except LspError as e:
+        return 1, str(e)
     finally:
         sess.stop()
 

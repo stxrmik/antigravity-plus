@@ -5,7 +5,7 @@ bare name and an ambiguous one, diagnostics, rename (preview, then --apply), fil
 a server still listing files (answers wait for it), the warm background server (reused, restarted for newer code,
 stopped when idle), --no-daemon, a language with no server; project roots per language; and the hooks: the session
 context lines and an edit's new type errors reaching the agent through <edit_check> — only from a running server."""
-import json, os, re, subprocess, sys, time
+import json, os, re, socket, subprocess, sys, threading, time
 PLUGIN, SP = sys.argv[1], sys.argv[2]
 HERE = os.path.dirname(os.path.abspath(__file__))
 LSP = os.path.join(PLUGIN, "skills", "lsp", "scripts", "lsp.py")
@@ -235,7 +235,9 @@ lsp("stop", "--all")
 open(FLOG, "w").close()
 starting = subprocess.Popen([sys.executable, LSP, "refs", "pkg/service.py:5", "award"], cwd=PROJ, env=dict(ENV, FAKE_LSP_READY_DELAY="2.5"),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
-time.sleep(1.2)
+deadline = time.time() + 15
+while time.time() < deadline and not (states() or [{}])[0].get("server_pid"):
+    time.sleep(0.05)
 write(os.path.join(PROJ, "pkg", "late.py"), "from pkg.service import XpService\nXpService(0).award(0, 0)\n")
 out = starting.communicate(timeout=90)[0]
 with open(FLOG, encoding="utf-8") as f:
@@ -315,6 +317,97 @@ deadline = time.time() + 30  # the state goes first (a new command starts afresh
 while time.time() < deadline and (states() or (pid and alive(pid))):
     time.sleep(0.2)
 check("idle for AGP_LSP_IDLE seconds: it stops with its language server", code == 0 and pid and not states() and not alive(pid), (out, states()))
+
+# concurrent write_state calls from the same process never collide on the temp file
+lsp("stop", "--all")
+ws_errors = []
+def write_burst(offset):
+    for n in range(100):
+        try:
+            L.write_state("race-probe", {"pid": os.getpid(), "server": "fakepy", "used": offset + n})
+        except Exception as exc:  # noqa: BLE001
+            ws_errors.append(repr(exc))
+threads = [threading.Thread(target=write_burst, args=(i * 1000,)) for i in range(4)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+check("write_state is safe across concurrent threads in the same process",
+      not ws_errors and (L.read_state("race-probe") or {}).get("server") == "fakepy", ws_errors)
+L.cleanup("race-probe")
+
+# cold start under concurrent commands preserves server_pid and succeeds
+p1 = subprocess.Popen([sys.executable, LSP, "refs", "pkg/service.py:5", "award"], cwd=PROJ, env=ENV,
+                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+p2 = subprocess.Popen([sys.executable, LSP, "symbols", "pkg/service.py"], cwd=PROJ, env=ENV,
+                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+o1 = p1.communicate(timeout=90)[0]
+o2 = p2.communicate(timeout=90)[0]
+st_now = (states() or [{}])[0]
+check("concurrent cold-start commands share one daemon with server_pid intact",
+      p1.returncode == 0 and p2.returncode == 0 and "no background server" not in o1 + o2 and st_now.get("server_pid"),
+      (p1.returncode, p2.returncode, st_now, o1[-300:], o2[-300:]))
+
+# if the language server dies, ping reports gone and the next command restarts cleanly without waiting
+L.kill_tree(int(st_now["server_pid"]))
+deadline = time.time() + 10
+while time.time() < deadline and L.ping(st_now) is not None:
+    time.sleep(0.05)
+t0 = time.time(); code, out = lsp("symbols", "pkg/service.py"); recover_took = time.time() - t0
+check("dead server: ping stops answering ok and the next command restarts without fallback",
+      L.ping(st_now) is None and code == 0 and "class XpService" in out and "no background server" not in out
+      and recover_took < 10 and (states() or [{}])[0].get("pid") != st_now.get("pid"),
+      (round(recover_took, 2), out, states()))
+lsp("stop", "--all")
+
+# if a daemon vanishes right after ensure_daemon's ping or before answering run, run_command cleans up and retries on a fresh daemon
+for mode in ("ping", "run"):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    srv.settimeout(10)
+    port = srv.getsockname()[1]
+    def mock_drop(srv=srv, mode=mode):
+        while True:
+            conn, _ = srv.accept()
+            buf = b""
+            while not buf.endswith(b"\n"):
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            op = json.loads(buf.decode("utf-8")).get("op")
+            if op == "ping":
+                conn.sendall(b'{"ok": true}\n')
+                conn.close()
+                if mode == "ping":
+                    break
+                continue
+            conn.close()
+            break
+        srv.close()
+    t_srv = threading.Thread(target=mock_drop, daemon=True)
+    t_srv.start()
+    L.write_state(key, {"pid": 999999, "server": "fakepy", "lang": "python", "root": PROJ, "transport": "tcp",
+                        "address": port, "token": "t", "version": L.VERSION, "started": time.time(), "used": time.time()})
+    code, out = lsp("symbols", "pkg/service.py")
+    t_srv.join(timeout=5)
+    check(f"daemon closing on {mode}: run_command retries on a fresh daemon instead of falling back",
+          code == 0 and "class XpService" in out and "no background server" not in out and states(), (code, out, states()))
+    lsp("stop", "--all")
+
+# a broken server binary fails fast with exit 1 instead of hanging 15 s or printing a traceback
+CFG = os.path.join(HOME, ".gemini", "antigravity-plus", "lsp.json")
+with open(CFG, encoding="utf-8") as f:
+    cfg_saved = f.read()
+with open(CFG, "w", encoding="utf-8") as f:
+    json.dump({"python": {"name": "fakepy", "command": ["/nonexistent/fake-lsp-bin"]}}, f)
+t0 = time.time(); code, out = lsp("symbols", "pkg/service.py"); fail_took = time.time() - t0
+with open(CFG, "w", encoding="utf-8") as f:
+    f.write(cfg_saved)
+check("missing server binary: fails fast cleanly with exit 1 and no traceback",
+      code == 1 and fail_took < 8 and "Traceback" not in out and "can't start" in out, (round(fail_took, 2), code, out))
+lsp("stop", "--all")
 
 # --no-daemon, a language with no server, the session context
 code, out = lsp("hover", "pkg/service.py:9", "helper", "--no-daemon")
