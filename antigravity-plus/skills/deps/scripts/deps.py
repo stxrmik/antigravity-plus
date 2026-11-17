@@ -99,13 +99,12 @@ GHSA_RE = re.compile(r"GHSA-\w{4}-\w{4}-\w{4}", re.I)
 VER_RE = re.compile(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 NOT_CHECKED = ("missing", "failed", "timeout", "unsupported")
 LIST_SCRIPT = (
-    "import os, sys\n"
-    "cwd = os.path.realpath(os.getcwd())\n"
-    "sys.path[:] = [p for p in sys.path if p not in ('', '.') and os.path.realpath(p) != cwd]\n"
-    "import json\n"
-    "from importlib import metadata\n"
-    "seen = {((d.metadata['Name'] or '') if d.metadata else '', d.version or '') for d in metadata.distributions()}\n"
-    "print(json.dumps(sorted([n, v] for n, v in seen if n and v)))\n"
+    "import os, sys; cwd = os.path.realpath(os.getcwd()); "
+    "sys.path[:] = [p for p in sys.path if p not in ('', '.') and os.path.realpath(p) != cwd]; "
+    "import json; from importlib import metadata; "
+    "seen = {((d.metadata['Name'] or '') if d.metadata else '', d.version or '') "
+    "for d in metadata.distributions()}; "
+    "print(json.dumps(sorted([n, v] for n, v in seen if n and v)))"
 )
 
 
@@ -194,9 +193,19 @@ def _foldable(entry: Dict[str, Any], parent: Dict[str, Any]) -> bool:
 def _git_tracked(folder: str, path: str) -> bool:
     """True when any file in venv directory `path` is tracked in git (so committed repos can't supply code)."""
     git_bin = shutil.which("git")
-    if not git_bin and not WINDOWS:
-        git_bin = next((p for p in ("/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git")
-                        if os.path.isfile(p)), "")
+    if not git_bin:
+        if WINDOWS:
+            pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+            pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+            local = os.environ.get("LocalAppData", "")
+            candidates: Tuple[str, ...] = (
+                os.path.join(pf, "Git", "cmd", "git.exe"),
+                os.path.join(pf, "Git", "bin", "git.exe"),
+                os.path.join(pf86, "Git", "cmd", "git.exe"),
+            ) + ((os.path.join(local, "Programs", "Git", "cmd", "git.exe"),) if local else ())
+        else:
+            candidates = ("/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git")
+        git_bin = next((p for p in candidates if os.path.isfile(p)), "")
     if not git_bin:
         return False
     try:
