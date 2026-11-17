@@ -308,11 +308,11 @@ check("a background server from older code is restarted", code == 0 and states()
 
 # idle: it stops by itself
 lsp("stop", "--all")
-idle = dict(ENV, AGP_LSP_IDLE="1.5")
+idle = dict(ENV, AGP_LSP_IDLE="2.5")
 code, out = lsp("symbols", "pkg/service.py", env=idle)
 pid = (states() or [{}])[0].get("server_pid")
-deadline = time.time() + 20
-while time.time() < deadline and states():
+deadline = time.time() + 30  # the state goes first (a new command starts afresh), the server's shutdown follows
+while time.time() < deadline and (states() or (pid and alive(pid))):
     time.sleep(0.2)
 check("idle for AGP_LSP_IDLE seconds: it stops with its language server", code == 0 and pid and not states() and not alive(pid), (out, states()))
 
