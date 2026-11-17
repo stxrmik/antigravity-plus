@@ -55,6 +55,12 @@ for path in files:
 check("no script has an escape sequence Python warns about", not noisy, "\n".join(noisy))
 # A pipe decoded without an encoding uses the system's code page: cp1251 on a Russian Windows can't read the UTF-8 the
 # hooks print (/doctor crashed reading the guard's 🛡️). Every subprocess call that decodes text names its encoding.
+def label(path):
+    """A path for the report: relative to the repository when it can be (on Windows they may be on two drives)."""
+    try:
+        return os.path.relpath(path, ROOT)
+    except ValueError:
+        return path
 def locale_pipes(path):
     with open(path, encoding="utf-8") as f:
         tree = ast.parse(f.read(), path)
@@ -67,7 +73,7 @@ def locale_pipes(path):
         kw = {k.arg: k.value for k in node.keywords if k.arg}
         decodes = any(isinstance(kw.get(k), ast.Constant) and kw[k].value is True for k in ("text", "universal_newlines"))
         if decodes and "encoding" not in kw:
-            out.append(f"{os.path.relpath(path, ROOT)}:{node.lineno}")
+            out.append(f"{label(path)}:{node.lineno}")
     return out
 plugin_files = [p for p in files if p.startswith((PLUGIN, os.path.join(ROOT, "claude-code"))) or os.path.dirname(p) == ROOT]
 pipes = [x for p in plugin_files for x in locale_pipes(p)]
@@ -76,7 +82,7 @@ probe2 = os.path.join(SP, "probe2.py")
 with open(probe2, "w", encoding="utf-8") as f:
     f.write("import subprocess\nsubprocess.run(['git'], capture_output=True, text=True)\n"
             "subprocess.run(['git'], capture_output=True, text=True, encoding='utf-8')\n")
-check("the check itself catches a pipe in the code page", locale_pipes(probe2) == [f"{os.path.relpath(probe2, ROOT)}:2"],
+check("the check itself catches a pipe in the code page", locale_pipes(probe2) == [f"{label(probe2)}:2"],
       locale_pipes(probe2))
 # /handoff's list of recent work: crashed with a NameError from 0.11.0 to 0.15.0 whenever there was something to list
 ws = os.path.join(SP, "hf_ws"); os.makedirs(ws)
