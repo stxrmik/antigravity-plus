@@ -3,11 +3,46 @@ name: tests
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the run it replaces; runs on main always finish.
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  actions: read  # the gate reads this workflow's earlier runs
 
 jobs:
+  # Each commit is tested once. A pull request from a branch of this repository was already tested by the push
+  # of that branch; a commit that already passed (a branch merged into main with --ff-only, the same commit pushed
+  # again) isn't tested a second time. Pull requests from forks and manual runs are always tested.
+  gate:
+    name: already tested?
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      passed: ${{ steps.runs.outputs.passed }}
+    steps:
+      - id: runs
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/tests.yml/runs?head_sha=$GITHUB_SHA&event=push&status=success&per_page=1" --jq .total_count || echo 0)
+          if [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+            echo "passed=yes" >> "$GITHUB_OUTPUT"
+            echo "$GITHUB_SHA already passed these tests in an earlier run: not testing it again"
+          fi
+
   tests:
     name: ${{ matrix.os }} · Python ${{ matrix.python }}
+    needs: gate
+    if: needs.gate.outputs.passed != 'yes'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30  # a hung test ends the job here, not after GitHub's default 6 hours
     strategy:
       fail-fast: false
       matrix:
@@ -21,8 +56,8 @@ jobs:
           - os: ubuntu-24.04
             python: "3.9"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - name: Offline tests (hooks, guard, installer)
