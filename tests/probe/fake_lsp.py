@@ -7,13 +7,15 @@ Definitions are `def`/`class` lines; references are whole words outside comments
 `unresolved` are invisible (like code a real server can't resolve). Diagnostics: `oops` is an error, `TODO` a
 warning. Like pyright, it says «Found N source files» in its log FAKE_LSP_READY_DELAY seconds after `initialized`,
 and until then answers references from open documents only. FAKE_LSP_PULL=1 → pull diagnostics instead of push;
-FAKE_LSP_PUBLISH_DELAY → seconds before a publish (0.05); FAKE_LSP_PROGRESS=1 → an indexing progress that never
+FAKE_LSP_PUBLISH_DELAY → seconds before a publish (0.05), FAKE_LSP_PUBLISH_JITTER → up to that many more, at random
+(so publishes for consecutive versions can arrive out of order, as with a real server); FAKE_LSP_PROGRESS=1 → an indexing progress that never
 ends; FAKE_LSP_FLOOD=1 → on a message over 100 KB, before reading its body, it asks the client something and writes a
 megabyte of log (a client that answers from its reader while another thread writes would hang here).
 FAKE_LSP_LOG=<file> → every method it receives, one per line. Stdlib only.
 """
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -196,7 +198,8 @@ def diagnostics(path):
 def publish(path, version):
     if not PULL:
         found = diagnostics(path)  # for this version of the text, sent a little later
-        delay = float(os.environ.get("FAKE_LSP_PUBLISH_DELAY") or 0.05)
+        delay = float(os.environ.get("FAKE_LSP_PUBLISH_DELAY") or 0.05) + random.uniform(
+            0, float(os.environ.get("FAKE_LSP_PUBLISH_JITTER") or 0))
         threading.Timer(delay, send, args=({"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
                                             "params": {"uri": uri_of(path), "version": version,
                                                        "diagnostics": found}},)).start()

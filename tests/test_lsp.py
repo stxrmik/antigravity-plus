@@ -260,6 +260,27 @@ lsp("stop", "--all")
 with open(CFG, "w", encoding="utf-8") as f:
     f.write(cfg_saved)
 
+# publishes for two versions sent back to back can arrive crossed: the older one never replaces the newer one
+race_root = os.path.realpath(os.path.join(SP, "race"))
+race_file = os.path.join(race_root, "bad.py")
+write(race_file, "def a():\n    return oops\n")
+L.SERVERS["fake-race"] = {"command": [sys.executable, FAKE], "ready": "pyright", "wait": 5, "startup": 30, "open": True}
+os.environ.update(FAKE_LSP_PUBLISH_DELAY="0.02", FAKE_LSP_PUBLISH_JITTER="0.004")
+race = L.Session("fake-race", "python", race_root)
+race.start()
+race.wait_ready(10)
+race.open(race_file)
+base_text, crossed = "def a():\n    return oops\n", 0
+for i in range(20):
+    write(race_file, "def a():\n    return oops\n\ndef b():\n    return oops + 1\n" + "\n" * (i % 2))
+    race.open(race_file)                                  # the disk's new text (as sync() sends it)…
+    got = race.diagnostics(race_file, base_text, timeout=3)  # …then the committed one (as edit_check asks)
+    crossed += got is None or len(got) != 1
+race.stop()
+for var in ("FAKE_LSP_PUBLISH_DELAY", "FAKE_LSP_PUBLISH_JITTER"):
+    os.environ.pop(var, None)
+check("crossed publishes: the answer is always the requested version's (20 of 20)", crossed == 0, crossed)
+
 # state left by a daemon that died (reboot, kill -9): forgotten — and nothing killed by its old pids
 sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
 key = L.daemon_key("fakepy", PROJ)

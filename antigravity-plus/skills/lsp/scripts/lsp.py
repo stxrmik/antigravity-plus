@@ -688,8 +688,10 @@ class Session:
         with self.cond:
             if method == "textDocument/publishDiagnostics" and isinstance(params, dict):
                 path = uri_path(str(params.get("uri") or ""))
-                self.diags[path] = {"items": params.get("diagnostics") or [], "version": params.get("version"),
-                                    "at": time.time()}
+                version, old = params.get("version"), self.diags.get(path) or {}
+                # a late answer for an older version of the text must not replace the newer one's
+                if not (isinstance(version, int) and isinstance(old.get("version"), int) and version < old["version"]):
+                    self.diags[path] = {"items": params.get("diagnostics") or [], "version": version, "at": time.time()}
             elif method == "$/progress" and isinstance(params, dict):
                 value = params.get("value") if isinstance(params.get("value"), dict) else {}
                 token = str(params.get("token"))
