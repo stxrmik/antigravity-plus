@@ -513,9 +513,14 @@ mobile._adb_started = False; mobile.need_adb(); mobile.need_adb(); mobile.subpro
 check("the adb server is started once per run, with no pipes for it to keep open",
       len(spawned) == 1 and spawned[0][0] == [ADB, "start-server"] and spawned[0][1].get("stdout") == mobile.subprocess.DEVNULL
       and spawned[0][1].get("stderr") == mobile.subprocess.DEVNULL and spawned[0][1].get("stdin") == mobile.subprocess.DEVNULL, spawned)
-first = mobile.shot_path(s_dev := mobile.Sim(sims[0])) if sys.version_info >= (3, 8) else ""
-open(first, "w").close()
-check("two screenshots in one second get different names", mobile.shot_path(s_dev) != first and mobile.shot_path(s_dev).endswith("-2.png"), (first, mobile.shot_path(s_dev)))
+# the clock stands still here: on a slow runner the two names fell into different seconds and the check failed
+s_dev = mobile.Sim(sims[0]); real_strftime = mobile.time.strftime; frozen = mobile.time.localtime()
+mobile.time.strftime = lambda fmt, t=None: real_strftime(fmt, frozen)
+try:
+    first = mobile.shot_path(s_dev); open(first, "w").close(); second = mobile.shot_path(s_dev)
+finally:
+    mobile.time.strftime = real_strftime
+check("two screenshots in one second get different names", second == first[:-len(".png")] + "-2.png", (first, second))
 calls.clear(); code, text = out_of("launch", "com.ani.app", "--lang", "en", "--arg=-uiTest", "--ios")
 launch = calls[-1]
 check("launch (iOS): restarts the app, keeps its output, passes arguments and the language",
