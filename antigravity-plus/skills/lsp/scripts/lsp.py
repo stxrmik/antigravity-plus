@@ -406,8 +406,9 @@ def top_marker(folder: str, lang: str) -> bool:
 
 def find_root(path: str, lang: str, boundary: Optional[str] = None) -> Tuple[str, str]:
     """The folder the server should open for this file, and why (the marker that decided it)."""
+    path = os.path.normpath(path)  # «C:\\proj\\ios/Pkg» → one kind of separator, so roots compare and print alike
     start = path if os.path.isdir(path) else os.path.dirname(path)
-    limit = boundary or git_top(start) or start
+    limit = os.path.normpath(boundary) if boundary else (git_top(start) or start)
     near_markers = ROOTS.get(lang, ((), ()))[1]
     outer, nearest, why_near = None, None, ""
     d = start
@@ -432,7 +433,7 @@ def find_root(path: str, lang: str, boundary: Optional[str] = None) -> Tuple[str
 def find_root_below(folder: str, lang: str, depth: int = 3) -> Optional[Tuple[str, str]]:
     """When a command names no file: the shallowest folder under `folder` that holds the language's project file."""
     tops, nears = ROOTS.get(lang, ((), ()))
-    level = [folder]
+    level = [os.path.normpath(folder)]
     for _ in range(depth):
         nxt = []
         for d in level:
