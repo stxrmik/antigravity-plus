@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Antigravity Plus — PreToolUse guard.
+r"""Antigravity Plus — PreToolUse guard.
 
 Stops and asks the user (decision "force_ask", which ignores cached "always allow" grants) before:
   * run_command (sh/bash/zsh on macOS and Linux, PowerShell or cmd on Windows): irreversible or outward-facing

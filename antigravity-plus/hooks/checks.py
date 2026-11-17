@@ -126,7 +126,7 @@ def run(cmd: List[str], cwd: Optional[str] = None, timeout: int = TIMEOUT, extra
     e = env()
     e.update(extra_env or {})
     try:
-        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=e)
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=e)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.returncode, (r.stdout or "") + (r.stderr or "")

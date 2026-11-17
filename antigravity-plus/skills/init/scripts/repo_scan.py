@@ -52,7 +52,7 @@ LOCKFILES = {"pnpm-lock.yaml": "pnpm", "yarn.lock": "yarn", "package-lock.json":
 
 def sh(cmd: list, cwd: str) -> str:
     try:
-        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=15).stdout.strip()
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15).stdout.strip()
     except Exception:
         return ""
 

@@ -79,7 +79,7 @@ class State:
 
 def git(args: List[str], cwd: str) -> Optional[str]:
     try:
-        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout.strip() if r.returncode == 0 else None

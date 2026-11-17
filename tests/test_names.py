@@ -39,6 +39,45 @@ probe = os.path.join(SP, "probe.py")
 with open(probe, "w", encoding="utf-8") as f:
     f.write("import os\nX = 1\ndef good():\n    return os.sep, X, len('a')\ndef bad():\n    return compat.python_cmd()\n")
 check("the check itself catches a forgotten import", undefined(probe) == [("bad", "compat")], undefined(probe))
+# A backslash a string doesn't mean («C:\Windows» in a docstring): a warning on Python 3.12+ that ends up in the output of
+# whatever runs the script (/doctor's checks failed on Windows with Python 3.14), an error in a future Python.
+import warnings
+noisy = []
+for path in files:
+    with open(path, encoding="utf-8") as f:
+        src = f.read()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        try:
+            compile(src, path, "exec")
+        except (SyntaxError, SyntaxWarning, DeprecationWarning) as e:
+            noisy.append(f"{os.path.relpath(path, ROOT)}: {e}")
+check("no script has an escape sequence Python warns about", not noisy, "\n".join(noisy))
+# A pipe decoded without an encoding uses the system's code page: cp1251 on a Russian Windows can't read the UTF-8 the
+# hooks print (/doctor crashed reading the guard's 🛡️). Every subprocess call that decodes text names its encoding.
+def locale_pipes(path):
+    with open(path, encoding="utf-8") as f:
+        tree = ast.parse(f.read(), path)
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"):
+            continue
+        kw = {k.arg: k.value for k in node.keywords if k.arg}
+        decodes = any(isinstance(kw.get(k), ast.Constant) and kw[k].value is True for k in ("text", "universal_newlines"))
+        if decodes and "encoding" not in kw:
+            out.append(f"{os.path.relpath(path, ROOT)}:{node.lineno}")
+    return out
+plugin_files = [p for p in files if p.startswith((PLUGIN, os.path.join(ROOT, "claude-code"))) or os.path.dirname(p) == ROOT]
+pipes = [x for p in plugin_files for x in locale_pipes(p)]
+check("every subprocess call that decodes text says encoding=\"utf-8\" (not the system's code page)", not pipes, pipes)
+probe2 = os.path.join(SP, "probe2.py")
+with open(probe2, "w", encoding="utf-8") as f:
+    f.write("import subprocess\nsubprocess.run(['git'], capture_output=True, text=True)\n"
+            "subprocess.run(['git'], capture_output=True, text=True, encoding='utf-8')\n")
+check("the check itself catches a pipe in the code page", locale_pipes(probe2) == [f"{os.path.relpath(probe2, ROOT)}:2"],
+      locale_pipes(probe2))
 # /handoff's list of recent work: crashed with a NameError from 0.11.0 to 0.15.0 whenever there was something to list
 ws = os.path.join(SP, "hf_ws"); os.makedirs(ws)
 sys.path.insert(0, os.path.join(PLUGIN, "skills", "memory", "scripts")); sys.path.insert(0, os.path.join(PLUGIN, "hooks"))

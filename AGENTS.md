@@ -35,7 +35,7 @@ Claude Code-style engineering discipline plugin for **Google Antigravity 2.x** (
 
 ## Conventions
 - **Zero external Python dependencies:** keep all Python scripts compatible with Python 3.8+ (`from __future__ import annotations`, stdlib only) — hook PATH on macOS often resolves `/usr/bin/python3` (3.9), and CI runs Python 3.9 and 3.13 across Ubuntu, macOS, and Windows.
-- **Cross-platform paths and locks:** use `hooks/compat.py` for file locking and atomic file replacement; pass `-X utf8` / explicit `encoding="utf-8"` for file and pipe I/O.
+- **Cross-platform paths and locks:** use `hooks/compat.py` for file locking and atomic file replacement; pass `-X utf8` / explicit `encoding="utf-8"` for file and pipe I/O — every `subprocess` call with `text=True` also passes `encoding="utf-8", errors="replace"` (a Russian Windows decodes pipes as cp1251 otherwise, and the hooks print UTF-8), and no string may hold an escape Python warns about (`"C:\Windows"` in a docstring; use `r"""…"""`). `tests/test_names.py` checks both.
 - **Public repository hygiene:** never include real hostnames, emails, private project names, bundle IDs, device names, or verbatim user chat quotes in code, tests, comments, or docs — use neutral synthetic examples.
 - **Rule files:** every file in `antigravity-plus/rules/` requires `trigger: always_on` YAML frontmatter and must remain under Antigravity's 24 KB per-file limit.
 

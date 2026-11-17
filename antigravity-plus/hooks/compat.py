@@ -128,7 +128,7 @@ def browsers() -> List[str]:
 
 def run(cmd: List[str], timeout: float = 10) -> str:
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         return r.stdout if r.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""

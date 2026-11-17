@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import List, Optional, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +49,9 @@ if WINDOWS:
     win_dirs = [os.environ.get(v, "") for v in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData")]
     CONTAINERS |= {drive, os.path.dirname(HOME)} | {d for d in win_dirs if d}       # C:\, C:\Users, C:\Windows…
     SYSTEM_PREFIXES += [d + os.sep for d in win_dirs if d] + [os.path.join(HOME, "AppData") + os.sep]
+# The temp folder holds projects, like /tmp — on Windows it lies inside AppData, which is otherwise app data.
+TEMP = os.path.realpath(tempfile.gettempdir())
+CONTAINERS.add(TEMP)
 CONTAINERS = {key(c) for c in CONTAINERS}
 SYSTEM_PREFIXES = tuple(key(p) for p in SYSTEM_PREFIXES)
 OTHER_VCS = (".hg", ".svn", ".bzr", "_darcs", "CVS")
@@ -91,7 +95,7 @@ SAMPLE = {"*.py[cod]": "x.pyc"}  # rules whose test path can't be made by replac
 
 def git(args: List[str], cwd: str, timeout: int = 300) -> Tuple[int, str]:
     try:
-        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         return 1, str(e)
     return r.returncode, (r.stdout if r.returncode == 0 else r.stderr or r.stdout).strip()
@@ -111,7 +115,10 @@ def place_refusal(root: str) -> Optional[str]:
         return f"{root} holds projects rather than being one; run it in a project folder (--path)"
     inside_home = key(root).startswith(key(HOME) + os.sep)
     under_home = os.path.relpath(root, HOME).split(os.sep) if inside_home else []
-    if key(root + os.sep).startswith(SYSTEM_PREFIXES) or any(part.startswith(".") for part in under_home):
+    in_temp = key(root).startswith(key(TEMP).rstrip(os.sep) + os.sep)
+    if in_temp:
+        under_home = os.path.relpath(root, TEMP).split(os.sep)  # only what lies below the temp folder counts
+    if (key(root + os.sep).startswith(SYSTEM_PREFIXES) and not in_temp) or any(part.startswith(".") for part in under_home):
         return f"{root} is a system, app-data or hidden folder, not a project"
     return None
 

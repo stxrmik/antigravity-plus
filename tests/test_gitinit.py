@@ -67,5 +67,21 @@ p4 = os.path.join(SP, "gi_empty"); mk(p4, {})
 code, out = run("--path", p4)
 check("empty folder: repo with .gitignore only", code == 0 and git(p4, "ls-files").split() == [".gitignore"], out)
 for d in (p1, p2, p3, p4): shutil.rmtree(d, ignore_errors=True)
+# 4. the temp folder holds projects like /tmp does — on Windows it lies inside AppData; app data beside it doesn't
+home = os.path.expanduser("~")
+inner = ("AppData", "Local", "Temp") if os.name == "nt" else ("Library", "Caches", "TemporaryItems")
+tmp_root = os.path.join(home, *inner)
+env_t = dict(os.environ, TMPDIR=tmp_root, TEMP=tmp_root, TMP=tmp_root)
+proj_t = os.path.join(tmp_root, "scratch-proj")
+mk(proj_t, {"main.py": "print(1)\n"})
+r = subprocess.run([sys.executable, RI, "--path", proj_t], capture_output=True, text=True, encoding="utf-8", env=env_t)
+check("a project in the temp folder (on Windows inside AppData) gets its repository", r.returncode == 0
+      and os.path.isdir(os.path.join(proj_t, ".git")), r.stdout + r.stderr)
+app_dir = os.path.join(home, *inner[:-1], "SomeApp", "data")
+mk(app_dir, {"main.py": "print(1)\n"})
+r = subprocess.run([sys.executable, RI, "--path", app_dir], capture_output=True, text=True, encoding="utf-8", env=env_t)
+check("…while an app's data folder beside it is still refused", r.returncode == 2 and "app-data" in r.stdout + r.stderr,
+      r.stdout + r.stderr)
 print("ALL OK" if ok else "FAILURES")
+
 sys.exit(0 if ok else 1)

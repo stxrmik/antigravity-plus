@@ -145,7 +145,7 @@ def python_command() -> Optional[str]:
     for cand in candidates:
         try:
             r = subprocess.run(cand.split() + ["-c", "import sys; print(sys.version_info >= (3, 8))"],
-                               capture_output=True, text=True, timeout=20)
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20)
         except (OSError, subprocess.TimeoutExpired):
             continue
         if r.returncode == 0 and r.stdout.strip() == "True":
@@ -625,7 +625,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if claude:
         print(claude)
     print("\nAntigravity check:", flush=True)
-    subprocess.run([sys.executable, os.path.join(DEST, "skills", "doctor", "scripts", "doctor.py"), "--install-check"])
+    # UTF-8 mode: on Windows the console's code page (cp1251, cp1252…) would mangle what the checks read and print
+    subprocess.run([sys.executable, "-X", "utf8", os.path.join(DEST, "skills", "doctor", "scripts", "doctor.py"),
+                    "--install-check"])
     print("\n" + ("First install: restart Antigravity to load the plugin." if first else
                   "Updated: changes apply to new conversations (restart Antigravity if a new skill doesn't show up)."))
     return 0

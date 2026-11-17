@@ -209,7 +209,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 3
 
     if a.clipboard:
-        subprocess.run(["pbcopy"], input=md, text=True, check=False)
+        subprocess.run(["pbcopy"], input=md, text=True, encoding="utf-8", errors="replace", check=False)
         print(f"Скопировано в буфер обмена: {len(md)} символов.")
     if a.out or not a.clipboard:
         out = os.path.abspath(os.path.expanduser(a.out or f"conversation-{conv[:8]}.md"))

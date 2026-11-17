@@ -43,7 +43,7 @@ OK, WARN, BAD = "✅", "⚠️", "❌"
 
 def run(cmd: List[str], timeout: float = 5.0, stdin: Optional[str] = None, cwd: Optional[str] = None) -> Tuple[int, str]:
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=stdin, cwd=cwd)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, input=stdin, cwd=cwd)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except (OSError, subprocess.TimeoutExpired) as e:
         return 127, str(e)

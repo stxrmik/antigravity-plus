@@ -121,7 +121,7 @@ def slug(path: str) -> str:
 
 def git_root(ws: str) -> Optional[str]:
     try:
-        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=ws, capture_output=True, text=True, timeout=3)
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=ws, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None

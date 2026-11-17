@@ -223,7 +223,7 @@ def setup_left(payload: dict, turn: dict, st: dict, answer: str) -> List[str]:
             import repo_init
             if repo_init.place_refusal(ws):
                 return []  # the home folder, ~/Downloads and the like
-        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=ws, capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=ws, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
         top = r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
         return []

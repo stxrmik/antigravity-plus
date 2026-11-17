@@ -55,7 +55,7 @@ def shoot(chrome: str, url: str, width: int, height: int, out: str) -> dict:
            f"--user-data-dir={profile}", f"--window-size={width},{height}", "--force-device-scale-factor=2",
            "--virtual-time-budget=6000", "--enable-logging=stderr", "--v=0", f"--screenshot={png}", url]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         log = r.stderr or ""
     except (OSError, subprocess.TimeoutExpired) as e:
         log = f"chrome failed: {e}"
@@ -77,7 +77,7 @@ def rendered_text(chrome: str, url: str, width: int, height: int) -> int:
     try:
         r = subprocess.run([chrome, "--headless=new", "--disable-gpu", "--no-first-run", f"--user-data-dir={profile}",
                             f"--window-size={width},{height}", "--virtual-time-budget=6000", "--dump-dom", url],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         dom = r.stdout or ""
     except (OSError, subprocess.TimeoutExpired):
         return -1

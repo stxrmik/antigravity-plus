@@ -104,7 +104,7 @@ def topic_slug(text: str, words: int = 4) -> str:
 
 def git(args: List[str], cwd: str) -> Optional[str]:
     try:
-        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=5)
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout.rstrip("\n") if r.returncode == 0 else None
