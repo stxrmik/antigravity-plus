@@ -107,6 +107,15 @@ check("the core can't be switched off; «all» picks every module", "The core is
 r = install("--list", "--lang", "ru")
 check("--list describes every module (in Russian)", r.returncode == 0 and all(m["title"]["ru"] in r.stdout for m in MODULES)
       and "токенов контекста в каждом запросе" in r.stdout, r.stdout[:300])
+r = install("--modules", "core,parallel", "--lang", "en")
+explorer = open(os.path.join(DEST, "agents", "explorer.md"), encoding="utf-8").read()
+check("without the lsp module the subagents lose the line about it", r.returncode == 0 and "lsp.py" not in explorer
+      and "needs:" not in explorer and "rg -n" in explorer and "LSP.md" not in listing("rules"), explorer[-900:])
+r = install("--modules", "core,parallel,lsp", "--lang", "en")
+explorer = open(os.path.join(DEST, "agents", "explorer.md"), encoding="utf-8").read()
+check("with it they keep it (without the marker), and the /lsp skill, rule and settings come along", r.returncode == 0
+      and "lsp.py" in explorer and "needs:" not in explorer and "LSP.md" in listing("rules") and "lsp" in listing("skills")
+      and "lspChecks" not in choice()["off"], (explorer[-900:], listing("rules"), choice()))
 r = install("--modules", "core,nonsense")
 check("an unknown module is refused", r.returncode != 0 and "Unknown module(s): nonsense" in (r.stdout + r.stderr), r.stdout + r.stderr)
 # a module that waits for its tool: the bridge chosen without Claude Code, added by the update after it appears

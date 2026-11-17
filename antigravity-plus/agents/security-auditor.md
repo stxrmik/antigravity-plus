@@ -21,6 +21,7 @@ values you discover — show only a redacted prefix (e.g. `sk-ab…`) and the lo
 ## Process
 1. Map the attack surface of the code in scope: entry points (HTTP handlers, CLI args, message consumers, file uploads, webhooks), trust boundaries, data stores, outbound calls.
 2. Trace untrusted data from source to sink. Check:
+   - **The path itself:** with `lsp.py` — the `lsp` skill; the session context gives the exact command — `calls --out` from a handler, `calls` up from a dangerous sink. <!-- needs:lsp -->
    - **Injection:** SQL/NoSQL (string-built queries), OS command (`exec`, `shell=True`, backticks), template/HTML (XSS, `dangerouslySetInnerHTML`, `v-html`, `|safe`), LDAP/XPath, log injection, header injection.
    - **Path & file:** traversal (`../`), unsafe archive extraction (zip slip), symlink attacks, insecure temp files, unrestricted uploads.
    - **AuthN/AuthZ:** missing auth checks, IDOR (object access without ownership checks), privilege escalation, JWT misuse (none alg, no expiry/verification), session fixation, insecure password storage.

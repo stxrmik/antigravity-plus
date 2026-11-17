@@ -422,6 +422,19 @@ def mobile_section(ws: str) -> List[str]:
         return []
 
 
+def lsp_section(ws: str) -> List[str]:
+    """Languages here that a language server covers, and the exact lsp.py commands (skill /lsp)."""
+    if not os.path.isfile(os.path.join(PLUGIN, "skills", "lsp", "SKILL.md")):
+        return []  # the module isn't installed
+    try:
+        sys.path.insert(0, os.path.join(PLUGIN, "skills", "lsp", "scripts"))
+        import lsp
+        return lsp.session_lines(ws)
+    except Exception as e:  # optional, like memory
+        print(f"session_start: lsp: {e}", file=sys.stderr)
+        return []
+
+
 def ci_section(ws: str) -> List[str]:
     """CI workflows in the workspace: the exact `ci.py watch` command after pushing or opening a PR (skill /ci)."""
     try:
@@ -484,6 +497,7 @@ def build(payload: dict) -> str:
         except Exception as e:  # the session context must come through anyway
             print(f"session_start: sandbox: {e}", file=sys.stderr)
         head.extend(mobile_section(ws))
+        head.extend(lsp_section(ws))
         if not sub and not handed:
             head.extend(ci_section(ws))
             head.extend(setup_hints(ws, top))

@@ -17,6 +17,7 @@ symptom disappear.
 ## Method
 1. **Reproduce.** Get a reliable, ideally fast reproduction (a failing test, a script, a command). Record the exact command and output. If you cannot reproduce, gather more evidence (logs, versions, env, inputs) before changing code.
 2. **Read the evidence.** Read the full error and stack trace, then the code at each relevant frame. Check recent changes (`git log -p -- <file>`, `git diff`) for likely regressions.
+   Follow the code path with the language server — `lsp.py` — the `lsp` skill; the session context gives the exact command: `def` and `hover` (types) at each frame, `calls` for who reaches the failing function. <!-- needs:lsp -->
 3. **Hypothesize.** List 2–4 plausible causes ranked by likelihood. For each, name the observation that would confirm or refute it.
 4. **Test hypotheses cheaply.** Add temporary logging/asserts, inspect state, narrow inputs, bisect (`git bisect` when a known-good revision exists). Change one variable at a time. Keep notes of what you ruled out.
 5. **Fix the root cause** with the smallest correct change that matches project style. Never: delete or skip tests, broaden `catch`/`except` to swallow errors, add sleeps to "fix" races, loosen types to silence errors.

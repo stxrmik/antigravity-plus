@@ -187,7 +187,19 @@ def missing(m: dict) -> List[str]:
             out.append("Xcode / Android SDK")
         elif need == "claude" and not os.path.isdir(CLAUDE):
             out.append("Claude Code (~/.claude)")
+        elif need == "lsp" and not language_servers():
+            out.append("a language server (pyright, sourcekit-lsp, kotlin-lsp, typescript-language-server, gopls…)")
     return out
+
+
+def language_servers() -> List[str]:
+    """The language servers on this computer (the lsp module's own list, skills/lsp/scripts/lsp.py)."""
+    try:
+        sys.path.insert(0, os.path.join(SRC, "skills", "lsp", "scripts"))
+        import lsp
+        return [sid for sid in lsp.SERVERS if lsp.server_command(sid)]
+    except Exception:  # the module still installs; /lsp servers says what's missing
+        return []
 
 
 def browsers() -> List[str]:
@@ -442,15 +454,16 @@ def stage(chosen: Set[str], python: str) -> str:
     shutil.copytree(SRC, dest, ignore=ignore)
     skills = set(os.listdir(os.path.join(dest, "skills")))
     sidecars = set(os.listdir(os.path.join(dest, "sidecars"))) if os.path.isdir(os.path.join(dest, "sidecars")) else set()
-    rules = os.path.join(dest, "rules")
-    for name in os.listdir(rules):
-        path = os.path.join(rules, name)
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
-        new = filter_rules(text, skills, sidecars)
-        if new != text:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(new)
+    for folder in ("rules", "agents"):  # subagents' instructions point at skills too (<!-- needs:lsp -->)
+        folder = os.path.join(dest, folder)
+        for name in os.listdir(folder) if os.path.isdir(folder) else []:
+            path = os.path.join(folder, name)
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            new = filter_rules(text, skills, sidecars)
+            if new != text:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(new)
     if python != "python3":
         write_hooks(dest, python)
     return root

@@ -21,7 +21,7 @@ every edit checked · an agent that finishes the job
 
 ---
 
-One plugin: 23 commands, 7 subagents, 6 hooks and working rules — plus a skill for Claude Code that lets it hand
+One plugin: 25 commands, 7 subagents, 6 hooks and working rules — plus a skill for Claude Code that lets it hand
 part of its work to Antigravity agents on its own. One command installs it — whole, or the modules you pick at
 install time; on Antigravity's plugin page it is turned on and off as a whole. Python standard library only, no
 dependencies.
@@ -80,13 +80,14 @@ and the hook features of that module stay silent. The choice is saved, and updat
 
 | Module | What it gives | Context | Needs |
 |---|---|---|---|
-| Core | the guard, project context, your instructions after compaction, the working rules, `/init`, `/remember`, `/settings`, `/doctor`, `/hooks` | ≈4,800 | required |
+| Core | the guard, project context, your instructions after compaction, the working rules, `/init`, `/remember`, `/settings`, `/doctor`, `/hooks` | ≈5,300 | required |
 | Quality | every edit checked, the agent doesn't stop halfway, `/review`, `/security-review`, `/simplify`, 4 subagents | ≈900 | — |
 | Facts and honest answers | the report is held to what happened; an objection means checking | ≈1,500 | — |
 | Memory | auto-memory (shared with Claude Code), `/memory`, `/handoff`, recent conversations | ≈1,500 | — |
 | Parallel work | subagents `explorer`, `researcher`, `worker`, `/parallel` | ≈1,300 | — |
 | Speed and context | the sandbox, the context budget, loops of errors | hints only | — |
 | Git and GitHub | `/git`, `/commit`, `/pr`, `/fix-issue`, `/ci`, `/git-init` | ≈1,350 | git; gh for GitHub |
+| Code navigation (LSP) | `/lsp`: definitions, every use, callers, types, type errors after an edit | ≈600 | a language server: pyright, sourcekit-lsp, kotlin-lsp… |
 | Deploy | `/deploy` | ≈200 | — |
 | Web UI checks | `/ui-check` | ≈150 | Chrome, Chromium, Edge or Brave |
 | Mobile apps | `/mobile` | ≈250 | Xcode and/or the Android SDK |
@@ -215,6 +216,29 @@ they install the saved choice.
 - The agent can't end its turn with a rebase or merge half done or conflict markers in files; unfinished git work from
   before shows up at the start of a conversation, and it isn't touched without you.
 
+### 🧭 Code navigation (LSP)
+- **The agent asks the language server instead of searching text.** Antigravity's agents have no code navigation of
+  their own — only `rg` in the terminal, which can't tell a call from a comment, a string or a symbol with the same
+  name. `/lsp` asks the project's real language server: where a symbol is defined, every place it is used (and the
+  function each one is in), who calls a function — several levels up — and what it calls, its type and signature, a
+  big file's outline, a symbol by name, implementations, type errors, and a rename across all files (previewed first).
+- **The same servers Claude Code uses.** pyright for Python, sourcekit-lsp for Swift (an Xcode app needs
+  xcode-build-server and a `buildServer.json`), kotlin-lsp for Kotlin (rooted at the folder with
+  `settings.gradle.kts`), plus typescript-language-server, gopls, rust-analyzer, clangd, jdtls and more: the plugin
+  finds them and picks the project root itself. What's missing, `/lsp servers` tells you how to install — whether to
+  is your call.
+- **Honest about gaps.** When the name appears in code the server didn't link to the symbol (imports through
+  `sys.path`, reflection, a stale Xcode index), the answer says so separately — the agent checks those places instead
+  of treating the list as complete.
+- **Fast after the first request.** The first request starts the server in the background (pyright: seconds,
+  kotlin-lsp: up to a couple of minutes for a Gradle import); after that answers take a fraction of a second. A server
+  stops by itself after 10 minutes without requests; `/lsp status` shows what runs and how much memory it takes.
+- **Type errors right after an edit.** While a server runs, the check of every edit also reports the errors the last
+  commit didn't have — in the same `<edit_check>` as syntax and linters.
+- **The agent remembers it on its own.** At the start of a conversation the agent and its subagents see which of the
+  project's languages have a server, with the exact command; after two `rg` searches for symbol names the agent is
+  reminded once to ask the server.
+
 ### 🏎️ Speed and context
 - A command that failed in Antigravity's terminal sandbox and worked with `BypassSandbox` is remembered for the
   project: in new conversations the agent runs it outside the sandbox right away, without a wasted run. A command
@@ -328,6 +352,7 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 | `/mobile` | the app in the iOS simulator or the Android emulator: launch, screenshots, taps, typing, logs | ✅ after changes to an app's screens |
 | `/git` | the repository's state in one command, branches and syncing, conflicts, history, safe undo, GitHub: issues, PRs, review threads, releases | ✅ for any git or GitHub work |
 | `/ci` | GitHub Actions and GitLab CI: wait for runs in the background, check status, clean failure logs | ✅ after `git push` and `/pr`, before `/deploy` |
+| `/lsp` | where it is defined, every use, who calls it and what it calls, its type, a file's outline, type errors, rename — from the language server | ✅ before changing a signature, renaming or deleting, for any question about a symbol |
 | `/git-init` | a git repository with a safe first commit | ✅ before the first change in a project without git |
 | `/init` | `AGENTS.md`: commands, architecture, conventions | ✅ in a project without rules |
 | `/remember` | a rule into `AGENTS.md`, `.agents/rules` or memory | ✅ when you state a rule |
@@ -568,6 +593,30 @@ when the turn was interrupted, and in subagents.
 </details>
 
 <details>
+<summary><b>🧭 /lsp — language servers</b></summary>
+
+| Language | Server | Project root | Install |
+|---|---|---|---|
+| Python | pyright (or basedpyright, ty, pyrefly, pylsp) | the outermost folder with `pyrightconfig.json`, else the nearest `pyproject.toml` | `pipx install 'pyright[nodejs]'` |
+| Swift | sourcekit-lsp | `buildServer.json` (an Xcode app), else `Package.swift` | Xcode; an app also needs `brew install xcode-build-server`, `xcode-build-server config -project X.xcodeproj -scheme S` and one full build |
+| Kotlin | kotlin-lsp | the folder with `settings.gradle.kts` | `brew install JetBrains/utils/kotlin-lsp` |
+| TypeScript, JavaScript | typescript-language-server | the nearest `tsconfig.json` or `package.json` | `npm install -g typescript typescript-language-server` |
+| Go, Rust, C/C++/Objective-C, Java… | gopls, rust-analyzer, clangd, jdtls… | `go.work`/`go.mod`, `Cargo.toml`, `compile_commands.json`, Gradle/Maven | `/lsp servers` |
+
+- Commands: `def`, `refs`, `calls` (`--depth`, `--out`), `hover`, `impl`, `type`, `symbols`, `find`, `check`,
+  `rename --to … [--apply]`, `servers`, `status`, `stop`. A position is `<file>:<line> <name>`: the agent never counts
+  columns, and the line may be off by one or two. Also `<file> <name>`, `<folder> <name>` and a bare name.
+- One background process per (server, root) keeps the server warm and answers over a local socket; it stops after 10
+  idle minutes (`AGP_LSP_IDLE`), and at most three run at once (`AGP_LSP_MAX`). Files changed on disk are sent to the
+  server before every request.
+- Until pyright has listed the project's files, it answers «who uses this» from open files only — with no sign of
+  trouble. `/lsp` waits for its «Found N source files» line before asking, so the first answer is complete.
+- Another server for a language, or your own: `~/.gemini/antigravity-plus/lsp.json`, e.g. `{"python": "basedpyright"}`
+  or `{"python": {"command": ["/path/to/server", "--stdio"]}}`. Logs: `~/.gemini/antigravity-plus/lsp/<id>.log`.
+
+</details>
+
+<details>
 <summary><b>📱 /mobile — the simulator and the emulator</b></summary>
 
 The agent's usual loop: `project` (the build commands for this project) → `boot` (start a simulator or an emulator,
@@ -695,6 +744,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 | Objective answers: hints and the check of agreement | "don't double-check what you agree with" | `objective-answers` |
 | Reminder to track CI after push | "don't remind me about CI" | `auto-ci` |
 | Git checks: commands that would hang, a rebase or merge left half done | "don't check git commands" | `git-checks` |
+| Type errors from the language server after an edit, the `/lsp` hint | "don't check types after edits" | `lsp-checks` |
 
 ## Platforms and compatibility
 
@@ -704,6 +754,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
   `.claude/skills` and `.claude/agents` are picked up; project memory is shared. The other way round, the skill
   `antigravity` lets Claude Code hand tasks to Antigravity agents (checked with Claude Code 2.1 and Antigravity 2.29).
 - `/mobile`: the iOS simulator on macOS with Xcode, the Android emulator on all three systems.
+- `/lsp`: language servers are installed separately and work on all three systems (sourcekit-lsp needs Xcode or Swift).
 - The agent answers in the language you write in. Some of the plugin's own messages (guard confirmations, `/doctor`)
   are in Russian for now — translations are welcome.
 - Already in Antigravity, no need to add: `/plan`, `/goal`, `/schedule`, `/learn`, `/browser`, rewinding a
@@ -735,12 +786,12 @@ antigravity-plus/
 │                facts (facts in reports)  objective (objective answers)  memory_hints (auto-memory)
 │                compat (macOS / Linux / Windows)
 ├── rules/AGENTS.md                 # always-on working rules (core)
-├── rules/MEMORY.md, PARALLEL.md, GIT.md  # rules of the memory, parallel-work and git modules
+├── rules/MEMORY.md, PARALLEL.md, GIT.md, LSP.md  # rules of the memory, parallel-work, git and code-navigation modules
 ├── rules/FACTS.md                  # facts and sources: don't invent, check, cite
 ├── rules/OBJECTIVE.md              # objective answers: check before you agree
 ├── agents/      explorer  researcher  worker  code-reviewer  security-auditor  debugger  test-writer
 ├── sidecars/usage/                 # the usage side panel
-└── skills/      23 commands: init remember memory handoff parallel review commit pr git ci … mobile settings git-init doctor
+└── skills/      25 commands: init remember memory handoff parallel review commit pr git ci lsp … mobile settings git-init doctor
 claude-code/skills/antigravity/     # Claude Code's skill: SKILL.md + scripts/delegate.py (tasks → Antigravity)
 install.py, install.sh, install.cmd # installer for every OS
 modules.py                          # the modules: what each holds, detailed descriptions, what is off without it

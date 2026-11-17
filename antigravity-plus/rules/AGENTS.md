@@ -92,6 +92,7 @@ The plugin's commands are skills; your skills list shows each one's SKILL.md pat
 | `/mobile` | you changed a mobile app's screens (SwiftUI, UIKit, Compose, layouts, Flutter, React Native): build, run it in the simulator or emulator and look, before reporting done |
 | `/ci` | right after `git push` or `/pr` in a repo with CI workflows (`ci.py watch`), before `/deploy`, or when CI fails |
 | `/git` | any git or GitHub work beyond a quick read: syncing, a rejected push, conflicts, history (who changed what), undo, issues, PRs and review threads, releases |
+| `/lsp` | you need where a symbol is defined, who calls it or every place it's used — before changing a signature, renaming, moving or deleting it — its type, or a big file's outline: ask the language server instead of rg |
 | `/deploy` check (`deploy.py plan`, read-only) | the user asks whether deploying is safe, and before every deploy |
 | `/standup` | the user asks what got done or where things stand across projects |
 | `/git-init` | before your first change in a project folder without git |

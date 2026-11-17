@@ -21,6 +21,7 @@ tests in check mode if cheap and safe.
 ## Process
 1. Understand the intent of the change (from the prompt, commit messages, PR text). If intent is unclear, infer it from the diff and state your assumption.
 2. Read the diff, then read the **surrounding code**: callers, callees, types, tests, and the project's `AGENTS.md`. A diff alone hides most bugs.
+   For a changed signature or a renamed, moved or removed symbol, list every caller with `lsp.py` — the `lsp` skill; the session context gives the exact command (`refs`, `calls`) and check each one was updated. <!-- needs:lsp -->
 3. Check systematically:
    - **Correctness:** logic errors, off-by-one, wrong conditions, null/undefined/empty handling, wrong units, timezone/locale, integer overflow, floating point, mutation of shared state.
    - **Error handling:** swallowed errors, missing cleanup (files, connections, locks), partial failure leaving inconsistent state, unhelpful messages.

@@ -373,6 +373,57 @@ def _words(s: str, limit: int = 6) -> List[str]:
     return words or [w.strip("\"'") for w in s.split()[:limit]]
 
 
+SEARCH_PROG = re.compile(r"^(?:rg|grep|egrep|ag|git\s+grep)\b")
+SEARCH_OPTS_WITH_VALUE = {"-g", "--glob", "-t", "--type", "-T", "--type-not", "-A", "-B", "-C", "-m", "--max-count",
+                          "--include", "--exclude", "--exclude-dir", "-f", "--file", "-d", "--max-depth", "--color",
+                          "--colors", "-M", "--max-columns", "-j", "--threads", "--sort", "--sortr"}
+TEXT_TARGET = re.compile(r"\.(log|txt|md|json|ya?ml|toml|ini|cfg|conf|csv|html?|xml|lock)$|(^|/)(logs?|tmp)(/|$)", re.I)
+NOT_SYMBOL = {"TODO", "FIXME", "XXX", "NOTE", "HACK", "ERROR", "Error", "WARNING", "DEBUG", "INFO", "import", "from",
+              "def", "class", "func", "fun", "function", "return", "self", "this", "true", "false", "None", "null",
+              "http", "https", "localhost"}
+
+
+def symbol_search(cmd: str) -> List[str]:
+    """Identifiers an rg/grep/git grep looked for in code — «rg -n "OrderRepository" src/», «grep -rn 'def charge'
+    api» — the searches a language server answers exactly (skills/lsp). [] for text, logs, piped output."""
+    names: List[str] = []
+    for part in re.split(r"\s*(?:&&|;|\|\|)\s*", cmd.strip()):
+        part = re.sub(r"^cd\s+\S+\s*$", "", part).split(" | ")[0].strip()
+        if not SEARCH_PROG.match(part):
+            continue
+        try:
+            tokens = shlex.split(part)
+        except ValueError:
+            continue
+        tokens = tokens[2:] if tokens[:2] == ["git", "grep"] else tokens[1:]
+        pattern, targets, i = None, [], 0
+        while i < len(tokens):
+            t = tokens[i]
+            if t in ("-e", "--regexp") and i + 1 < len(tokens):
+                pattern = pattern or tokens[i + 1]
+                i += 2
+                continue
+            if t in SEARCH_OPTS_WITH_VALUE:
+                i += 2
+                continue
+            if t.startswith("-"):
+                i += 1
+                continue
+            if pattern is None:
+                pattern = t
+            else:
+                targets.append(t)
+            i += 1
+        if not pattern or any(TEXT_TARGET.search(x) for x in targets):
+            continue
+        for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", pattern.replace("\\b", " ").replace("\\s", " ")):
+            looks = (re.search(r"[a-z][A-Z]|^[A-Z][a-z]+[A-Z]", w) or ("_" in w.strip("_"))
+                     or re.search(r"\b(def|class|func|fun|function|struct|protocol|interface)\s+" + re.escape(w), pattern))
+            if looks and w not in NOT_SYMBOL and w not in names:
+                names.append(w)
+    return names[:6]
+
+
 def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
     """Keep st["calls"] up to date with how the steps go (hooks/speed.py):
     ctx — tokens the latest model call carried (input + cache reads); fail_run / fail_last / fail_step — commands or
@@ -418,6 +469,10 @@ def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
             return
         cmd, code = call.get("cmd", ""), int(m.group(1))
         key = command_key(cmd, ws)
+        found = symbol_search(cmd) if code in (0, 1) else []
+        if found:  # rg for a symbol: the language server would answer it exactly (hooks/instructions.py → lsp)
+            sym = calls.setdefault("sym", {"n": 0})
+            sym.update(n=sym.get("n", 0) + 1, step=step, names=(found + [x for x in sym.get("names", []) if x not in found])[:6])
         calls["n_cmd"] = n = calls.get("n_cmd", 0) + 1
         sbx = calls.setdefault("sbx", {})
         out = content[m.end():].split("Command output:", 1)[-1]  # the command's own output, not Antigravity's note

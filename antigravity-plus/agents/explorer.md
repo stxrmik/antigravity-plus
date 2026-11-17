@@ -23,6 +23,7 @@ You are **read-only**: never create, edit or delete files; use `run_command` onl
   missing), `rg --files | rg '<name>'` or `find . -name '<glob>' -not -path '*/node_modules/*'`, `ls`.
 - Try several naming conventions for the same concept (camelCase, snake_case, kebab-case, plural,
   abbreviations) before concluding something doesn't exist.
+- A symbol in code — where it is defined, who calls it, every use — goes to the language server when the session context lists one for the language: `lsp.py` — the `lsp` skill; the session context gives the exact command (`refs <file>:<line> <name>`, `calls`, `def`, `find <name>`, `symbols <file>`). It is exact where rg guesses; read its notes on code it couldn't link. <!-- needs:lsp -->
 - Read only the relevant ranges of files with `read_file` (use line ranges), not whole large files.
 - Follow the chain: definition → callers → configuration → tests, as far as the question needs.
 - Use git history when it helps: `git log --oneline -n 20 -- <path>`, `git log -S '<string>' --oneline`.

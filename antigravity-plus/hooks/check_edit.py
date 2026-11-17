@@ -6,8 +6,10 @@ PostToolUse can't talk to the agent, so problems wait in ~/.gemini/antigravity-p
 hooks/instructions.py (PreInvocation) shows them right before the agent's next step; hooks/stop.py re-checks files
 that are still broken when the agent wants to finish. Errors only: every syntax error each time, linter errors only
 when they are new since the previous check of that file (on the first check a file full of old linter errors is
-reported once, as a count). Files outside the workspace, in dependency/build folders, or with no checker are
-skipped; `memory.py config check-edits off` turns it off. Output is always {}. Stdlib only, Python 3.8+.
+reported once, as a count). When a language server already runs for the file (skills/lsp — this hook never starts
+one), the type errors the edit added against the committed version come along (`lsp-checks off` drops them). Files
+outside the workspace, in dependency/build folders, or with no checker are skipped; `memory.py config check-edits
+off` turns it all off. Output is always {}. Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
 
@@ -61,13 +63,28 @@ class State:
             self.lock.close()
 
 
-def enabled() -> bool:
+def enabled(key: str = "checkEdits") -> bool:
     try:
         sys.path.insert(0, os.path.join(PLUGIN, "skills", "memory", "scripts"))
         import memory as memstore
-        return bool(memstore.settings().get("checkEdits", True))
+        return bool(memstore.settings().get(key, True))
     except Exception:
         return True
+
+
+def lsp_problems(path: str) -> Optional[List[dict]]:
+    """Errors the edit introduced, from the project's language server — only one that already runs (skills/lsp).
+    None: no server could say this time (none running, busy, timed out) — unknown, which is not «no errors»."""
+    folder = os.path.join(PLUGIN, "skills", "lsp", "scripts")
+    if not os.path.isfile(os.path.join(folder, "lsp.py")) or not enabled("lspChecks"):
+        return None
+    try:
+        sys.path.insert(0, folder)
+        import lsp
+        return lsp.edit_problems(path, budget=8.0)
+    except Exception as e:  # optional, like the linters
+        print(f"check_edit: lsp: {e}", file=sys.stderr)
+        return None
 
 
 def protect_secrets() -> bool:
@@ -105,10 +122,14 @@ def sig(p: dict) -> str:
     return f"{p['tool']}|{p.get('code', '')}|{p['msg']}"
 
 
-def record(cid: str, path: str, problems: List[dict]) -> None:
-    """Store the check result and queue what the agent should hear about."""
+def record(cid: str, path: str, problems: List[dict], types: Optional[List[dict]] = None) -> None:
+    """Store the check result and queue what the agent should hear about. `types`: the language server's errors;
+    None when it couldn't say this time — then the last ones it reported still count (no false «fixed»)."""
     with State(cid) as st:
         prev = st["files"].get(path)
+        if types is None:
+            types = list((prev or {}).get("types") or [])
+        problems = problems + types
         syntax = [p for p in problems if p["kind"] == "syntax"]
         lint = [p for p in problems if p["kind"] != "syntax"]
         entry = {"path": path, "show": [], "lint_count": 0, "fixed": False}
@@ -120,7 +141,7 @@ def record(cid: str, path: str, problems: List[dict]) -> None:
             entry["show"] = syntax + [p for p in lint if sig(p) not in seen]
             entry["fixed"] = not problems and bool(prev.get("bad"))
         st["files"][path] = {"sigs": [sig(p) for p in problems], "bad": bool(problems), "syntax": syntax[:3],
-                             "checked": time.time()}
+                             "checked": time.time(), "types": types[:20]}
         if entry["show"] or entry["lint_count"] or entry["fixed"]:
             st["pending"] = [e for e in st["pending"] if e["path"] != path] + [entry]
 
@@ -177,7 +198,8 @@ def unresolved_syntax(payload: dict) -> List[tuple]:
             ws = workspace_of(path, payload)
             now = checks.check_file(path, project_root(path, ws) if ws else None) if os.path.isfile(path) else []
             syntax = [p for p in (now or []) if p["kind"] == "syntax"]
-            info.update({"syntax": syntax[:3], "bad": bool(now), "sigs": [sig(p) for p in now or []]})
+            now_all = (now or []) + list(info.get("types") or [])  # the language server's last word still stands
+            info.update({"syntax": syntax[:3], "bad": bool(now_all), "sigs": [sig(p) for p in now_all]})
             if syntax:
                 out.append((path, syntax[0]))
     return out
@@ -205,8 +227,9 @@ def main() -> None:
             root = project_root(path, ws)
             problems = checks.check_file(path, root)
             secrets = checks.secret_problems(path, root) if protect_secrets() and os.path.isfile(path) else []
-            if problems is not None or secrets:
-                record(cid, path, (problems or []) + secrets)
+            types = lsp_problems(path) if not any(p["kind"] == "syntax" for p in problems or []) else None
+            if problems is not None or secrets or types:
+                record(cid, path, (problems or []) + secrets, types)
     except Exception as e:  # never disturb the conversation
         print(f"check_edit: {e}", file=sys.stderr)
     sys.stdout.write("{}")

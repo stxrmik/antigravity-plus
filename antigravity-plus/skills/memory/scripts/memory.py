@@ -19,7 +19,7 @@ the line for a new memory, so the agent only writes the memory file itself.
   memory.py config [auto-memory on|off] [share-with-claude-code on|off] [recent-conversations N]
                    [finish-tasks on|off] [check-edits on|off] [auto-review on|off] [auto-verify on|off] [protect-secrets on|off]
                    [auto-setup on|off] [parallel-hints on|off] [speed-hints on|off] [fact-checks on|off]
-                   [objective-answers on|off] [auto-ci on|off] [git-checks on|off]
+                   [objective-answers on|off] [auto-ci on|off] [git-checks on|off] [lsp-checks on|off]
                    (settings of the whole plugin live here)
 
 Also imported by the hooks (session_start.py, guard.py, memory_sync.py). Stdlib only, Python 3.8+.
@@ -53,7 +53,7 @@ TYPES = ("user", "feedback", "project", "reference")
 DEFAULTS = {"autoMemory": True, "shareWithClaudeCode": True, "recentConversations": 3, "finishTasks": True,
             "checkEdits": True, "autoReview": True, "autoVerify": True, "protectSecrets": True, "autoSetup": True,
             "parallelHints": True, "speedHints": True, "factChecks": True, "objectiveAnswers": True, "autoCi": True,
-            "gitChecks": True, "updateCheck": True, "autoUpdate": False}
+            "gitChecks": True, "updateCheck": True, "autoUpdate": False, "lspChecks": True}
 
 MAX_FILE = 64_000            # bytes read per memory file
 INDEX_LINES = 200            # like Claude Code: only the head of MEMORY.md goes into the conversation
@@ -587,7 +587,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="auto-memory on|off, share-with-claude-code on|off, recent-conversations N, "
                          "finish-tasks on|off, check-edits on|off, auto-review on|off, auto-verify on|off, "
                          "protect-secrets on|off, auto-setup on|off, parallel-hints on|off, speed-hints on|off, "
-                         "fact-checks on|off, objective-answers on|off, auto-ci on|off, git-checks on|off")
+                         "fact-checks on|off, objective-answers on|off, auto-ci on|off, git-checks on|off, "
+                         "lsp-checks on|off")
     a = ap.parse_args(argv)
     ws = os.path.abspath(os.path.expanduser(getattr(a, "workspace", os.getcwd())))
 
@@ -614,7 +615,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "check-edits": "checkEdits", "auto-review": "autoReview", "auto-verify": "autoVerify",
                 "protect-secrets": "protectSecrets", "auto-setup": "autoSetup", "parallel-hints": "parallelHints",
                 "speed-hints": "speedHints", "fact-checks": "factChecks", "objective-answers": "objectiveAnswers",
-                "auto-ci": "autoCi", "git-checks": "gitChecks",
+                "auto-ci": "autoCi", "git-checks": "gitChecks", "lsp-checks": "lspChecks",
                 "update-check": "updateCheck", "auto-update": "autoUpdate"}
         p = a.pairs
         if len(p) % 2:
@@ -631,7 +632,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "recent-conversations N, finish-tasks on|off, check-edits on|off, auto-review on|off, "
                          "auto-verify on|off, protect-secrets on|off, auto-setup on|off, parallel-hints on|off, "
                          "speed-hints on|off, fact-checks on|off, objective-answers on|off, auto-ci on|off, "
-                         "git-checks on|off, update-check on|off, auto-update on|off)")
+                         "git-checks on|off, lsp-checks on|off, update-check on|off, auto-update on|off)")
         s = save_settings(**changes) if changes else settings()
         print(json.dumps(s, ensure_ascii=False, indent=2))
     return 0

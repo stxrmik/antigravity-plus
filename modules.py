@@ -187,6 +187,40 @@ MODULES: List[Dict] = [
         "needs": ["git", "gh?"],
     },
     {
+        "id": "lsp",
+        "title": {"ru": "Навигация по коду (LSP)", "en": "Code navigation (LSP)"},
+        "summary": {"ru": "где определено, кто вызывает, все места, тип — от языкового сервера, а не по rg",
+                    "en": "definitions, callers, every use, types — from the language server, not rg"},
+        "details": {
+            "ru": "Агент спрашивает языковой сервер проекта, а не ищет текстом: где определён символ, все места, где он "
+                  "используется (и в какой функции каждое), кто вызывает функцию — на несколько уровней вверх — и что "
+                  "вызывает она, тип и сигнатуру, оглавление большого файла, символ по имени, реализации, ошибки "
+                  "типов, переименование сразу во всех файлах. Перед сменой сигнатуры, переименованием или удалением "
+                  "агент сначала находит все места; места, которые сервер связать не смог (импорт через sys.path, "
+                  "устаревший индекс), называются отдельно — их агент проверяет сам. После правки уже запущенный "
+                  "сервер сообщает о новых ошибках типов. Серверы ставятся отдельно: pyright (Python), sourcekit-lsp "
+                  "(Swift; для приложения Xcode — xcode-build-server), kotlin-lsp (Kotlin), typescript-language-server, "
+                  "gopls, rust-analyzer, clangd и другие — `/lsp servers` подскажет команду. Сервер работает в фоне и "
+                  "останавливается после 10 минут без запросов (pyright — до 1–2 ГБ памяти, kotlin-lsp — 1–3 ГБ). "
+                  "Команда /lsp.",
+            "en": "The agent asks the project's language server instead of searching text: where a symbol is defined, "
+                  "every place it is used (and the function each one is in), who calls a function — several levels "
+                  "up — and what it calls, its type and signature, a big file's outline, a symbol by name, "
+                  "implementations, type errors, and a rename across all files at once. Before changing a signature, "
+                  "renaming or deleting, the agent finds every place first; places the server couldn't link (imports "
+                  "through sys.path, a stale index) are named separately for the agent to check. After an edit, a "
+                  "server that is already running reports the new type errors. Servers are installed separately: "
+                  "pyright (Python), sourcekit-lsp (Swift; an Xcode app also needs xcode-build-server), kotlin-lsp "
+                  "(Kotlin), typescript-language-server, gopls, rust-analyzer, clangd and more — `/lsp servers` "
+                  "gives the command. A server runs in the background and stops after 10 minutes without requests "
+                  "(pyright takes up to 1–2 GB of memory, kotlin-lsp 1–3 GB). Command /lsp.",
+        },
+        "skills": ["lsp"],
+        "rules": ["LSP.md"],
+        "off": {"lspChecks": False},
+        "needs": ["lsp"],
+    },
+    {
         "id": "deploy",
         "title": {"ru": "Деплой", "en": "Deploy"},
         "summary": {"ru": "что уйдёт на сервер и чем рискованно; бэкап, проверка, откат",

@@ -217,6 +217,28 @@ def speed_work(payload: dict) -> Optional[str]:
     return msg
 
 
+def lsp_work(payload: dict) -> Optional[str]:
+    """The agent searched code for symbol names with rg twice: once per conversation, the language server's commands
+    (skills/lsp; subagents included)."""
+    import os
+    st = conv.load(payload)
+    sym = ((st or {}).get("calls") or {}).get("sym") or {}
+    if not st or sym.get("n", 0) < 2 or st.get("lsp_told"):
+        return None
+    folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "skills", "lsp", "scripts")
+    import check_edit
+    if not os.path.isfile(os.path.join(folder, "lsp.py")) or not check_edit.enabled("lspChecks"):
+        return None
+    sys.path.insert(0, folder)
+    import lsp
+    ws = next((conv.to_path(w) for w in payload.get("workspacePaths") or [] if isinstance(w, str) and w), "")
+    msg = lsp.search_hint(ws, sym.get("names") or []) if ws else None
+    st["lsp_told"] = True
+    if isinstance(payload.get("conversationId"), str):
+        conv.store(payload["conversationId"], st)
+    return msg
+
+
 def memory_work(payload: dict) -> Optional[str]:
     """Memory for a new user message (main agent only; hooks/memory_hints.py): the saved memories it is about, and
     whether it sounds lasting enough to save along the way."""
@@ -261,8 +283,8 @@ def main() -> None:
         payload = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         payload = None
-    for part in (bypass_work, decide, edit_checks, other_agents, parallel_work, speed_work, memory_work, facts_work,
-                 objective_work) if isinstance(payload, dict) else ():
+    for part in (bypass_work, decide, edit_checks, other_agents, parallel_work, speed_work, lsp_work, memory_work,
+                 facts_work, objective_work) if isinstance(payload, dict) else ():
         try:
             msg = part(payload)
         except Exception as e:  # a hook must never break the conversation

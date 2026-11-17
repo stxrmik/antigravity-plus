@@ -28,6 +28,7 @@ changing other files of the same project right now. Finish your part completely 
 1. Read the brief, the project's `AGENTS.md`, and the code around your part: the interfaces you implement or call,
    2–3 similar files to copy the style from, existing tests.
 2. Implement the smallest complete solution: no placeholders, no TODO stubs, no refactoring outside your part.
+   Before changing a function's signature, find every caller with `lsp.py` — the `lsp` skill; the session context gives the exact command (`refs`); after editing, `check <files>` lists the type errors. <!-- needs:lsp -->
 3. Verify: run the project's checks that cover your files (tests, type-check, lint, build) — find the real commands
    in `AGENTS.md`, manifests or CI. Run or exercise the code you wrote. Fix what you broke. If something can't be
    checked here, say so.

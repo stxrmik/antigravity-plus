@@ -224,7 +224,8 @@ def off_line(key: str, warn: str) -> str:
 
 MODULE_KEYS = {"quality": ("checkEdits", "finishTasks", "autoReview", "autoVerify"),
                "facts": ("factChecks", "objectiveAnswers"), "memory": ("autoMemory", "recentConversations"),
-               "parallel": ("parallelHints",), "speed": ("speedHints",), "git": ("autoCi", "gitChecks")}
+               "parallel": ("parallelHints",), "speed": ("speedHints",), "git": ("autoCi", "gitChecks"),
+               "lsp": ("lspChecks",)}
 
 
 def modules_line() -> str:
@@ -794,6 +795,33 @@ def agents_status(ws: str) -> List[str]:
     return out
 
 
+def lsp_status(ws: str) -> List[str]:
+    """Language servers for /lsp: which languages of this project have one, and what runs in the background."""
+    if not os.path.isfile(os.path.join(PLUGIN, "skills", "lsp", "SKILL.md")):
+        return ["ℹ️ модуль «Навигация по коду (LSP)» не установлен"]
+    try:
+        sys.path.insert(0, os.path.join(PLUGIN, "skills", "lsp", "scripts"))
+        import lsp
+        lsp.apply_config()
+        out = []
+        langs = lsp.languages_in(ws)[:6]
+        for lang, n in langs:
+            sid = lsp.pick_server(lang)
+            if sid:
+                out.append(f"{OK} {lang} ({n} файлов): {sid} — {(lsp.server_command(sid) or ['?'])[0]}")
+            elif n >= 10:
+                out.append(f"{WARN} {lang} ({n} файлов): сервера нет — поставить: `{lsp.install_hint(lang)}`")
+        if not langs:
+            out.append("ℹ️ в этом проекте нет файлов языков, для которых бывают языковые серверы")
+        found = [sid for sid in lsp.SERVERS if lsp.server_command(sid)]
+        out.append(f"ℹ️ серверы на компьютере: {', '.join(found) if found else 'ни одного'}")
+        _code, running = lsp.cmd_status()
+        out.append("ℹ️ " + running.replace("\n- ", "\n  - "))
+        return out
+    except Exception as e:  # noqa: BLE001
+        return [f"{BAD} /lsp не загрузился: {e}"]
+
+
 def mobile_status(ws: str) -> List[str]:
     """iOS simulators and Android emulators for /mobile: what is installed, and whether touches will work."""
     try:
@@ -904,6 +932,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     rep += ["", "### Продолжение работы (/handoff)"] + continuity_status(ws)
     rep += ["", "### Проверка правок"] + checkers_status(ws)
     rep += ["", "### Агенты и доступ"] + agents_status(ws)
+    rep += ["", "### Навигация по коду (/lsp)"] + lsp_status(ws)
     rep += ["", "### Симулятор и эмулятор (/mobile)"] + mobile_status(ws)
     rep += ["", "### Последние срабатывания guard"] + guard_log()
     print("\n".join(rep))

@@ -18,6 +18,7 @@ execute code.
 ## Process
 1. **Learn the project's testing setup first:** framework and runner (from `AGENTS.md`, manifests, CI), test file locations and naming, fixtures/factories/helpers, mocking style, how to run a single test file. Read 2–3 existing tests near the target and mirror them exactly.
 2. **Understand the behavior under test** by reading the code and its callers. Identify the contract: inputs, outputs, side effects, errors.
+   Its callers and types: `lsp.py` — the `lsp` skill; the session context gives the exact command (`calls`, `hover`). <!-- needs:lsp -->
 3. **Design cases** (list them before writing):
    - happy path(s);
    - boundaries: empty, single, max, zero/negative, unicode, very long, null/undefined/None;
