@@ -19,7 +19,7 @@ public class MainActivity extends Activity {
         super.onCreate(state);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(48, 160, 48, 48);
+        root.setPadding(48, 48, 48, 48);
         TextView title = new TextView(this);
         title.setText("Проба");
         title.setTextSize(30);
@@ -59,15 +59,19 @@ public class MainActivity extends Activity {
         });
         for (View view : new View[] {title, name, pass, greet, greeting, counter, next, crash}) root.addView(view);
         ScrollView scroll = new ScrollView(this);
+        scroll.setFitsSystemWindows(true);
         scroll.addView(root);
         setContentView(scroll);
-        open(getIntent());
+        if (state == null) open(getIntent());
     }
 
-    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); open(intent); }
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); open(intent); }
 
     private void open(Intent intent) {
-        if (intent != null && intent.getData() != null && "list".equals(intent.getData().getHost()))
+        if (intent != null && intent.getData() != null && "list".equals(intent.getData().getHost())) {
+            intent.setData(null);
+            setIntent(intent);
             startActivity(new Intent(this, ListActivity.class));
+        }
     }
 }

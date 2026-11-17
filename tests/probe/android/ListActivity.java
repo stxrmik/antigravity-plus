@@ -12,7 +12,7 @@ public class ListActivity extends Activity {
         String[] rows = new String[60];
         for (int i = 0; i < rows.length; i++) rows[i] = "Строка " + i;
         ListView list = new ListView(this);
-        list.setPadding(0, 160, 0, 0);
+        list.setFitsSystemWindows(true);
         list.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, rows));
         setContentView(list);
     }

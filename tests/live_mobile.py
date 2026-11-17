@@ -178,13 +178,27 @@ def scenario(kind: str, build: str, keep: bool) -> None:
         shots = re.findall(r": (\S+\.png)", out)
         check("shot --dark: two pictures, in the current appearance and in the other one",
               code == 0 and len(shots) == 2 and all(mobile.png_size(p)[0] > 100 for p in shots) and ("Dark mode" in out or "Light mode" in out), out)
+        if kind == "android":
+            code, out = tool("shot", "--big-text", flag)
+            big = re.findall(r": (\S+\.png)", out)
+            check("shot --big-text: two pictures, normal and large text",
+                  code == 0 and len(big) == 2 and all(mobile.png_size(p)[0] > 100 for p in big) and "Large text" in out, out)
+            code, out = tool("set", "big-text", flag)
+            code2, out2 = tool("set", "normal-text", flag)
+            check("set big-text / normal-text: changes text size and restores it", code == code2 == 0, out + out2)
+            code, out = tool("grant", APP, "CAMERA", flag)
+            check("grant: grants a declared permission without an error", code == 0 and "Granted CAMERA" in out, out)
+            code, out = tool("grant", APP, "NOT_A_PERMISSION", flag)
+            check("grant of an unknown permission: reports the reason, not a stack frame",
+                  code == 1 and "Unknown permission" in out, out)
         code, out = tool("logs", APP, "--last", "5m", flag)
         said = "probe error log 1" in out and (kind == "android" or f"greeted {name}" in out)  # print() is kept on iOS only
         check("logs: what the app said in this run is there, the system's chatter isn't a flood", code == 0 and said and len(out.splitlines()) < 60, out)
-        tool("tap", "--text", "Упасть", flag)
+        tap_code, tap_out = tool("tap", "--text", "Упасть", flag)
         time.sleep(2.5)
         code, out = tool("logs", APP, "--last", "5m", flag)
-        check("a crash: logs name it and say the app isn't running", code == 0 and "probe crash" in out and "running" in out, out)
+        check("a crash: logs name it and say the app isn't running",
+              tap_code == 0 and code == 0 and "probe crash" in out and "running" in out, tap_out + out)
     finally:
         code, out = tool("uninstall", APP, flag)
         check("uninstall: the probe is removed", code == 0, out)

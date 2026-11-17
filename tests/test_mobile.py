@@ -164,13 +164,23 @@ ACTIVITIES = {("net.ani", "LAUNCHER"): ["net.ani/.MainActivity"], ("net.ani.tv",
               ("net.leaky", "LAUNCHER"): ["net.leaky/leakcanary.internal.activity.LeakLauncherActivity", "net.leaky/.MainActivity"],
               ("net.both", "LAUNCHER"): ["net.both/.PhoneActivity"], ("net.both", "LEANBACK"): ["net.both/.TvActivity"]}
 calls, devices, state = [], ["emulator-5554 device product:sdk model:sdk_gphone64 transport_id:1"], {
-    "pid": "222", "install": "Performing Streamed Install\nSuccess\n", "now": "11-10 10:05:00", "chars": "emulator", "locale": "", "ui": True}
+    "pid": "222", "install": "Performing Streamed Install\nSuccess\n", "now": "11-10 10:05:00", "chars": "emulator", "locale": "", "ui": True,
+    "uimode": "", "grant": {}, "kill_polls": 0}
 def fake_run(cmd, timeout=30.0, data=None, binary=False, env=None):
     calls.append(list(cmd)); a = cmd[1:]; line = " ".join(a)
     def r(text="", code=0, err=""): return code, (text.encode() if binary else text), err
     if cmd[0] != ADB:
         return ios_run(cmd, binary, env)
-    if a[:2] == ["devices", "-l"]: return r("List of devices attached\n" + "\n".join(devices) + "\n\n")
+    if a[:2] == ["devices", "-l"]:
+        if state["kill_polls"] > 0:
+            state["kill_polls"] -= 1
+            if state["kill_polls"] == 0:
+                devices[:] = [d for d in devices if not d.startswith("emulator-5554 ")]
+        return r("List of devices attached\n" + "\n".join(devices) + "\n\n")
+    if a[2:4] == ["emu", "kill"]:
+        if state["kill_polls"] == 0:
+            devices[:] = [d for d in devices if not d.startswith("emulator-5554 ")]
+        return r("OK\n")
     if "emu avd name" in line: return r("pixel\nOK\n")
     if "exec-out screencap" in line: return r() if not binary else (0, open(png, "rb").read(), "")
     if "uiautomator dump" in line: return r(UI if state["ui"] else "ERROR: could not get idle state.\n")
@@ -190,6 +200,8 @@ def fake_run(cmd, timeout=30.0, data=None, binary=False, env=None):
     if "logcat -b crash" in line: return r(CRASH)
     if "logcat" in line: return r("--------- beginning of main\nW/Ani ( 222): slow frame\nE/Ani ( 222): request failed 500\nE/Ani ( 222): request failed 500\n")
     if a[2:3] == ["install"]: return r(state["install"])
+    if "dumpsys uimode" in line: return r(state["uimode"])
+    if "pm grant" in line: return r(state["grant"].get(line.split()[-1], ""))
     if "cmd uimode night" in line: return r("Night mode: " + state.setdefault("night", "auto") + "\n") if line.endswith("night") else (state.update(night=a[-1].split()[-1]) or r("Night mode: " + state["night"] + "\n"))
     if "pm list packages" in line: return r("")
     if "settings get system font_scale" in line: return r(state.setdefault("font", "null") + "\n")
@@ -237,6 +249,9 @@ check("type --into a field that holds text: tap it, go to the end, backspace ove
       code == 0 and [ln for ln in shell_lines() if "uiautomator" not in ln][:1] == ["input tap 540 870"]
       and "input keyevent 123 && input keyevent " + " ".join(["67"] * 8) in shell_lines()
       and shell_lines()[-1] == "input text x", shell_lines())
+calls.clear(); code, text = out_of("type", "", "--into", "pass")
+check("type empty string clears the field without running an empty shell command",
+      code == 0 and any("keyevent 67" in ln for ln in shell_lines()) and "" not in shell_lines(), shell_lines())
 code, text = out_of("type", "привет")
 check("type with non-Latin text: adb can't, and it says so instead of typing garbage", code == 1 and "only Latin" in text and not any("привет" in ln for ln in shell_lines()), text)
 calls.clear(); code, text = out_of("launch", "net.ani.tv")
@@ -276,6 +291,21 @@ check("shot --dark: the other appearance, then back to what it was (here: automa
       and shell_lines().count("cmd uimode night yes") == 1, (text, shell_lines()))
 state["night"] = "custom_schedule"; code, text = out_of("shot", "--dark")
 check("…and back to a schedule, when that is what the device was on", code == 0 and "Dark mode: " in text and state["night"] == "custom_schedule", (text, state["night"])); state["night"] = "auto"
+state["uimode"] = "  mNightMode=0 (auto)\n  mCurUiMode=0x21 mSetUiMode=0x21\n"
+calls.clear(); code, text = out_of("shot", "--dark"); state["uimode"] = ""
+check("shot --dark under auto when currently dark (0x21): switches to light and restores auto",
+      code == 0 and "Light mode: " in text and state["night"] == "auto" and "cmd uimode night no" in shell_lines(), (text, shell_lines()))
+code, text = out_of("grant", "net.ani", "CAMERA")
+state["grant"]["android.permission.BOGUS"] = (
+    "Exception occurred while executing 'grant':\n"
+    "java.lang.IllegalArgumentException: Unknown permission android.permission.BOGUS\n"
+    "\tat com.android.server.pm.PackageManagerShellCommand.runGrantRevokePermission(PackageManagerShellCommand.java:2704)\n"
+    "\tat android.os.Binder.execTransact(Binder.java:1365)\n"
+)
+code2, text2 = out_of("grant", "net.ani", "BOGUS"); state["grant"].clear()
+check("grant: succeeds cleanly; on failure picks the exception reason rather than the stack trace tail",
+      code == 0 and "Granted CAMERA" in text and code2 == 1 and "Unknown permission android.permission.BOGUS" in text2
+      and "Binder.execTransact" not in text2, (text, text2))
 calls.clear(); out_of("ui")
 check("the element list is asked for through a file first (every device has that), in one call", [c[3:] for c in calls if "uiautomator" in " ".join(c)][:1]
       == [["shell", "uiautomator dump /data/local/tmp/agp-ui.xml >/dev/null 2>&1; cat /data/local/tmp/agp-ui.xml; rm -f /data/local/tmp/agp-ui.xml"]]
@@ -331,8 +361,10 @@ calls.clear(); code, text = out_of("shutdown")
 check("…and not an emulator the user started later under the same serial", code == 0 and "Nothing to shut down" in text and not any("kill" in c for c in calls), (text, calls[-2:]))
 mobile.remember("booted", "emulator-5554", {"pid": os.getpid(), "avd": "pixel"})
 saved_processes = compat.processes; compat.processes = lambda name: [(os.getpid(), "emulator -avd pixel -no-window")] if name == "-avd pixel" else []
-calls.clear(); code, text = out_of("shutdown"); compat.processes = saved_processes
-check("…but the one it did start is stopped", code == 0 and "Shut down: pixel" in text and calls[-1][-2:] == ["emu", "kill"], (text, calls[-1]))
+state["kill_polls"] = 2; real_sleep = mobile.time.sleep; mobile.time.sleep = lambda seconds: None
+calls.clear(); code, text = out_of("shutdown"); compat.processes = saved_processes; mobile.time.sleep = real_sleep
+check("…but the one it did start is stopped, waiting until adb no longer lists it",
+      code == 0 and "Shut down: pixel" in text and any(c[-2:] == ["emu", "kill"] for c in calls) and state["kill_polls"] == 0, (text, calls))
 devices[:] = ["emulator-5554 device product:sdk model:sdk_gphone64 transport_id:1"]
 
 # ── 4. iOS on a faked simctl and helper ──

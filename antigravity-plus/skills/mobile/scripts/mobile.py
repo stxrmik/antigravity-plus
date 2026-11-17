@@ -914,7 +914,9 @@ class Droid:
                 time.sleep(0.5)
             if el.get("value"):  # replace what is there: go to the end, then backspace over it
                 self.shell("input keyevent 123 && input keyevent " + " ".join(["67"] * min(len(el["value"]) + 2, 250)), timeout=60)
-        self.shell(" && ".join("input text " + shlex.quote(part) for part in android_text(text)), timeout=60)
+        parts = android_text(text)
+        if parts:
+            self.shell(" && ".join("input text " + shlex.quote(part) for part in parts), timeout=60)
         return text
 
     # ---- apps
@@ -987,7 +989,9 @@ class Droid:
         perm = what if "." in what else "android.permission." + what.upper()
         out = self.shell(f"pm grant {shlex.quote(app)} {shlex.quote(perm)}")
         if out.strip():
-            raise Fail("grant failed: " + out.strip().splitlines()[-1][:300])
+            lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            why = next((ln for ln in lines if not ln.startswith(("at ", "Exception occurred"))), lines[-1])
+            raise Fail("grant failed: " + why[:300])
 
     def logs(self, app: str, seconds: int, everything: bool = False) -> List[str]:
         out: List[str] = []
@@ -1035,6 +1039,13 @@ class Droid:
         custom_bedtime); "" when it doesn't say."""
         m = re.search(r"night mode:\s*(\w+)", self.shell("cmd uimode night"), re.I)
         return {"yes": "dark", "no": "light"}.get(m.group(1).lower(), m.group(1).lower()) if m else ""
+
+    def is_dark(self) -> bool:
+        """Whether the screen is currently in night mode (including under `auto` / schedules)."""
+        m = re.search(r"\bmCurUiMode=0x([0-9a-f]+)", self.shell("dumpsys uimode"), re.I)
+        if m:
+            return (int(m.group(1), 16) & 0x30) == 0x20
+        return self.appearance() == "dark"
 
     def set_appearance(self, mode: str) -> None:
         self.shell("cmd uimode night " + shlex.quote({"dark": "yes", "light": "no"}.get(mode, mode)))
@@ -1728,7 +1739,10 @@ def cmd_shutdown(args) -> int:
         if d["platform"] == "ios":
             simctl("shutdown", d["id"], timeout=60)
         else:
-            run([need_adb(), "-s", d["id"], "emu", "kill"], 30)
+            if run([need_adb(), "-s", d["id"], "emu", "kill"], 30)[0] == 0:
+                deadline = time.time() + 25
+                while time.time() < deadline and any(x["id"] == d["id"] for x in android_running()):
+                    time.sleep(0.5)
         mine.pop(d["id"], None)
         print(f"Shut down: {describe_device(d)}")
     st["booted"] = mine
@@ -1879,13 +1893,16 @@ def cmd_shot(args) -> int:
         if not was:
             print("Dark mode: this device doesn't say which appearance it's in, so it wasn't switched.")
         else:
-            other = "light" if was == "dark" else "dark"
+            currently_dark = was == "dark" or (was != "light" and getattr(dev, "is_dark", lambda: False)())
+            other = "light" if currently_dark else "dark"
             dev.set_appearance(other)
             time.sleep(1.5)
             try:
                 take(dev, other, label="Light mode" if other == "light" else "Dark mode")
             finally:
                 dev.set_appearance(was)
+                if dev.platform == "android":
+                    time.sleep(0.8)
     if args.big_text:
         was_size = dev.text_size()
         dev.set_text_size("big")
@@ -1894,6 +1911,8 @@ def cmd_shot(args) -> int:
             take(dev, "big-text", label="Large text")
         finally:
             dev.set_text_size(was_size or "normal")
+            if dev.platform == "android":
+                time.sleep(0.8)
     print("Look at " + ("each one" if args.dark or args.big_text else "it") + " (read_file): layout, cut-off or overlapping "
           "content, unreadable text, empty areas. Coordinates for tap and swipe are the picture's pixels.")
     return 0
