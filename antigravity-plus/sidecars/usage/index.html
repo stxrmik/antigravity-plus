@@ -403,7 +403,8 @@
   // Plan limits: one persistent card, refilled in place so polling never resets the rest of the view.
   const limitsCard = h('div', { class: 'card' });
   const WINDOWS = { '5h': '5 часов', weekly: 'Неделя' };
-  const family = (name) => (String(name || '').match(/gemini|claude|gpt/i) || [''])[0].toLowerCase();
+  // the quota group's description names Orchestrator (Carbon / Argon) itself, next to the Gemini families
+  const family = (name) => (String(name || '').match(/gemini|claude|gpt|orchestrator/i) || [''])[0].toLowerCase();
   const groupTitle = (g) => String(g.displayName || '').replace(/\s+models?$/i, '').replace(/\band\b/g, 'и');
   function fmtIn(iso) {
     const min = Math.max(1, Math.round((new Date(iso).getTime() - Date.now()) / 60000));

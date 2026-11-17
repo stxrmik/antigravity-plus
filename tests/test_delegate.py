@@ -28,7 +28,7 @@ subprocess.run(["git", "init", "-q"], cwd=ws); subprocess.run(["git", "add", "-A
 subprocess.run(["git", "commit", "-qm", "init"], cwd=ws)
 uri = lambda p: pathlib.Path(p).as_uri()
 EMPTY = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
-C1, C2, C3, C4, C5, C6, C7, C8 = (c * 8 + "-aaaa-4bbb-8ccc-" + c * 12 for c in "abcdef78")
+C1, C2, C3, C4, C5, C6, C7, C8, C9 = (c * 8 + "-aaaa-4bbb-8ccc-" + c * 12 for c in "abcdef789")
 SENT = os.path.join(SP, "agentapi-calls.jsonl")
 
 def step(kind, **kw):
@@ -81,6 +81,10 @@ def c7_steps():
         + ([step("PLANNER_RESPONSE", plannerResponse={"response": "Waiting for Claude Code's answer."})] if filled else [])
 BASE[C7] = []   # listed among the conversations; its steps come from c7_steps()
 BASE[C8] = BASE[C4][:]  # like C4: a record that once stepped over the question (fixed by a last look over the turn)
+# Orchestrator (Carbon): Carbon plans, then Gemini 4 Hydrogen carries the plan out (its metadata: answer())
+BASE[C9] = [step("USER_INPUT"), step("PLANNER_RESPONSE", plannerResponse={"response": ""}), step("SYSTEM_MESSAGE"),
+            step("PLANNER_RESPONSE", plannerResponse={"response": ""}),
+            step("PLANNER_RESPONSE", plannerResponse={"response": "STATUS: done\nCHANGED: src.py — d = 5\nCHECKS: none\nNOTES: none"})]
 cancelled = set()
 
 def messaged(cid):
@@ -96,7 +100,7 @@ def steps_of(cid):
 def status_of(cid):
     if cid == C7:
         return "CASCADE_RUN_STATUS_IDLE" if len(c7_steps()) == 5 else "CASCADE_RUN_STATUS_RUNNING"
-    return "CASCADE_RUN_STATUS_IDLE" if cid in (C1, C4, C8) or cid in cancelled else "CASCADE_RUN_STATUS_RUNNING"
+    return "CASCADE_RUN_STATUS_IDLE" if cid in (C1, C4, C8, C9) or cid in cancelled else "CASCADE_RUN_STATUS_RUNNING"
 
 iso = lambda secs: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + secs))
 # what the fake plan has left: weekly fraction (None = used up) and seconds until the week resets, per group
@@ -104,7 +108,8 @@ QUOTA = {"gemini": [0.9, 6 * 86400], "claude": [None, 22 * 3600]}
 MODELS = [("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)", "M437"), ("gemini-4-carbon-high", "Gemini 4 Carbon (High)", "M427"),
           ("gemini-4-hydrogen-low", "Gemini 4 Hydrogen (Low)", "M527"), ("gemini-4-hydrogen-medium", "Gemini 4 Hydrogen (Medium)", "M526"),
           ("gemini-4-hydrogen-high", "Gemini 4 Hydrogen (High)", "M525"), ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)", "M319"),
-          ("claude-sonnet-5-5-medium", "Claude Sonnet 5.5 (Medium)", "M404"), ("claude-sonnet-5-5-high", "Claude Sonnet 5.5 (High)", "M405")]
+          ("claude-sonnet-5-5-medium", "Claude Sonnet 5.5 (Medium)", "M404"), ("claude-sonnet-5-5-high", "Claude Sonnet 5.5 (High)", "M405"),
+          ("gemini-pro-orchestrator", "Orchestrator (Carbon)", "M667")]
 
 def answer(method, body):
     if method == "GetCascadeModelConfigData":
@@ -126,7 +131,8 @@ def answer(method, body):
                 five["disabled"] = True
             return [weekly, five]
         return {"response": {"groups": [
-            {"displayName": "Gemini Models", "description": "Models within this group: Gemini 4 Carbon, Gemini 4 Hydrogen, Gemini 3.8 Flash",
+            {"displayName": "Gemini Models", "description": "Models within this group: Gemini 4 Carbon, Gemini 4 Hydrogen, "
+                                                            "Orchestrator (Carbon), Gemini 3.8 Flash",
              "buckets": bucket("gemini")},
             {"displayName": "Claude and GPT models", "description": "Models within this group: Claude Sonnet 5.5, Claude Opus 5.5",
              "buckets": bucket("claude")}]}}
@@ -155,6 +161,15 @@ def answer(method, body):
         if body.get("cascadeId") == C6:  # a conversation some other tool started through agentapi
             return {"generatorMetadata": [{"stepIndices": [1], "chatModel": {"modelDisplayName": "Gemini 4 Argon (High)",
                                                                               "responseModel": "gemini-4-argon"}}]}
+        if body.get("cascadeId") == C9:  # Orchestrator, as Antigravity 2.32 records it: the planner, then Hydrogen
+            plan = {"modelDisplayName": "Orchestrator (Carbon)", "responseModel": "gemini-pro-orchestrator",
+                    "timeToFirstToken": "8s", "streamingDuration": "2s"}
+            work = {"modelDisplayName": "Gemini 4 Hydrogen (Orchestrator)", "responseModel": "gemini-flash-worker-agy",
+                    "timeToFirstToken": "2s", "streamingDuration": "1s"}
+            return {"generatorMetadata": [
+                {"stepIndices": [1], "chatModel": dict(plan, usage={"inputTokens": "3000", "outputTokens": "5000"})},
+                {"stepIndices": [3], "chatModel": dict(work, usage={"inputTokens": "500", "cacheReadTokens": "3000", "outputTokens": "200"})},
+                {"stepIndices": [4], "chatModel": dict(work, usage={"inputTokens": "400", "cacheReadTokens": "3500", "outputTokens": "300"})}]}
         timing = {"modelDisplayName": "Gemini 4 Hydrogen (High)", "timeToFirstToken": "1.5s", "streamingDuration": "0.5s"}
         return {"generatorMetadata": [{"stepIndices": [2], "chatModel": dict(timing, responseModel="gemini-4-hydrogen", usage={
             "inputTokens": "1000", "cacheReadTokens": "20000", "outputTokens": "300"})},
@@ -220,16 +235,20 @@ def agentapi_calls():
     except OSError:
         return []
 
-# models: quota and tiers — fast and standard on Gemini 4 Hydrogen; the Claude tier falls back to Gemini while its
-# quota is used up; speeds measured from the conversations' own timings
+# models: quota and tiers — fast and standard on Gemini 4 Hydrogen, strong on Orchestrator (Carbon); the Claude tier
+# falls back to Gemini while its quota is used up; speeds measured from the conversations' own timings
 code, out = run("models")
 check("models: quota per group and the tiers", code == 0 and "«Gemini Models»: week 90% left" in out
       and "fast      gemini-4-hydrogen-low" in out and "standard  gemini-4-hydrogen-high" in out
-      and "strong    gemini-4-carbon-high" in out and "first choice of fast" in out, out)
+      and "strong    gemini-pro-orchestrator" in out and "first choice of fast" in out, out)
 check("models: the Claude tier falls back to a Gemini model with quota left", "claude    gemini-4-carbon-high" in out
       and "Claude Sonnet 5.5 (High): quota used up — resets in 22 h → next with quota left" in out
       and "«Claude and GPT models»: used up — resets in 22 h → unavailable" in out, out)
-check("models: speed measured from recent conversations", f"Gemini 4 Hydrogen (High) · ≈2.0 s per call ({2 * len(BASE)} calls)" in out, out)
+check("models: speed measured from recent conversations",
+      f"Gemini 4 Hydrogen (High) · ≈2.0 s per call ({2 * len([c for c in BASE if c != C9])} calls)" in out, out)
+orch_line = next((ln for ln in out.splitlines() if ln.lstrip().startswith("gemini-pro-orchestrator")), "")
+check("models: Orchestrator's price is its planner's, its speed counts the Hydrogen calls that carry out the plan",
+      "Orchestrator (Carbon)" in orch_line and "$2/$10 per 1M · ≈3.0 s per call (3 calls)" in orch_line, orch_line)
 code, out = run("models", "--json")
 check("models --json", code == 0 and json.loads(out)["tiers"]["claude"] == "gemini-4-carbon-high"
       and json.loads(out)["states"]["Gemini Models"]["status"] == "ok", out)
@@ -265,10 +284,19 @@ check("report: the agent's words, links into files cut to their names", "CHANGED
 record = os.path.join(HOME, ".gemini", "antigravity-plus", "delegate", C1 + ".json")
 check("the task is recorded", os.path.isfile(record) and json.load(open(record, encoding="utf-8"))["state"] == "done")
 
+# Orchestrator (Carbon): its quota group is found by the whole label, and the report says which model made the calls
+code, out = run("run", "--model", "orchestrator", "--title", "Add d", stdin="Goal: d = 5.\n", env={"FAKE_CID": C9})
+check("run --model orchestrator: Orchestrator (Carbon), its id to agentapi",
+      code == 0 and f"Started Antigravity task {C9} — Orchestrator (Carbon)" in out
+      and agentapi_calls()[-1]["argv"][1] == "--model=gemini-pro-orchestrator", out)
+check("report: the calls split between the planner and Hydrogen, and the weekly Gemini limit",
+      "Model: Orchestrator (Carbon) · 3 model calls (1 on Orchestrator (Carbon), 2 on Gemini 4 Hydrogen (Orchestrator))" in out
+      and "weekly «Gemini Models» limit 90.0% → 90.0% left" in out, out)
+
 # an exhausted model gives way within its tier; an approval in Antigravity stops the wait with exit 2
 code, out = run("run", "--model", "claude-sonnet-5-5-high", "Write the docs.", env={"FAKE_CID": C2})
 check("run: an exhausted model gives way to the next of its tier", "Claude Sonnet 5.5 (High): quota used up" in out
-      and "→ took Gemini 4 Carbon (High) instead" in out and "(created for this folder)" not in out, out)
+      and "→ took Orchestrator (Carbon) instead" in out and "(created for this folder)" not in out, out)
 check("run: an approval it waits for → exit 2 with what and why", code == 2 and "is waiting for the user's approval" in out
       and "Waiting for: write_file /x/.git/hooks/pre-commit" in out and "Reason: 🛡️ guard says" in out
       and "Don't approve the agent's actions yourself" in out, out)
@@ -311,7 +339,7 @@ check("ask: a JSON line with the question and an id, then what to do meanwhile",
 code, out = run("tell", "The", "tests", "were", "red", "before", "me", cwd=SP)
 check("tell: words without quotes become one message", code == 0 and '"text": "The tests were red before me"' in out
       and '"to_claude_code": "note"' in out, out)
-code, out = run("ask", cwd=SP)
+code, out = run("ask", cwd=SP, stdin="")  # an empty stdin of its own: an inherited open pipe would keep it reading
 check("ask: nothing to send → exit 1 with the form", code == 1 and 'ask "' in out and "to_claude_code" not in out, out)
 code, out = run("ask", "Anyone?", cwd=SP, env={"ANTIGRAVITY_CONVERSATION_ID": "77777777-7777-4777-8777-777777777777"})
 check("ask from a conversation Claude Code didn't start: nothing sent, decide yourself",
@@ -440,12 +468,12 @@ check("budget: fast stays on Hydrogen — every quota it draws on is tight",
       "fast      gemini-4-hydrogen-low" in out and "Every quota this tier draws on is tight" in out, out)
 check("budget: standard and strong take the quota that would reset unused",
       "standard  claude-sonnet-5-5-medium" in out and "instead of Gemini 4 Hydrogen (High): «Claude and GPT models»" in out
-      and "strong    claude-sonnet-5-5-high" in out and "instead of Gemini 4 Carbon (High)" in out, out)
+      and "strong    claude-sonnet-5-5-high" in out and "instead of Orchestrator (Carbon)" in out, out)
 check("budget: advice per group", "«Claude and GPT models» has quota to spare" in out
       and "«Gemini Models» is tight" in out, out)
 code, out = run("run", "--model", "strong", "Port the parser.", env={"FAKE_CID": C1})
 check("run: strong goes to the Claude quota that would reset unused", agentapi_calls()[-1]["argv"][1] == "--model=claude-sonnet-5-5-high"
-      and "Why this model: instead of Gemini 4 Carbon (High)" in out, out)
+      and "Why this model: instead of Orchestrator (Carbon)" in out, out)
 code, out = run("run", "--model", "gemini-4-carbon-high", "Port the parser.", env={"FAKE_CID": C1})
 check("run: an exact model is kept, with a word about its tight quota", agentapi_calls()[-1]["argv"][1] == "--model=gemini-4-carbon-high"
       and "Why this model: your choice; «Gemini Models»" in out and "a lower tier would save it" in out, out)
@@ -597,6 +625,20 @@ check("usage (side panel, which can ask Antigravity): the model from Antigravity
       d.get("models") == ["Gemini 4 Argon (High)"] and d.get("model_guessed_calls") == 0, d)
 d = usage_json(C6)
 check("usage: … remembered for the next time", d.get("models") == ["Gemini 4 Argon (High)"], d)
+# Orchestrator: Antigravity's metadata names each call's model — the panel prices Hydrogen's calls as Hydrogen
+brain(C9, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-15T10:00:00Z",
+            "content": "<USER_REQUEST>\n" + delegate.compose("Goal: d = 5.", ws, ws) + "\n</USER_REQUEST>"},
+           call_row(1, 5000), {"step_index": 2, "type": "SYSTEM_MESSAGE", "created_at": "2026-11-15T10:00:02Z",
+                               "content": "<SYSTEM_MESSAGE>\n(the plan, in other words)\n</SYSTEM_MESSAGE>"},
+           call_row(3), call_row(4)])
+d = usage_json(C9)
+check("usage: Orchestrator with nothing to tell its calls apart → all at the planner's price, none unpriced",
+      d.get("models") == ["Orchestrator (Carbon)"] and not d.get("unpriced_models") and d.get("model_guessed_calls") == 0, d)
+d = usage_json(C9, {"ANTIGRAVITY_LS_ADDRESS": ENV["ANTIGRAVITY_LS_ADDRESS"], "ANTIGRAVITY_CSRF_TOKEN": "tok"})
+check("usage (side panel): Orchestrator's calls by the model Antigravity names for each",
+      [(c.get("step"), c.get("model")) for c in d.get("calls") or []]
+      == [(1, "Orchestrator (Carbon)"), (3, "Gemini 4 Hydrogen (Orchestrator)"), (4, "Gemini 4 Hydrogen (Orchestrator)")]
+      and d.get("models") == ["Orchestrator (Carbon)", "Gemini 4 Hydrogen (Orchestrator)"] and not d.get("unpriced_models"), d)
 r = subprocess.run([sys.executable, USAGE, "--recent", "5"], capture_output=True, text=True, encoding="utf-8")
 recent = json.loads(r.stdout or "{}")
 check("usage --recent: the panel's list and per-model totals carry the real models",

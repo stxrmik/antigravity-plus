@@ -111,14 +111,16 @@ WATCH_TIMEOUT = 1780  # `watch` stops on its own just before the Monitor tool's 
 # Tiers → model ids, best first; the limits left reorder them (see the docstring). Gemini 4 Hydrogen leads the fast
 # tiers: on the same small task (2026-11-14) Hydrogen (Low) took 20 s and 4 model calls, Gemini 3.8 Flash (Medium)
 # 25 s and 9 calls; Hydrogen streamed ~400–650 tokens/s, Flash ~130–310, both ~2–3 s to the first token, while
-# Gemini 4 Carbon (High) needs ~11 s to its first token (median of 687 calls).
+# Gemini 4 Carbon (High) needs ~11 s to its first token (median of 687 calls). Orchestrator (Carbon) leads strong: Carbon
+# plans, Hydrogen carries the plan out — on the same task (2026-11-17, six runs one at a time, all right) it took ~0.01%
+# of the weekly Gemini quota per run against ~0.07% for Carbon (High), in about ¾ of the model time.
 TIERS: Dict[str, List[str]] = {
     "fast": ["gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
              "claude-sonnet-5-5-low"],
     "standard": ["gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-carbon-medium",
                  "gemini-4-argon-medium", "claude-sonnet-5-5-medium"],
-    "strong": ["gemini-4-carbon-high", "gemini-4-argon-high", "gemini-4-hydrogen-xhigh", "claude-opus-5-5-high",
-               "claude-sonnet-5-5-high"],
+    "strong": ["gemini-pro-orchestrator", "gemini-4-carbon-high", "gemini-4-argon-high", "gemini-4-hydrogen-xhigh",
+               "claude-opus-5-5-high", "claude-sonnet-5-5-high"],
     "claude": ["claude-sonnet-5-5-high", "claude-opus-5-5-medium", "claude-sonnet-5-5-medium",
                "gemini-4-carbon-high"],
 }
@@ -371,8 +373,10 @@ def family(label: str) -> str:
 
 
 def group_of(label: str, groups: List[dict]) -> Optional[dict]:
-    fam = family(label)
-    return next((g for g in groups if fam and fam in g["models"]), None)
+    """The quota group a model draws on. Groups list families («gemini 4 carbon») and whole labels whose brackets
+    name a variant, not an effort level («orchestrator (carbon)»)."""
+    fam, whole = family(label), (label or "").strip().lower()
+    return next((g for g in groups if (whole and whole in g["models"]) or (fam and fam in g["models"])), None)
 
 
 def weekly_left(label: str, groups: List[dict]) -> Optional[float]:
@@ -432,7 +436,8 @@ STATE_TEXT = {"spend": "quota to spare — use it", "ok": "fine", "tight": "tigh
 def generic(tier: str, ms: List[dict], default: str) -> List[dict]:
     """When Antigravity has renamed its models: the closest ones by label, best first."""
     pats = {"fast": [r"hydrogen.*\(low\)", r"hydrogen.*\(medium\)", r"flash(?!.*lite).*\(medium\)", r"flash(?!.*lite)"],
-            "standard": [r"hydrogen.*\(high\)", ""], "strong": [r"carbon.*\(high\)", r"\(high\)"],
+            "standard": [r"hydrogen.*\(high\)", ""],
+            "strong": [r"^orchestrator \(carbon\)", r"carbon.*\(high\)", r"\(high\)"],
             "claude": [r"claude.*sonnet.*\(high\)", r"claude"]}[tier]
     out: List[dict] = []
     for p in pats:
@@ -636,11 +641,17 @@ def speeds(ls: LS) -> Dict[str, dict]:
             d = rpc(ls, "GetCascadeTrajectoryGeneratorMetadata", {"cascadeId": cid}, timeout=20)
         except SOFT:
             continue
+        planner = ""  # Orchestrator: its speed per call counts the Hydrogen calls that carry out its plan too
         for g in d.get("generatorMetadata") or []:
             cm = (g or {}).get("chatModel") or {} if isinstance(g, dict) else {}
             label, first = str(cm.get("modelDisplayName") or ""), seconds(cm.get("timeToFirstToken"))
+            if label.lower().startswith("orchestrator"):
+                planner = label
             if label and first > 0:
-                calls.setdefault(label, []).append((first, first + seconds(cm.get("streamingDuration"))))
+                row = (first, first + seconds(cm.get("streamingDuration")))
+                calls.setdefault(label, []).append(row)
+                if planner and label != planner and label.lower().endswith("(orchestrator)"):
+                    calls.setdefault(planner, []).append(row)
     out = {label: {"first": round(statistics.median(r[0] for r in rows), 1),
                    "call": round(statistics.median(r[1] for r in rows), 1), "n": len(rows)}
            for label, rows in calls.items()}
@@ -1244,7 +1255,7 @@ def usage(ls: LS, cid: str, turn: int) -> dict:
         d = rpc(ls, "GetCascadeTrajectoryGeneratorMetadata", {"cascadeId": cid}, timeout=60)
     except SOFT:
         return {}
-    tot = {"calls": 0, "input": 0, "cached": 0, "output": 0, "models": []}
+    tot = {"calls": 0, "input": 0, "cached": 0, "output": 0, "models": [], "by_label": {}}
     for g in d.get("generatorMetadata") or []:
         if not isinstance(g, dict):
             continue
@@ -1260,7 +1271,18 @@ def usage(ls: LS, cid: str, turn: int) -> dict:
         name = str(cm.get("responseModel") or "")
         if name and name not in tot["models"]:
             tot["models"].append(name)
+        label = str(cm.get("modelDisplayName") or name)  # Orchestrator: «Orchestrator (Carbon)» plans, Hydrogen carries out
+        if label:
+            tot["by_label"][label] = tot["by_label"].get(label, 0) + 1
     return tot
+
+
+def split_text(by_label: Dict[str, int]) -> str:
+    """« (3 on Orchestrator (Carbon), 11 on Gemini 4 Hydrogen (Orchestrator))» when more than one model made the
+    calls — Orchestrator's planner and the Hydrogen that carries out its plan; "" otherwise."""
+    if len(by_label) < 2:
+        return ""
+    return " (" + ", ".join(f"{n} on {label}" for label, n in by_label.items()) + ")"
 
 
 def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tuple[str, int]:
@@ -1318,7 +1340,8 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
     model = task.get("label") or ", ".join(use.get("models") or []) or "?"
     cost = f"Model: {model}"
     if use.get("calls"):
-        cost += (f" · {use['calls']} model calls · {kilo(use['input'] + use['cached'])} tokens read"
+        cost += (f" · {use['calls']} model calls{split_text(use.get('by_label') or {})}"
+                 f" · {kilo(use['input'] + use['cached'])} tokens read"
                  + (f" ({kilo(use['cached'])} from cache)" if use["cached"] else "") + f" · {kilo(use['output'])} written")
     before = task.get("quota_before")
     if isinstance(before, (int, float)) and task.get("label"):

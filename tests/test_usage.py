@@ -35,6 +35,12 @@ expected = [
     ("gemini-2.5-flash-lite", "gemini-2.5-flash-lite", 0.10, 0.40, 0.01, 168_000, 128_000),
     ("gemini-2.5-flash", "gemini-2.5-flash", 0.30, 2.50, 0.03, 300_000, 250_000),
     ("Claude Opus 5.5 (High)", "claude-opus-5.5", 4.0, 20.0, 0.20, 1_000_000, 840_000),
+    # Orchestrator: priced as its planner, the Hydrogen that carries out its plan as Hydrogen (see 5.)
+    ("Orchestrator (Carbon)", "gemini-4-carbon", 2.0, 10.0, 0.10, 300_000, 250_000),
+    ("Orchestrator (Argon)", "gemini-4-argon", 2.0, 10.0, 0.10, 300_000, 250_000),
+    ("gemini-pro-orchestrator", "gemini-4-carbon", 2.0, 10.0, 0.10, 300_000, 250_000),
+    ("gemini-pro-orchestrator-argon", "gemini-4-argon", 2.0, 10.0, 0.10, 300_000, 250_000),
+    ("Gemini 4 Hydrogen (Orchestrator)", "gemini-4-hydrogen", 1.50, 7.50, 0.075, 300_000, 250_000),
 ]
 ts_nov = dt.datetime(2026, 11, 14, 12, 0, tzinfo=dt.timezone.utc)
 for raw_name, want_id, want_in, want_out, want_cr, want_win, want_comp in expected:
@@ -116,6 +122,63 @@ html_body = open(html_out, encoding="utf-8").read() if os.path.isfile(html_out) 
 check("usage.py markdown & HTML include 300k limit and ~250k compaction",
       "230k / 300k" in md.stdout and "(сжатие ~250k)" in md.stdout and "сжатие ~250k" in html_body,
       md.stdout[:300])
+
+# 5. Orchestrator: the planner (Carbon) plans in plan mode and hands over with exit_plan_mode; Antigravity says the turn
+#    «runs on the execution model» and Hydrogen carries the plan out until it hands back with enter_plan_mode. Without
+#    the language server (its metadata names each call's model — test_delegate.py) these markers tell them apart.
+for key in ("ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVITY_CSRF_TOKEN"):
+    os.environ.pop(key, None)
+ocid = "22222222-3333-4444-5555-666666666666"
+ologs = os.path.join(SP, "brain", ocid, ".system_generated", "logs")
+os.makedirs(ologs, exist_ok=True)
+
+
+def call_step(i, tools, out=100):
+    return {"step_index": i, "type": "PLANNER_RESPONSE", "created_at": "2026-11-17T10:00:%02dZ" % i, "input_tokens": 1000,
+            "cache_read_tokens": 0, "output_tokens": out, "tool_calls": [{"name": t, "args": {}} for t in tools]}
+
+
+orch = [
+    {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-17T10:00:00Z",
+     "content": "<USER_REQUEST>Add a CLI</USER_REQUEST>\nModel Selection` from None to Orchestrator (Carbon)."},
+    {"step_index": 1, "type": "SYSTEM_MESSAGE", "source": "SYSTEM_SDK", "created_at": "2026-11-17T10:00:01Z",
+     "content": "The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\nThe following system "
+                "message was injected by a SessionStart hook:\n<memory>A note: the hand-over says «Plan mode is off: this "
+                "turn runs on the execution model».</memory>\n</SYSTEM_MESSAGE>"},  # quoted, not a hand-over
+    call_step(2, ["read_file"]), call_step(3, ["exit_plan_mode"], out=5000),
+    {"step_index": 4, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "created_at": "2026-11-17T10:00:04Z",
+     "content": "The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as "
+                "important information to pay attention to.\n\n<SYSTEM_MESSAGE>\nPlan mode is off: this turn runs on "
+                "the execution model. Carry out the plan below now.\n<plan>…</plan>\n</SYSTEM_MESSAGE>"},
+    call_step(5, ["write_file"]), call_step(6, ["run_command"]), call_step(7, ["enter_plan_mode"]),
+    call_step(8, ["read_file"]),
+    {"step_index": 9, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-17T10:00:09Z",
+     "content": "<USER_REQUEST>And a --version flag</USER_REQUEST>"},
+    call_step(10, []),
+    {"step_index": 11, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "created_at": "2026-11-17T10:00:11Z",
+     "content": "<SYSTEM_MESSAGE>\nPlan mode is off: this turn runs on the execution model.\n</SYSTEM_MESSAGE>"},
+    call_step(12, []),
+    # seen live: a follow-up from Claude Code (agentapi send-message) is taken by Hydrogen, not handed back
+    {"step_index": 13, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "created_at": "2026-11-17T10:00:13Z",
+     "content": "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-17T10:00:13Z sender=system priority=MESSAGE_PRIORITY_HIGH "
+                "content=Follow-up from Claude Code: Add a --version flag.\n</SYSTEM_MESSAGE>"},
+    call_step(14, ["edit_file"]),
+]
+with open(os.path.join(ologs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s, ensure_ascii=False) for s in orch) + "\n")
+osess = usage.parse_session(ocid, ologs, p, [SP])
+plan_m, work_m = "Orchestrator (Carbon)", "Gemini 4 Hydrogen (Orchestrator)"
+check("Orchestrator: planner's calls (a quoted hand-over doesn't count), then Hydrogen's from the hand-over to "
+      "enter_plan_mode, the planner on a new user message, Hydrogen again through a follow-up from Claude Code",
+      [(c.step, c.model) for c in osess.calls] == [(2, plan_m), (3, plan_m), (5, work_m), (6, work_m), (7, work_m),
+                                                   (8, plan_m), (10, plan_m), (12, work_m), (14, work_m)]
+      and osess.models == [plan_m, work_m] and len(osess.turns) == 3, [(c.step, c.model) for c in osess.calls])
+want = 3 * (0.002 + 0.001) + (0.002 + 0.05) + 5 * (0.0015 + 0.00075)  # Carbon $2/$10, Hydrogen $1.5/$7.5 per 1M
+check("Orchestrator: each call at its own model's price", abs(sum(c.cost for c in osess.calls) - want) < 1e-9,
+      sum(c.cost for c in osess.calls))
+omd = usage.render_markdown(osess, p)
+check("Orchestrator: the report splits the calls by model",
+      f"**По моделям:** {plan_m} — 4 вызова" in omd and f"{work_m} — 5 вызовов" in omd, omd[:600])
 
 print("ALL OK" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

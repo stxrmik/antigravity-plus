@@ -46,6 +46,13 @@ DELEGATED_MARK = "[Delegated from Claude Code]"  # = hooks/conversation.py DELEG
 FOLLOW_UP_RE = re.compile(r"sender=system\b.{0,200}?content=Follow-up from Claude Code:\s*(.*?)"
                           r"(?:\n\n\(Same rules as before|</SYSTEM_MESSAGE>|$)", re.S)
 ALIASES = ("flash_lite", "flash", "pro")
+# Orchestrator (Carbon / Argon), seen on Antigravity 2.32: the planner works in plan mode and hands its plan over with
+# exit_plan_mode; Antigravity then says «Plan mode is off: this turn runs on the execution model …», and Gemini 4
+# Hydrogen carries the plan out until it hands back with enter_plan_mode. Antigravity's metadata names each call's
+# model; the transcript doesn't, so where the language server can't be asked, these markers tell the two apart. The
+# hand-over must open its <SYSTEM_MESSAGE>: a session context quoting a note about it doesn't count.
+EXECUTION_RE = re.compile(r"<SYSTEM_MESSAGE>\s*[^<]{0,200}?\bruns on the execution model\b", re.I)
+EXECUTOR = "Gemini 4 Hydrogen (Orchestrator)"  # the executor's calls, named as in Antigravity's metadata
 
 
 # ─────────────────────────────── data model ────────────────────────────────
@@ -171,6 +178,7 @@ class Pricing:
 
 def normalize_model(name: str) -> str:
     n = (name or "").strip().lower()
+    n = re.sub(r"\borchestrator\s*\(\s*([a-z]+)\s*\)", r"orchestrator-\1", n)  # «Orchestrator (Argon)»: a variant
     n = re.sub(r"\(.*?\)", "", n)  # drop "(High)", "(Thinking)" …
     n = re.sub(r"^(anthropic|google|models)/", "", n)
     n = re.sub(r"\s+", "-", n.strip())
@@ -283,12 +291,12 @@ def _remember_model(conv_id: str, model: str) -> None:
         pass
 
 
-def _ls_model(conv_id: str) -> str:
-    """The model Antigravity ran a conversation's first call on («Gemini 4 Carbon (High)»), asked from its language
-    server — only where Antigravity hands over the address and token (its side panel). "" when it can't tell."""
+def _ls_metadata(conv_id: str) -> List[dict]:
+    """A conversation's model calls as Antigravity's language server records them (generatorMetadata) — only where
+    Antigravity hands over the address and token (its side panel). [] when it can't be asked."""
     addr, token = os.environ.get("ANTIGRAVITY_LS_ADDRESS", ""), os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "")
-    if not addr or not token:
-        return ""
+    if not addr or not token or not UUID_RE.fullmatch(conv_id or ""):
+        return []
     import urllib.request
     base = addr if re.match(r"^https?://", addr) else f"http://{addr}"
     req = urllib.request.Request(f"{base}/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata",
@@ -298,14 +306,38 @@ def _ls_model(conv_id: str) -> str:
     try:
         with urllib.request.urlopen(req, timeout=3) as r:
             data = json.loads(r.read().decode("utf-8") or "{}")
-    except Exception:  # unreachable, refused or unreadable: the caller falls back to the default model
-        return ""
-    for g in (data.get("generatorMetadata") or []) if isinstance(data, dict) else []:
-        cm = (g or {}).get("chatModel") if isinstance(g, dict) else None
-        name = str((cm or {}).get("modelDisplayName") or (cm or {}).get("responseModel") or "") if isinstance(cm, dict) else ""
-        if name:
-            return name
-    return ""
+    except Exception:  # unreachable, refused or unreadable: the caller goes on without it
+        return []
+    found = data.get("generatorMetadata") if isinstance(data, dict) else None
+    return [g for g in found if isinstance(g, dict)] if isinstance(found, list) else []
+
+
+def _call_model(g: dict) -> str:
+    """The model of one recorded call: its display name («Gemini 4 Hydrogen (Orchestrator)»), else the backend id."""
+    cm = g.get("chatModel")
+    return str(cm.get("modelDisplayName") or cm.get("responseModel") or "") if isinstance(cm, dict) else ""
+
+
+def _ls_model(conv_id: str) -> str:
+    """The model Antigravity ran a conversation's first call on («Gemini 4 Carbon (High)»). "" when it can't tell."""
+    return next((name for name in map(_call_model, _ls_metadata(conv_id)) if name), "")
+
+
+def _ls_step_models(conv_id: str) -> Dict[int, str]:
+    """Step index → the model that produced it, from Antigravity's metadata ({} when it can't be asked). A call's
+    stepIndices start with its own PLANNER_RESPONSE step, then the tool steps it asked for."""
+    out: Dict[int, str] = {}
+    for g in _ls_metadata(conv_id):
+        name = _call_model(g)
+        for i in g.get("stepIndices") or []:
+            if name and str(i).isdigit():
+                out.setdefault(int(i), name)
+    return out
+
+
+def orchestrated(model: str) -> bool:
+    """Orchestrator (Carbon / Argon): a planner that hands routine steps to Gemini 4 Hydrogen."""
+    return "orchestrator" in normalize_model(model)
 
 
 def started_on(conv_id: str, pricing: Pricing) -> str:
@@ -344,6 +376,8 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
     s = Session(conv_id=conv_id, path=logs_dir)
     model = inherited_model or ""
     asked_antigravity = False  # the model of an agentapi-started conversation is looked up once, at its first call
+    executing = False  # Orchestrator: Hydrogen carries out the planner's plan (see EXECUTION_RE)
+    step_models: Optional[Dict[int, str]] = None  # Orchestrator: each call's model from Antigravity, asked once
     turn: Optional[Turn] = None
     pending_subagents: List[dict] = []
     sub_ids: List[Tuple[str, dict]] = []
@@ -371,14 +405,18 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
                 if not s.title:
                     s.title = short(text, 80)
             pending_subagents = []
+            executing = False
             continue
+
+        if typ == "SYSTEM_MESSAGE" and EXECUTION_RE.search(content):
+            executing = True  # the planner's plan went to the executor
 
         if typ == "SYSTEM_MESSAGE" and "Follow-up from Claude Code:" in content:
             fm = FOLLOW_UP_RE.search(content)
             if fm:  # more work Claude Code sent into the same conversation: a turn of its own
                 turn = Turn(idx=len(s.turns) + 1, text="Claude Code: " + fm.group(1).strip(), ts=ts)
                 s.turns.append(turn)
-                pending_subagents = []
+                pending_subagents = []  # (a message through agentapi doesn't hand Orchestrator back to its planner)
                 continue
 
         if typ == "PLANNER_RESPONSE":
@@ -396,7 +434,12 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
                     model = started_on(conv_id, pricing)
                 if not model:
                     s.guessed_calls += 1
-                c = Call(step=st.get("step_index", -1), ts=ts, model=model or pricing.cfg.get("default_model", "?"),
+                call_model = model
+                if model and orchestrated(model):  # the planner's own calls, or Hydrogen's carrying out its plan
+                    if step_models is None:
+                        step_models = _ls_step_models(conv_id)
+                    call_model = step_models.get(st.get("step_index", -1)) or (EXECUTOR if executing else model)
+                c = Call(step=st.get("step_index", -1), ts=ts, model=call_model or pricing.cfg.get("default_model", "?"),
                          input=int(st.get("input_tokens") or 0), cache_read=int(st.get("cache_read_tokens") or 0),
                          output=int(st.get("output_tokens") or 0), tools=tools, turn=turn.idx, guessed=not model)
                 pricing.price_call(c)
@@ -404,6 +447,8 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
                 turn.calls.append(c)
                 if c.model not in s.models:
                     s.models.append(c.model)
+            if "enter_plan_mode" in tools:
+                executing = False  # handed back to the planner
             continue
 
         # tool results that follow an invoke_subagent call → look for conversation ids
@@ -582,6 +627,12 @@ def render_markdown(s: Session, pricing: Pricing, max_turns: int = 10) -> str:
                    f"{last.prompt / win:.0%}{comp_note} · пик {k(peak.prompt)}")
         avg_turn = grand.cost / max(1, len(s.turns))
         out.append(f"**Средняя цена хода:** {usd(avg_turn)} · **Средний вывод на вызов:** {k(own.output / max(1, own.calls))}")
+        per_model: Dict[str, Totals] = {}
+        for c in s.calls:
+            per_model.setdefault(c.model, Totals()).add(c)
+        if len(per_model) > 1:  # e.g. Orchestrator: its planner, and the Hydrogen that carried out the plan
+            out.append("**По моделям:** " + " · ".join(
+                f"{m} — {ru_plural(t.calls, 'вызов', 'вызова', 'вызовов')}, {usd(t.cost)}" for m, t in per_model.items()))
     out.append("")
 
     if s.turns:
@@ -814,7 +865,7 @@ def render_all(roots: List[str], pricing: Pricing, days: Optional[int], limit: i
 # ─────────────────────────────── JSON (side panel) ─────────────────────────
 
 CACHE_PATH = os.path.expanduser("~/.gemini/antigravity-plus/usage-cache.json")
-CACHE_VERSION = 4  # 4: agentapi conversations get their real model and Claude Code tasks their title
+CACHE_VERSION = 5  # 4: agentapi conversations get their real model and Claude Code tasks their title; 5: Orchestrator
 
 
 def _iso(ts: Optional[dt.datetime]) -> Optional[str]:

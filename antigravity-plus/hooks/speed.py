@@ -47,7 +47,7 @@ def ctx_limits(model: str) -> Tuple[int, int, str]:
     m = (model or "").lower()
     if re.search(r"flash[-_ ]?lite", m):
         return 80_000, 110_000, " (~128k compaction, ~168k limit)"
-    if "gemini" in m:
+    if "gemini" in m or "orchestrator" in m:  # Orchestrator: Carbon or Argon with Hydrogen, the same Gemini limits
         return CTX_WARN, CTX_HIGH, " (~250k compaction, ~300k limit)"
     if re.search(r"(opus|sonnet)[- ]?5[.-]5", m):
         return 180_000, 720_000, " (~840k compaction)"

@@ -296,13 +296,15 @@ MODULES: List[Dict] = [
                     "en": "Claude Code hands tasks to Antigravity agents, picking the model by the limits"},
         "details": {
             "ru": "Навык antigravity для Claude Code (~/.claude/skills): Claude Code сам отдаёт агентам Antigravity "
-                  "лёгкие и объёмные задачи — на Gemini 4 Hydrogen, Gemini 4 Carbon или Claude в Antigravity, выбирая "
+                  "лёгкие и объёмные задачи — на Gemini 4 Hydrogen, Orchestrator (Carbon с Hydrogen), Gemini 4 Carbon "
+                  "или Claude в Antigravity, выбирая "
                   "модель по оставшимся лимитам обеих сторон, — и проверяет результат. По ходу работы они "
                   "переговариваются: агент спрашивает Claude Code и сообщает ему важное, Claude Code отвечает и "
                   "поправляет агента, не дожидаясь конца. Работа агента идёт из квоты Antigravity, а не из лимита "
                   "Claude Code. Ставится, только если на компьютере есть Claude Code.",
             "en": "The antigravity skill for Claude Code (~/.claude/skills): Claude Code hands light and bulky tasks "
-                  "to Antigravity agents — on Gemini 4 Hydrogen, Gemini 4 Carbon or Claude in Antigravity, picking "
+                  "to Antigravity agents — on Gemini 4 Hydrogen, Orchestrator (Carbon with Hydrogen), Gemini 4 Carbon "
+                  "or Claude in Antigravity, picking "
                   "the model from both sides' limits — and checks the result. They talk while they work: the agent "
                   "asks Claude Code and tells it what matters, Claude Code answers and steers it without waiting for "
                   "the end. The agent's work comes out of the Antigravity quota instead of Claude Code's limit. "
