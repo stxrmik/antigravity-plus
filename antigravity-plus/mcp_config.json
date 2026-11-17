@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tools": {
+      "command": "python3",
+      "args": ["-X", "utf8", "${PLUGIN_ROOT}/mcp/server.py"]
+    }
+  }
+}

@@ -64,7 +64,8 @@ SECRETS = [
 # Files that hold secrets by their name (the guard won't print them; /git-init keeps them out of the first commit).
 SECRET_FILE = re.compile(r"(^|/)(\.env(\.(?!example\b|sample\b|template\b|dist\b)[\w.-]+)?|[\w.-]+\.env|"
                          r"id_(rsa|ed25519|ecdsa|dsa)|[\w.-]+\.(pem|key|p12|pfx|keystore|jks)|credentials\.json|"
-                         r"secrets?\.(ya?ml|json|toml))$", re.I)
+                         r"secrets?\.(ya?ml|json|toml)|\.gemini/antigravity-plus/(?:lsp/[^/]+\.json|quota\.json))$",
+                         re.I)
 PLACEHOLDER = re.compile(r"(?i)example|changeme|change_me|your[_-]|xxx|\*\*\*|<[^>]*>|\$\{|\{\{|\$[A-Z_]|placeholder|"
                          r"dummy|fake|sample|redacted|скрыт|getenv|environ|process\.env")
 

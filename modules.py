@@ -30,6 +30,8 @@ MODULES: List[Dict] = [
                   "CLAUDE.md с @импортами и .claude/rules, — а ваши указания («ничего не пушь») снова видит после "
                   "каждого сжатия контекста, так что они не тонут в длинных разговорах. Правила работы: понять запрос, "
                   "спланировать, сделать, проверить; несколько агентов в одном проекте не затирают правки друг друга. "
+                  "Встроенный MCP-сервер (`antigravity-plus_tools`) отдаёт инструменты со строгими аргументами: "
+                  "`lsp_*`, `memory_search`, `git_state`, `quota`. "
                   "Команды: /init (правила проекта в AGENTS.md), /remember, /settings, /doctor, /hooks, /update (новая версия "
                   "одной командой: раз в сутки агент сам скажет, что она вышла; откат одной командой). "
                   "Обязательна: остальные модули работают поверх неё.",
@@ -41,7 +43,8 @@ MODULES: List[Dict] = [
                   "project's rules — AGENTS.md, plus CLAUDE.md with its @imports and .claude/rules — and sees your "
                   "instructions («don't push anything») again after every context compaction, so they don't get lost "
                   "in long conversations. Working rules: understand the request, plan, do, verify; several agents on "
-                  "one project don't overwrite each other's edits. Commands: /init (project rules in AGENTS.md), "
+                  "one project don't overwrite each other's edits. A bundled MCP server (`antigravity-plus_tools`) "
+                  "exposes typed tools (`lsp_*`, `memory_search`, `git_state`, `quota`). Commands: /init (project rules in AGENTS.md), "
                   "/remember, /settings, /doctor, /hooks, /update (a new release in one command: once a day the agent tells you "
                   "one is out; rolls back in one command). Required: every other module builds on it.",
         },
@@ -58,18 +61,18 @@ MODULES: List[Dict] = [
                   "проекта (ruff, eslint, swiftlint, shellcheck) — ошибка доходит до агента следующим шагом, а не через "
                   "три. Агент не закончит ход, пока в task.md остались пункты, изменённый код не проверен тестами или "
                   "сборкой, а после крупной правки сам запускает ревью. Команды: /review (два ревьюера с "
-                  "перепроверкой находок), /security-review (аудит с проверкой эксплуатируемости), /simplify; "
-                  "субагенты code-reviewer, security-auditor, debugger, test-writer. Без модуля правки не "
-                  "проверяются, и агент может остановиться на полпути.",
+                  "перепроверкой находок), /security-review (аудит с проверкой эксплуатируемости), /simplify, /deps "
+                  "(аудит уязвимостей и устаревших зависимостей); субагенты code-reviewer, security-auditor, debugger, "
+                  "test-writer. Без модуля правки не проверяются, и агент может остановиться на полпути.",
             "en": "Every edit is checked at once: Python, JS/TS, Swift, shell, JSON, YAML and plist syntax plus the "
                   "project's linters (ruff, eslint, swiftlint, shellcheck) — an error reaches the agent at the next "
                   "step, not three steps later. The agent can't end its turn while task.md has open items or changed "
                   "code hasn't been run through tests or a build, and it reviews big changes on its own. Commands: "
                   "/review (two reviewers, findings re-checked), /security-review (an audit that checks "
-                  "exploitability), /simplify; subagents code-reviewer, security-auditor, debugger, test-writer. "
-                  "Without it edits aren't checked and the agent may stop halfway.",
+                  "exploitability), /simplify, /deps (vulnerability and outdated dependency audit); subagents "
+                  "code-reviewer, security-auditor, debugger, test-writer. Without it edits aren't checked and the agent may stop halfway.",
         },
-        "skills": ["review", "security-review", "simplify"],
+        "skills": ["review", "security-review", "simplify", "deps"],
         "agents": ["code-reviewer", "security-auditor", "debugger", "test-writer"],
         "off": {"checkEdits": False, "finishTasks": False, "autoReview": False, "autoVerify": False},
     },
@@ -127,12 +130,14 @@ MODULES: List[Dict] = [
         "details": {
             "ru": "Агент сам раздаёт независимые части задачи субагентам одним шагом и продолжает свою часть, а не "
                   "ждёт: explorer ищет по коду, researcher — документацию и API (оба на быстрой модели), worker делает "
-                  "часть реализации в своих файлах. Пока они работают, агент их не опрашивает и не простаивает; "
+                  "часть реализации в своих файлах. Для долгой многоролевой работы понимает нативный Swarm (`swarm`) "
+                  "и доску сообщений. Пока помощники работают, агент их не опрашивает и не простаивает; "
                   "отчёты перепроверяет, прежде чем на них опираться. Команда /parallel с шаблонами заданий. Тратит "
                   "больше квоты в час, зато заканчивает быстрее.",
             "en": "The agent hands independent parts of a task to subagents in one step and keeps working on its own "
                   "part instead of waiting: explorer searches the code, researcher the docs and APIs (both on a fast "
-                  "model), worker builds a part in its own files. Meanwhile it neither polls nor idles, and it checks "
+                  "model), worker builds a part in its own files; for long multi-role work it also drives native Swarm "
+                  "(`swarm`) on the shared board. Meanwhile it neither polls nor idles, and it checks "
                   "their reports before building on them. Command /parallel with brief templates. Spends more quota "
                   "per hour, finishes sooner.",
         },
@@ -143,20 +148,22 @@ MODULES: List[Dict] = [
     },
     {
         "id": "speed",
-        "title": {"ru": "Скорость и контекст", "en": "Speed and context"},
-        "summary": {"ru": "меньше лишних шагов: песочница, бюджет контекста, циклы ошибок",
-                    "en": "fewer wasted steps: the sandbox, the context budget, loops of errors"},
+        "title": {"ru": "Скорость, контекст и квота", "en": "Speed, context and quota"},
+        "summary": {"ru": "меньше лишних шагов: песочница, бюджет контекста, циклы ошибок, лимиты плана",
+                    "en": "fewer wasted steps: the sandbox, context budget, loops of errors, plan limits"},
         "details": {
             "ru": "Команды, которые падали в песочнице терминала, запоминаются по проекту и дальше сразу запускаются "
                   "вне её. Агент видит, сколько контекста уже занято, и читает большие файлы по частям; после трёх "
-                  "неудачных команд подряд меняет подход, а не повторяет одно и то же. Только подсказки агенту, "
-                  "своих команд нет.",
+                  "неудачных команд подряд меняет подход, а не повторяет одно и то же; а когда квота текущей группы "
+                  "моделей подходит к концу, получает подсказку с остатком и советами сэкономить. Только подсказки "
+                  "агенту, своих команд нет.",
             "en": "Commands that failed inside the terminal sandbox are remembered per project and run outside it "
                   "from then on. The agent sees how full its context is and reads big files in parts; after three "
-                  "failing commands in a row it changes its approach instead of repeating itself. Hints to the agent "
-                  "only, no commands of its own.",
+                  "failing commands in a row it changes its approach instead of repeating itself; and when the current "
+                  "model group's quota gets short, it hears the remaining numbers and ways to stretch them. Hints to "
+                  "the agent only, no commands of its own.",
         },
-        "off": {"speedHints": False},
+        "off": {"speedHints": False, "quotaHints": False},
     },
     {
         "id": "git",
@@ -170,18 +177,20 @@ MODULES: List[Dict] = [
                   "и комментарии, релизы, Actions. Команды, которые подвесили бы агента (редактор, пейджер, запрос "
                   "пароля), заменяются неинтерактивными, а незаконченный rebase или merge и маркеры конфликтов не "
                   "остаются после хода. Команды: /git (справочник и снимок состояния), /commit, /pr, /fix-issue, "
-                  "/ci (ждёт CI после пуша без опроса и достаёт логи падений), /git-init (репозиторий с безопасным "
-                  "первым коммитом). Нужен git; для GitHub — gh с выполненным gh auth login.",
+                  "/ci (ждёт CI после пуша без опроса и достаёт логи падений), /release (поднятие версии, заметки, тег "
+                  "и GitHub-релиз), /git-init (репозиторий с безопасным первым коммитом). Нужен git; для GitHub — gh "
+                  "с выполненным gh auth login.",
             "en": "The agent handles git and GitHub with confidence: one command shows the repository's state; it "
                   "manages branches, syncs with the remote, resolves merge conflicts, searches history (log -S, "
                   "blame, bisect), undoes changes safely and works with GitHub through gh — issues, PRs, reviews and "
                   "comments, releases, Actions. Commands that would hang the agent (an editor, a pager, a password "
                   "prompt) are replaced with non-interactive ones, and an unfinished rebase or merge or leftover "
                   "conflict markers don't survive its turn. Commands: /git (playbook and state snapshot), /commit, "
-                  "/pr, /fix-issue, /ci (waits for CI after a push without polling and pulls failure logs), "
-                  "/git-init (a repository with a safe first commit). Needs git; for GitHub, gh after gh auth login.",
+                  "/pr, /fix-issue, /ci (waits for CI after a push without polling and pulls failure logs), /release "
+                  "(version bump, release notes, tag and GitHub release), /git-init (a repository with a safe first "
+                  "commit). Needs git; for GitHub, gh after gh auth login.",
         },
-        "skills": ["git", "git-init", "commit", "pr", "fix-issue", "ci"],
+        "skills": ["git", "git-init", "commit", "pr", "fix-issue", "ci", "release"],
         "rules": ["GIT.md"],
         "off": {"autoCi": False, "gitChecks": False},
         "needs": ["git", "gh?"],
@@ -274,42 +283,43 @@ MODULES: List[Dict] = [
     {
         "id": "usage",
         "title": {"ru": "Расход токенов и отчёты", "en": "Token usage and reports"},
-        "summary": {"ru": "токены и стоимость, панель с лимитами, /standup, /export",
-                    "en": "tokens and cost, a live panel with limits, /standup, /export"},
+        "summary": {"ru": "токены и стоимость, панель с лимитами, /context, /insights, /standup, /export",
+                    "en": "tokens and cost, a live panel with limits, /context, /insights, /standup, /export"},
         "details": {
             "ru": "/usage: токены, кэш, заполнение контекста и стоимость по ценам API, разбивка по ходам и "
                   "субагентам, HTML-отчёт. Боковая панель «Расход токенов» обновляется каждые 3 секунды и показывает "
-                  "5-часовой и недельный лимиты Antigravity. /standup — что сделано за день или неделю по всем "
-                  "проектам, /export — разговор в Markdown со скрытыми секретами.",
+                  "5-часовой и недельный лимиты Antigravity. /context — что именно занимает окно контекста; /insights "
+                  "— статистика срабатываний хуков и guard (ложные сигналы и повторы); /standup — что сделано за день "
+                  "или неделю по всем проектам; /export — разговор в Markdown со скрытыми секретами.",
             "en": "/usage: tokens, cache, context fill and the API-price cost, broken down by turn and subagent, with "
                   "an HTML report. The side panel «Расход токенов» refreshes every 3 seconds and shows Antigravity's "
-                  "5-hour and weekly limits. /standup — what got done today or this week across projects; /export — "
-                  "a conversation as Markdown with secrets hidden.",
+                  "5-hour and weekly limits. /context shows what fills the context window; /insights reports hook and "
+                  "guard statistics (repeats and false-positive candidates); /standup — what got done today or this "
+                  "week across projects; /export — a conversation as Markdown with secrets hidden.",
         },
-        "skills": ["usage", "standup", "export"],
+        "skills": ["usage", "standup", "export", "context", "insights"],
         "sidecars": ["usage"],
     },
     {
         "id": "claude",
-        "title": {"ru": "Мост Claude Code → Antigravity", "en": "Claude Code → Antigravity bridge"},
-        "summary": {"ru": "Claude Code сам отдаёт задачи агентам Antigravity, выбирая модель по лимитам",
-                    "en": "Claude Code hands tasks to Antigravity agents, picking the model by the limits"},
+        "title": {"ru": "Мост Claude Code ↔ Antigravity", "en": "Claude Code ↔ Antigravity bridge"},
+        "summary": {"ru": "двусторонний мост: Claude Code ↔ Antigravity по оставшимся лимитам",
+                    "en": "two-way bridge: Claude Code ↔ Antigravity based on remaining limits"},
         "details": {
-            "ru": "Навык antigravity для Claude Code (~/.claude/skills): Claude Code сам отдаёт агентам Antigravity "
-                  "лёгкие и объёмные задачи — на Gemini 4 Hydrogen, Orchestrator (Carbon с Hydrogen), Gemini 4 Carbon "
-                  "или Claude в Antigravity, выбирая "
-                  "модель по оставшимся лимитам обеих сторон, — и проверяет результат. По ходу работы они "
-                  "переговариваются: агент спрашивает Claude Code и сообщает ему важное, Claude Code отвечает и "
-                  "поправляет агента, не дожидаясь конца. Работа агента идёт из квоты Antigravity, а не из лимита "
-                  "Claude Code. Ставится, только если на компьютере есть Claude Code.",
-            "en": "The antigravity skill for Claude Code (~/.claude/skills): Claude Code hands light and bulky tasks "
-                  "to Antigravity agents — on Gemini 4 Hydrogen, Orchestrator (Carbon with Hydrogen), Gemini 4 Carbon "
-                  "or Claude in Antigravity, picking "
-                  "the model from both sides' limits — and checks the result. They talk while they work: the agent "
-                  "asks Claude Code and tells it what matters, Claude Code answers and steers it without waiting for "
-                  "the end. The agent's work comes out of the Antigravity quota instead of Claude Code's limit. "
-                  "Installed only when Claude Code is on the computer.",
+            "ru": "Навык antigravity для Claude Code (~/.claude/skills) и команда /claude в Antigravity: оба умеют "
+                  "передавать подзадачи друг другу, сверяя квоты обеих сторон. Claude Code отдаёт лёгкую и объёмную "
+                  "рутину агентам Antigravity (Hydrogen, Orchestrator, Carbon) и переговаривается с ними по ходу "
+                  "работы; агент Antigravity через /claude (claude_task.py) может запустить `claude -p` на подзадачу "
+                  "и принять diff и отчёт (только по вашей просьбе или при полном доступе). Ставится, только если "
+                  "на компьютере есть Claude Code.",
+            "en": "The antigravity skill for Claude Code (~/.claude/skills) plus /claude in Antigravity: both sides "
+                  "can hand sub-tasks to each other based on remaining limits. Claude Code sends light and bulky "
+                  "routine work to Antigravity agents (Hydrogen, Orchestrator, Carbon) and talks while they run; an "
+                  "Antigravity agent can use /claude (claude_task.py) to launch `claude -p` on a sub-task and review "
+                  "its diff and report (only on your request or under full access). Installed only when Claude Code is "
+                  "on the computer.",
         },
+        "skills": ["claude"],
         "claude": True,
         "needs": ["claude"],
     },

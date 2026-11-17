@@ -17,6 +17,10 @@ ephemeral messages before the next model call (hooks/instructions.py):
     rest of the research to the researcher subagent.
 For hooks/stop.py: when the main agent ends its turn while its own background work runs and task.md has open items,
 stop_message() says what still runs and to do the items that don't depend on it.
+Antigravity's native swarm counts as background work too: members its `swarm` tool added and hasn't killed (tracked by
+hooks/conversation.py), alive while the agent keeps using the swarm or its board. Their hints say to wait on the board
+(swarm_wait or ending the turn) instead of polling, and a coordinator who ends its turn while its swarm works is
+waiting on the board as it should: stop_message() leaves it alone.
 Setting parallelHints (`memory.py config parallel-hints off`). Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
@@ -35,6 +39,7 @@ PLAN_MIN = 3                # open task.md items before the plan hint
 SEARCH_RUN = 3              # web-search-only steps in a row before the research hint
 STALE_AGENT = 20 * 60       # a subagent whose transcript hasn't changed for this long isn't working any more
 STALE_CMD = 3 * 3600
+STALE_SWARM = 2 * 3600      # a swarm whose coordinator hasn't touched it or its board for this long isn't working
 SHOWN = 6
 EDITORS = ("worker", "debugger", "test-writer")  # subagents that change files: check their work
 # Background commands meant to keep running (dev servers, watchers, tunnels): nobody waits for them to end.
@@ -74,11 +79,13 @@ def kind(it: dict) -> str:
 
 
 def running(st: Optional[dict], now: Optional[float] = None) -> List[dict]:
-    """Subagents and background commands this agent started that haven't reported back yet (timers aren't work)."""
+    """Subagents, swarm members and background commands this agent started that haven't reported back (or been
+    killed) yet; timers aren't work."""
     now = now or time.time()
     out = []
+    swarm_seen = _ts(((st or {}).get("calls") or {}).get("swarm_ts")) or 0.0
     for iid, it in ((st or {}).get("bg") or {}).items():
-        if it.get("st") != "run" or it.get("k") not in ("agent", "cmd"):
+        if it.get("st") != "run" or it.get("k") not in ("agent", "cmd", "swarm"):
             continue
         started = _ts(it.get("ts")) or now
         if it["k"] == "agent":
@@ -87,6 +94,9 @@ def running(st: Optional[dict], now: Optional[float] = None) -> List[dict]:
             except OSError:
                 last = started
             if now - max(last, started) > STALE_AGENT:
+                continue
+        elif it["k"] == "swarm":
+            if now - max(swarm_seen, started) > STALE_SWARM:
                 continue
         elif now - started > STALE_CMD:
             continue
@@ -103,6 +113,8 @@ def busy(run: List[dict]) -> List[dict]:
 def label(it: dict) -> str:
     if it.get("k") == "cmd":
         return f"command «{_clip(it.get('r') or 'background task', 60)}»"
+    if it.get("k") == "swarm":
+        return f"swarm member @{it.get('n') or str(it.get('id') or '').split(':', 1)[-1] or '?'}"
     name = kind(it) or "subagent"
     role = _clip(it.get("r") or "", 50)
     return name + (f" «{role}»" if role and role.lower().replace("-", " ") != name.replace("-", " ") else "")
@@ -112,33 +124,55 @@ def names(items: List[dict]) -> str:
     return ", ".join(label(it) for it in items[:SHOWN]) + (", …" if len(items) > SHOWN else "")
 
 
+def swarm_lines(members: List[dict]) -> List[str]:
+    """How a coordinator waits for its swarm (the native swarm skill): on the board, without doing the members' work."""
+    shown = 2 * SHOWN
+    who = ", ".join("@" + (it.get("n") or "?") for it in members[-shown:])  # the newest members matter most
+    return [f"Your swarm is working: {'…, ' if len(members) > shown else ''}{who}. Members post to the board, not to "
+            "you: park with "
+            "swarm_wait{since: <the last seq you saw>} (free while asleep) or just end your turn — a post naming "
+            "@coordinator wakes you. Don't poll swarm status or read_board in a loop, sleep or set timers, and don't do "
+            "the members' work yourself: read what comes back, judge it, hand out the next step by name, referring to "
+            "board posts by #seq. Land an author's work in your working copy before you kill it (kill deletes its "
+            "share/branch workspace); members never push."]
+
+
 def launched(run: List[dict]) -> str:
-    agents = [it for it in run if it.get("k") == "agent"]
-    if not agents:  # only commands: they go to the background often, so keep it short
+    members = [it for it in run if it.get("k") == "swarm"]
+    others = [it for it in run if it.get("k") != "swarm"]
+    agents = [it for it in others if it.get("k") == "agent"]
+    if members and not others:
+        return "\n".join([OPEN] + swarm_lines(members) + [CLOSE])
+    if not agents and not members:  # only commands: they go to the background often, so keep it short
         return (f"{OPEN}\nStill running in the background: {names(run)}. It messages you when it ends — don't poll "
                 "it (manage_task list, sleep). Meanwhile do other work from the task; if you need its result to go on, "
                 f"end your turn with one line — its message wakes you up.\n{CLOSE}")
     lines = [OPEN, "Working in the background for you now:"]
-    for it in run[:SHOWN]:
+    for it in others[:SHOWN]:
         since = "started just now" if it.get("mins", 0) < 1 else f"running {it['mins']} min"
         lines.append(f"- {label(it)} — {since}" + (f" (id {it['id']})" if it.get("k") == "agent" else ""))
-    if len(run) > SHOWN:
-        lines.append(f"- … and {len(run) - SHOWN} more")
+    if len(others) > SHOWN:
+        lines.append(f"- … and {len(others) - SHOWN} more")
     lines.append("Their results arrive by themselves as messages: don't poll (no manage_subagents or manage_task "
                  "list, short schedule timers, sleep, or reading their transcripts), and never report or use a result "
                  "before its message has arrived.")
-    lines.append("Keep working now on what doesn't depend on them: your own part of the task, reading the code their "
-                 "results will touch, checks you can already run"
-                 + (", subagents for other independent parts" if agents else "") + ". End your turn only when "
-                 "everything left needs their results — then say in one line who you're waiting for; their message "
-                 "wakes you up.")
+    if members:
+        lines += swarm_lines(members)
+    else:
+        lines.append("Keep working now on what doesn't depend on them: your own part of the task, reading the code "
+                     "their results will touch, checks you can already run"
+                     + (", subagents for other independent parts" if agents else "") + ". End your turn only when "
+                     "everything left needs their results — then say in one line who you're waiting for; their "
+                     "message wakes you up.")
     lines.append(CLOSE)
     return "\n".join(lines)
 
 
 def polling(run: List[dict]) -> str:
-    return (f"{OPEN}\nChecking on them doesn't make them faster: {names(run)} will message you when done. Do other "
-            "work from the task now, or — if everything left needs their results — end your turn with one line "
+    board = (" Your swarm answers on the board: wait with swarm_wait (free) instead of sleeping or timers."
+             if any(it.get("k") == "swarm" for it in run) else "")
+    return (f"{OPEN}\nChecking on them doesn't make them faster: {names(run)} will message you when done.{board} Do "
+            "other work from the task now, or — if everything left needs their results — end your turn with one line "
             f"saying who you're waiting for.\n{CLOSE}")
 
 
@@ -180,7 +214,7 @@ def plan_hint(payload: dict, st: dict, par: dict) -> Optional[str]:
     if not got or got[1] < asked or len(got[0]) < PLAN_MIN:
         return None
     par["plan"] = n
-    if any(it.get("k") == "agent" and it.get("s", -1) > user.get("step", -1) for it in (st.get("bg") or {}).values()):
+    if any(it.get("k") in ("agent", "swarm") and it.get("s", -1) > user.get("step", -1) for it in (st.get("bg") or {}).values()):
         return None  # it already delegates in this turn
     return ('<parallel_plan source="Antigravity Plus">\n'
             f"Your plan has {len(got[0])} open items. Before you start, decide which of them can run at the same time. "
@@ -237,8 +271,12 @@ def message(payload: dict, st: Optional[dict]) -> Optional[str]:
     return plan_hint(payload, st, par) or research_hint(st, par)
 
 
-def stop_message(run: List[dict], items: list, shown: int = 8) -> str:
-    """For hooks/stop.py: the main agent ended its turn with open task.md items while its background work runs."""
+def stop_message(run: List[dict], items: list, shown: int = 8) -> Optional[str]:
+    """For hooks/stop.py: the main agent ended its turn with open task.md items while its background work runs. None
+    while its swarm works: a coordinator hands the work out and waits on the board (the native swarm skill), and the
+    board wakes it when a member names it."""
+    if any(it.get("k") == "swarm" for it in run):
+        return None
     who = names(run) if run else "background tasks you started"
     verb = "is" if len(run) == 1 else "are"
     listed = "\n".join(f"- [{mark}] {text}" for mark, text in items[:shown])

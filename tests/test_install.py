@@ -31,6 +31,19 @@ commands = re.findall(r'"command"\s*:\s*"([^"]+)"', hooks)
 want = "-X utf8 hooks/" if os.name == "nt" else "python3 hooks/"
 check(f"hook commands run Python as this computer can ({want.strip()})", commands and all(want in c for c in commands), commands)
 json.loads(hooks)
+mcp_cfg = json.load(open(os.path.join(DEST, "mcp_config.json"), encoding="utf-8"))
+tools_srv = (mcp_cfg.get("mcpServers") or {}).get("tools") or {}
+check("mcp_config.json and mcp/server.py are installed", os.path.isfile(os.path.join(DEST, "mcp", "server.py"))
+      and tools_srv.get("command") == ("py" if os.name == "nt" else "python3")
+      and "${PLUGIN_ROOT}/mcp/server.py" in (tools_srv.get("args") or []), mcp_cfg)
+import install as inst_mod
+tmp_mcp = os.path.join(SP, "mcp-win")
+os.makedirs(tmp_mcp, exist_ok=True)
+shutil.copyfile(os.path.join(PLUGIN, "mcp_config.json"), os.path.join(tmp_mcp, "mcp_config.json"))
+inst_mod.write_mcp(tmp_mcp, "py -3 -X utf8")
+win_srv = json.load(open(os.path.join(tmp_mcp, "mcp_config.json"), encoding="utf-8"))["mcpServers"]["tools"]
+check("write_mcp rewrites python3 cleanly for Windows (no duplicate -X utf8)",
+      win_srv["command"] == "py" and win_srv["args"] == ["-3", "-X", "utf8", "${PLUGIN_ROOT}/mcp/server.py"], win_srv)
 stale = os.path.join(DEST, "skills", "removed-skill.txt"); open(stale, "w").write("x")
 r = install()
 check("an update removes files the source no longer has", r.returncode == 0 and not os.path.exists(stale), r.stdout[-300:])
@@ -74,7 +87,7 @@ check("without the memory module its settings store stays (the hooks read it), b
 rules = open(os.path.join(DEST, "rules", "AGENTS.md"), encoding="utf-8").read()
 check("the installed rules keep the rows of installed commands and lose the others", "| `/git` |" in rules
       and "| `/init` |" in rules and "| `/review` |" not in rules and "| `/mobile` |" not in rules and "sidecar://" not in rules
-      and "`/deploy`" not in rules, re.findall(r"\| `/[\w-]+`", rules))
+      and "antigravity-plus_tools" in rules and "`/deploy`" not in rules, re.findall(r"\| `/[\w-]+`", rules))
 check("…while the source rules keep everything", "| `/review` |" in open(os.path.join(PLUGIN, "rules", "AGENTS.md"), encoding="utf-8").read())
 c = choice()
 check("the choice is saved with the features of the missing modules turned off", c["installed"] == ["core", "git"]

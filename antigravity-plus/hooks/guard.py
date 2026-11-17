@@ -162,6 +162,11 @@ SEGMENT_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
      "компьютере."),
     ("protection-off", re.compile(r"\b(settings|memory)\.py\b.*\b(plugin|config)\b.*\bprotect-secrets\s+off\b"),
      "выключение защиты секретов: агент сможет выводить содержимое .env и ключей в разговор."),
+    ("claude-permissions", re.compile(
+        r"\b(claude_task\.py|claude(\.exe|\.cmd)?)\b.*(--dangerously-skip-permissions|"
+        r"--permission-mode[=\s]+bypassPermissions|--allow(?:edTools)?[=\s]+[\"']?(?:Bash(?:\(\s*\*\s*\))?[\"']?(?:\s|$)|"
+        r"[^\s\"']*\b(?:sudo|rm|ssh|scp|rsync|curl|wget|git\s+push)\b))", I),
+     "запуск Claude Code с обходом ограничений прав (bypassPermissions / широкий Bash)."),
 ]
 
 # SQL is checked only when a DB client is the program being run (so `rg "DROP TABLE"` stays quiet).
@@ -191,7 +196,8 @@ PIPE_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
 # DROP TABLE, cloud deletions, publishing, rm -rf of the current folder…) Bypass Mode lets through, and logs.
 SYSTEM_RULES = {"disk-format", "disk-format-win", "system-power", "system-power-win", "security-off", "security-off-win",
                 "sudo", "run-as-admin", "autostart", "kill-all", "fork-bomb", "secrets-read", "agent-tools",
-                "protection-off", "rm-dangerous", "system-files", "protected-file", "agent-settings"}
+                "protection-off", "claude-permissions", "rm-dangerous", "system-files", "protected-file",
+                "agent-settings"}
 
 # Programs whose arguments are just text (a commit message or a search pattern can mention `rm -rf /`).
 TEXT_PROGRAMS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "git-grep", ":", "true", "test", "["}
@@ -632,7 +638,7 @@ PUSH_RULE = re.compile(
     r"|\b(make|just|task|npm\s+run|pnpm(\s+run)?|yarn(\s+run)?|bun\s+run)\s+[\w:.-]*(deploy|release|publish|ship)")
 COMMIT_RULE = re.compile(r"\bgit\b.*\bcommit\b")
 DEPLOY_SCRIPT = re.compile(r"deploy|release|publish|rollout|provision", I)
-SCRIPT_RUNNERS = {"sh", "bash", "zsh", "dash", "python", "python3", "node", "ruby", "perl", "deno", "bun", "tsx", "ts-node"}
+SCRIPT_RUNNERS = {"sh", "bash", "zsh", "dash", "py", "python", "python3", "node", "ruby", "perl", "deno", "bun", "tsx", "ts-node"}
 SSH_ARG_OPTS = set("BbcDEeFIiJLlmOoPpQRSWw")
 # Remote commands that only look around (anything else over ssh may change the server).
 READ_ONLY = {"cat", "ls", "ll", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "zgrep", "rg", "ag", "find",
@@ -749,10 +755,25 @@ def script_of(tokens: List[str]) -> str:
     """Path of the script a command runs (./deploy/update.sh, bash deploy.sh, python3 release.py), or ""."""
     if not tokens:
         return ""
-    if "/" in tokens[0] or tokens[0].endswith((".sh", ".py")):
+    prog = os.path.splitext(os.path.basename(tokens[0].replace("\\", "/")))[0].lower()
+    if prog in SCRIPT_RUNNERS or re.fullmatch(r"python\d+(?:\.\d+)?", prog):
+        i = 1
+        while i < len(tokens):
+            tok = tokens[i]
+            if tok in ("-c", "-m", "-e"):
+                return ""
+            if tok in ("-X", "-W", "-Q", "-r"):
+                i += 2
+                continue
+            if tok == "--":
+                return tokens[i + 1] if i + 1 < len(tokens) else ""
+            if tok.startswith("-"):
+                i += 1
+                continue
+            return tok
+        return ""
+    if "/" in tokens[0] or "\\" in tokens[0] or tokens[0].endswith((".sh", ".py")):
         return tokens[0]
-    if os.path.basename(tokens[0]) in SCRIPT_RUNNERS and len(tokens) > 1 and not tokens[1].startswith("-"):
-        return tokens[1]
     return ""
 
 

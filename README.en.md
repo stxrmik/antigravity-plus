@@ -21,10 +21,9 @@ every edit checked · an agent that finishes the job
 
 ---
 
-One plugin: 25 commands, 7 subagents, 6 hooks and working rules — plus a skill for Claude Code that lets it hand
-part of its work to Antigravity agents on its own. One command installs it — whole, or the modules you pick at
-install time; on Antigravity's plugin page it is turned on and off as a whole. Python standard library only, no
-dependencies.
+One plugin: 30 commands, 7 subagents, 6 hooks, a bundled MCP server and working rules — plus a two-way bridge with
+Claude Code (Claude Code ↔ Antigravity). One command installs it — whole, or the modules you pick at install time;
+on Antigravity's plugin page it is turned on and off as a whole. Python standard library only, no dependencies.
 
 ## Why
 
@@ -80,19 +79,19 @@ and the hook features of that module stay silent. The choice is saved, and updat
 
 | Module | What it gives | Context | Needs |
 |---|---|---|---|
-| Core | the guard, project context, your instructions after compaction, the working rules, `/init`, `/remember`, `/settings`, `/doctor`, `/hooks` | ≈5,300 | required |
-| Quality | every edit checked, the agent doesn't stop halfway, `/review`, `/security-review`, `/simplify`, 4 subagents | ≈900 | — |
+| Core | the guard, project context, instructions after compaction, rules, bundled MCP (`lsp_*`, `memory_search`, `git_state`, `quota`), `/init`, `/remember`, `/settings`, `/doctor`, `/hooks`, `/update` | ≈5,400 | required |
+| Quality | every edit checked, the agent doesn't stop halfway, `/review`, `/security-review`, `/simplify`, `/deps`, 4 subagents | ≈950 | — |
 | Facts and honest answers | the report is held to what happened; an objection means checking | ≈1,500 | — |
 | Memory | auto-memory (shared with Claude Code), `/memory`, `/handoff`, recent conversations | ≈1,500 | — |
-| Parallel work | subagents `explorer`, `researcher`, `worker`, `/parallel` | ≈1,300 | — |
-| Speed and context | the sandbox, the context budget, loops of errors | hints only | — |
-| Git and GitHub | `/git`, `/commit`, `/pr`, `/fix-issue`, `/ci`, `/git-init` | ≈1,350 | git; gh for GitHub |
+| Parallel work | subagents `explorer`, `researcher`, `worker`, native Swarm, `/parallel` | ≈1,350 | — |
+| Speed, context and quota | the sandbox, context budget, loops of errors, plan-limit hints | hints only | — |
+| Git and GitHub | `/git`, `/commit`, `/pr`, `/fix-issue`, `/ci`, `/release`, `/git-init` | ≈1,400 | git; gh for GitHub |
 | Code navigation (LSP) | `/lsp`: definitions, every use, callers, types, type errors after an edit | ≈600 | a language server: pyright, sourcekit-lsp, kotlin-lsp… |
 | Deploy | `/deploy` | ≈200 | — |
 | Web UI checks | `/ui-check` | ≈150 | Chrome, Chromium, Edge or Brave |
 | Mobile apps | `/mobile` | ≈250 | Xcode and/or the Android SDK |
-| Token usage and reports | `/usage`, the side panel, `/standup`, `/export` | ≈350 | — |
-| Claude Code → Antigravity bridge | the `antigravity` skill for Claude Code | outside the context | Claude Code |
+| Token usage and reports | `/usage`, the side panel, `/context`, `/insights`, `/standup`, `/export` | ≈450 | — |
+| Claude Code ↔ Antigravity bridge | the `antigravity` skill for Claude Code and `/claude` in Antigravity | ≈50 | Claude Code |
 
 "Context" is roughly how many tokens the module adds to every request of the agent (command descriptions and
 always-on rules). Full descriptions: `./install.sh --list`.
@@ -164,7 +163,15 @@ they install the saved choice.
   search in a row are the cue to hand the research to `researcher`. The agent re-checks a `worker`'s report before
   building on it.
 - `/parallel` does the same on request, with brief templates; for four or more similar pieces the agent uses
-  Antigravity's built-in `run_workflow`.
+  Antigravity's built-in `run_workflow`, and for long multi-role work that needs back-and-forth on a board or a
+  continuous verifier it uses native **Swarm** (`swarm` + `swarm_wait`, isolated `workspace:"share"` copies, landing
+  work before `kill`).
+
+### 🔌 Bundled MCP server (`antigravity-plus_tools`)
+- The plugin runs its own stdio MCP server (`mcp/server.py`) with typed arguments so even lighter models never break
+  shell quoting on paths with spaces: `lsp_def`, `lsp_refs`, `lsp_calls`, `lsp_hover`, `lsp_symbols`, `lsp_find`,
+  `lsp_check`, `memory_search`, `git_state`, `quota`.
+- Calls run against the same underlying scripts (and warm LSP daemon) without shell-line composition.
 
 ### 🔀 Claude Code hands tasks to Antigravity
 - Claude Code gets a skill, `antigravity`. Claude Code decides itself what to hand over: light, simple tasks (a small
@@ -245,7 +252,7 @@ they install the saved choice.
   project's languages have a server, with the exact command; after two `rg` searches for symbol names the agent is
   reminded once to ask the server.
 
-### 🏎️ Speed and context
+### 🏎️ Speed, context and quota
 - A command that failed in Antigravity's terminal sandbox and worked with `BypassSandbox` is remembered for the
   project: in new conversations the agent runs it outside the sandbox right away, without a wasted run. A command
   that works inside the sandbox twice is forgotten; with the sandbox off, the list isn't shown.
@@ -253,7 +260,10 @@ they install the saved choice.
   only the lines it needs, trim long output. In Antigravity, Gemini models have an effective limit around 300k tokens
   and auto-compact around 250k — so around 220k the agent hears that compaction is near and it's time to offer
   `/handoff` (for Claude 5.5 the compaction ceiling is higher, around 840k). After it reads a whole large file: a tip
-  to read ranges (once per message).
+  to read ranges (once per message). `/context` shows what fills the window (rules, session context, files, outputs).
+- **Plan-limit hints (`hooks/quota.py`).** When the current model's quota group drops under 15% weekly or 10% 5-hour
+  left, spends far ahead of the week's pace, or runs out, the main agent receives `<quota>` once with the exact numbers,
+  reset time and concrete ways to stretch it (`flash` subagents, Hydrogen or Orchestrator, `/handoff`).
 - After three failed commands or edits in a row the agent stops, reads the error and changes its approach; code for
   a server or a container goes in a file piped to stdin, not into `python3 -c` with nested quotes.
 
@@ -354,6 +364,7 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 | `/parallel` | split a task into independent parts and hand them to subagents, working in parallel | ✅ when there are 2+ independent parts |
 | `/review` | review of the change by two subagents, findings double-checked | ✅ after substantial changes |
 | `/security-review` | audit of the branch with exploitability checks | ✅ when a change touches auth, secrets, payments |
+| `/deps` | vulnerability and outdated dependency audit (`pip-audit`, `npm`/`pnpm`/`yarn`/`bun`, `cargo`, `osv-scanner`…) | ✅ before `/deploy` or when touching manifests |
 | `/ui-check` | screenshots at phone and laptop width, console errors, heavy effects | ✅ after UI changes |
 | `/mobile` | the app in the iOS simulator or the Android emulator: launch, screenshots, taps, typing, logs | ✅ after changes to an app's screens |
 | `/git` | the repository's state in one command, branches and syncing, conflicts, history, safe undo, GitHub: issues, PRs, review threads, releases | ✅ for any git or GitHub work |
@@ -366,10 +377,14 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 | `/memory` | what the agent remembers; forget, clean up, settings | ✅ memory search |
 | `/settings` | what is set where; MCP servers and plugin settings | ✅ viewing |
 | `/usage` | token usage and cost, a link to the side panel | ✅ when you ask about usage |
+| `/context` | what fills the current context window (categories, top-10 items, tips) | ✅ when context is large or on request |
+| `/insights` | hook and guard statistics, repeats and false-positive candidates | ✅ when tuning the plugin or on request |
 | `/doctor` | the plugin's self-check | ✅ when something misbehaves |
 | `/deploy` | what would ship and how risky it is; deploy with backup, health check and rollback | the check ✅, the deploy 🔑 |
 | `/commit` | logical commits in the repo's style, without secrets or junk | 🔑 |
 | `/pr` | a PR with all the branch's commits and a description | 🔑 |
+| `/release` | release plan, version bump, changelog, local tag and GitHub release | 🔑 |
+| `/claude` | hand a sub-task from Antigravity to `claude -p`, wait, take the diff and report | 🔑 |
 | `/fix-issue` | issue → branch → reproduce → fix with a test → commit → PR | 🔑 |
 | `/simplify` | reuse and simplification in the changed code | 🔑 |
 | `/hooks` | the project's own automation in `.agents/hooks.json` | 🔑 |
@@ -405,7 +420,7 @@ flowchart TD
 | Event | Hook | What it does |
 |---|---|---|
 | SessionStart | `session_start.py` | git context, project rules (and `CLAUDE.md`), memory, recent conversations, mobile builds & CI workflows, project setup hints, commands that need to run outside the sandbox |
-| PreInvocation | `instructions.py` | your messages after a new message, after compaction and every ~30 steps; edit errors; other agents; what runs in the background and what to do meanwhile; the sandbox, context size, error loops; the memories your message is about, and what in it is worth remembering; whether to look facts up before answering; what an objective answer to an objection, a guess or a request for an opinion takes |
+| PreInvocation | `instructions.py` | your messages after a new message, after compaction and every ~30 steps; edit errors; other agents; what runs in the background and what to do meanwhile; the sandbox, context size, error loops; plan-limit hints (`quota.py`); the memories your message is about, and what in it is worth remembering; whether to look facts up before answering; what an objective answer to an objection, a guess or a request for an opinion takes |
 | PreToolUse | `guard.py` | dangerous commands, secrets (in memory too), fake checks, other agents' file versions, bans from the conversation, full access, Bypass Mode |
 | PostToolUse | `check_edit.py`, `memory_sync.py` | edit checks, coordination, memory index |
 | Stop | `stop.py` | open items (including those it can do while subagents are busy), syntax errors, verification, review, UI, mobile screens, CI after push, project setup, an action announced but not taken, facts in the report, agreement without a check, what to remember from the work |
@@ -649,9 +664,9 @@ Good to know:
   service by itself (`boot --restart` repairs one that is already running).
 - **Android** — on macOS, Linux and Windows, through the SDK's `adb`. Typing is Latin letters, digits and
   punctuation only (an `adb` limit). Coordinates are the same as `adb shell input` and the official `android` CLI
-  use, so the tools mix. So far this part is covered by tests on a simulated `adb` and checked against Android's
-  sources, but it hasn't run against a live emulator in this release yet. To check it on your machine:
-  `python3 tests/live_mobile.py --android`; please open an issue if something behaves differently.
+  use, so the tools mix. Verified end-to-end on a live emulator (Android 16 / API 36, arm64) with
+  `python3 tests/live_mobile.py --android` (including `shot --dark`/`--big-text`, `set`, `grant`, `open`, `logs`, and
+  `shutdown`) as well as offline faked-`adb` tests.
 - Screenshots go to `~/.gemini/antigravity-plus/mobile/shots` (the latest 80 are kept).
 
 </details>
@@ -749,6 +764,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 | Setting up projects on its own | "don't set up projects on your own" | `auto-setup` |
 | Parallel work hints | "stop the subagent hints" | `parallel-hints` |
 | Sandbox memory, context and error-loop hints | "stop the context hints" | `speed-hints` |
+| Plan-limit hints when quota gets short | "stop the quota hints" | `quota-hints` |
 | Fact checks of reports, hints to look sources up | "don't fact-check the reports" | `fact-checks` |
 | Objective answers: hints and the check of agreement | "don't double-check what you agree with" | `objective-answers` |
 | Reminder to track CI after push | "don't remind me about CI" | `auto-ci` |
@@ -773,6 +789,8 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 
 ```bash
 python3 tests/run_tests.py                                # offline tests: hooks, guard, installer
+python3 tests/replay.py --limit 25                        # read-only hook replay across real transcripts
+python3 tests/live_smoke.py --only lsp_refs               # scripted live smoke test via agentapi on a cheap model
 python3 tests/live_mobile.py --ios                      # live check of /mobile: boots a simulator (or --android: an emulator)
 python3 antigravity-plus/hooks/guard.py --test "rm -rf ~"
 python3 antigravity-plus/hooks/checks.py path/to/file.py  # the same check an agent's edit gets
@@ -787,11 +805,12 @@ same JSON Antigravity sends. CI runs them on macOS, Linux and Windows.
 
 ```
 antigravity-plus/
-├── plugin.json, hooks.json, assets/logo.svg
+├── plugin.json, hooks.json, mcp_config.json, assets/logo.svg
+├── mcp/server.py                   # stdio MCP server (lsp_*, memory_search, git_state, quota)
 ├── hooks/       session_start  instructions  guard  check_edit  memory_sync  stop
 │                conversation (the user's messages, full access)  checks (edit checks, secrets)
-│                coord (several agents)  parallel (background work)  speed (sandbox, context, error loops)
-│                gitcheck (git/gh commands that would hang, unfinished rebases, conflict markers)
+│                coord (several agents)  parallel (background work, Swarm)  speed (sandbox, context, error loops)
+│                quota (plan-limit hints)  gitcheck (hanging git/gh commands, unfinished rebases, conflict markers)
 │                facts (facts in reports)  objective (objective answers)  memory_hints (auto-memory)
 │                compat (macOS / Linux / Windows)
 ├── rules/AGENTS.md                 # always-on working rules (core)
@@ -800,11 +819,11 @@ antigravity-plus/
 ├── rules/OBJECTIVE.md              # objective answers: check before you agree
 ├── agents/      explorer  researcher  worker  code-reviewer  security-auditor  debugger  test-writer
 ├── sidecars/usage/                 # the usage side panel
-└── skills/      25 commands: init remember memory handoff parallel review commit pr git ci lsp … mobile settings git-init doctor
+└── skills/      30 commands: init remember memory handoff parallel review deps release context insights claude …
 claude-code/skills/antigravity/     # Claude Code's skill: SKILL.md + scripts/delegate.py (tasks → Antigravity)
 install.py, install.sh, install.cmd # installer for every OS
 modules.py                          # the modules: what each holds, detailed descriptions, what is off without it
-tests/                              # offline tests; CI: .github/workflows/tests.yml
+tests/                              # offline tests, replay.py, live_smoke.py; CI: .github/workflows/tests.yml
 ```
 
 The plugin's data lives in `~/.gemini/antigravity-plus/`: memory, settings, per-conversation state (deleted after 14

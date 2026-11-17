@@ -44,7 +44,7 @@ PLUGIN_KEYS = [("auto-memory", "autoMemory"), ("share-with-claude-code", "shareW
                ("recent-conversations", "recentConversations"), ("finish-tasks", "finishTasks"),
                ("check-edits", "checkEdits"), ("auto-review", "autoReview"), ("auto-verify", "autoVerify"),
                ("protect-secrets", "protectSecrets"), ("auto-setup", "autoSetup"),
-               ("parallel-hints", "parallelHints"), ("speed-hints", "speedHints"), ("fact-checks", "factChecks"),
+               ("parallel-hints", "parallelHints"), ("speed-hints", "speedHints"), ("quota-hints", "quotaHints"), ("fact-checks", "factChecks"),
                ("objective-answers", "objectiveAnswers"), ("auto-ci", "autoCi"),
                ("git-checks", "gitChecks"), ("lsp-checks", "lspChecks"), ("update-check", "updateCheck"),
                ("auto-update", "autoUpdate")]

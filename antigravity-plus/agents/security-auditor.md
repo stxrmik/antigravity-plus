@@ -29,7 +29,7 @@ values you discover — show only a redacted prefix (e.g. `sk-ab…`) and the lo
    - **Deserialization & parsing:** `pickle`, `yaml.load`, `eval`, `Function()`, XXE, prototype pollution, ReDoS.
    - **Secrets & crypto:** hardcoded keys/tokens, secrets in logs or error messages, weak hashes (MD5/SHA1 for passwords), static IVs, `Math.random()` for tokens, missing constant-time comparison.
    - **Config:** permissive CORS, missing CSRF protection, debug mode, verbose errors, insecure cookies (no HttpOnly/Secure/SameSite), overly broad IAM/permissions.
-   - **Dependencies:** obviously outdated or known-vulnerable packages in manifests touched by the change (note as "verify with an advisory scanner").
+   - **Dependencies:** obviously outdated or known-vulnerable packages in manifests touched by the change; when manifests or lockfiles change, run `deps.py audit` (the `deps` skill) if installed. <!-- needs:deps -->
 3. For each candidate, confirm exploitability: is the input actually attacker-controlled? Is there upstream validation or framework protection (ORM parameterization, auto-escaping)? Drop theoretical issues with no realistic path.
 
 ## Output

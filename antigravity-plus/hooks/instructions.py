@@ -13,6 +13,7 @@ Subagents (no user messages in their transcript) get nothing of that. Everyone, 
 problems hooks/check_edit.py found in files written since the previous step, the other agents working in the
 project (hooks/coord.py), hints that keep it working while its subagents and background commands run
 (hooks/parallel.py), and hints on the sandbox, the context budget and loops of failing commands (hooks/speed.py).
+The main agent also hears when the plan's limits of its model get short (hooks/quota.py).
 When the user switches Bypass Mode («/bypass», «/bypass off»), this hook applies it for every conversation
 (hooks/conversation.py) and tells the agent once; a switch made in another conversation is mentioned once too.
 The main agent also gets, with a new user message, the saved memories it is about, and hears when the message sounds
@@ -217,6 +218,16 @@ def speed_work(payload: dict) -> Optional[str]:
     return msg
 
 
+def quota_work(payload: dict) -> Optional[str]:
+    """The plan's limits of the conversation's model when they get short (main agent only; hooks/quota.py)."""
+    import quota
+    st = conv.load(payload)
+    msg = quota.message(payload, st)
+    if st is not None and isinstance(payload.get("conversationId"), str):
+        conv.store(payload["conversationId"], st)
+    return msg
+
+
 def lsp_work(payload: dict) -> Optional[str]:
     """The agent searched code for symbol names with rg twice: once per conversation, the language server's commands
     (skills/lsp; subagents included)."""
@@ -283,8 +294,8 @@ def main() -> None:
         payload = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         payload = None
-    for part in (bypass_work, decide, edit_checks, other_agents, parallel_work, speed_work, lsp_work, memory_work,
-                 facts_work, objective_work) if isinstance(payload, dict) else ():
+    for part in (bypass_work, decide, edit_checks, other_agents, parallel_work, speed_work, quota_work, lsp_work,
+                 memory_work, facts_work, objective_work) if isinstance(payload, dict) else ():
         try:
             msg = part(payload)
         except Exception as e:  # a hook must never break the conversation

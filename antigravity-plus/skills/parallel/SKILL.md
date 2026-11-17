@@ -2,7 +2,8 @@
 name: parallel
 description: >-
   Run a task as parallel work: split it into independent parts, launch subagents (explorer, researcher, worker,
-  test-writer, code-reviewer, security-auditor) or a run_workflow fan-out in one step, keep working on the critical
+  test-writer, code-reviewer, security-auditor) or a run_workflow fan-out in one step, or coordinate Antigravity's
+  native swarm for long multi-role work, keep working on the critical
   path yourself, then check and merge their results. Use on your own when a task has 2+ independent parts that each
   take more than a few tool calls (research + code, several modules or pages, implementation + tests + review, a broad
   investigation), and when the user asks to parallelize («распараллель», «сделай быстрее», «подключи субагентов»,
@@ -90,3 +91,48 @@ for f, r in zip(files, reviews):
     log(f"{f}: {r}")
 ```
 It runs in the background and reports when it ends; keep working meanwhile, as above.
+
+## Long multi-role work: the swarm
+Antigravity's native swarm (built-in skill `swarm`, the `swarm` tool; Preview & quota heavy) runs members, each in its
+own conversation, that talk on a shared message board. You become the coordinator.
+
+**When.** Only when members must talk to each other for a long time (author ⇄ verifier, a pipeline of roles) or a
+verifier should check workers continuously. One-off parts that report back → subagents; 4+ similar pieces →
+`run_workflow`; a few tool calls → yourself. Every member costs tokens even while idle, so check the quota first:
+`/usage`, or `python3 ~/.claude/skills/antigravity/scripts/delegate.py budget` where Claude Code's skill is installed;
+`swarm{action:"models"}` shows each model's `quota_remaining`. Low quota → subagents instead.
+
+**Size and brief.** One member per piece that can really proceed on its own, plus one verifier per 2–4 authors;
+name members for their job (`parser`, `verifier`). The brief is public (posted on the board) and is everything the
+member gets — same shape as §3:
+```
+swarm{action:"add", name:"parser", workspace:"share",
+      brief:"You own src/parser/ (only it; @lexer owns src/lexer/). <context: decisions, the user's constraints>.
+             Done when tests/test_parser.py passes. Don't commit or push. Post the diff summary and the test output
+             to @verifier; tag @coordinator only when verified or blocked."}
+```
+- Disjoint files, as always; authors who edit or build at the same time get `workspace:"share"` (their own working
+  copy), readers and verifiers stay on `inherit`; `branch` is a fully isolated clone.
+- Members never commit or push (and never write memory) unless the user asked for commits.
+- Tell each one who acts next: `@name` wakes that member and costs it a turn — it's a doorbell, never a CC.
+- On the turn that creates the swarm, add every member and end the turn: the board tools arrive one turn later.
+
+**Models per role.** Leave `model` off: members run on your model, as the swarm skill requires. Use another model only
+when the user asks (e.g. a lighter one for read-only scouts) or when a member runs out of quota:
+`swarm{action:"model", name, model}` keeps its conversation — never kill and re-add it for that.
+
+**Monitoring without polling.** Members post to the board, not to you. Park with `swarm_wait{since:<the last seq you
+saw>}` (free while asleep) or simply end your turn — a post naming `@coordinator` wakes you. Then `read_board`, judge
+what came back and hand out the next step by name, citing posts by `#seq` instead of copying them. Don't loop on
+`swarm status` / `read_board`, sleep or set timers, and don't do the members' work yourself. Antigravity Plus counts
+live members as your background work: it says so when they start and stays quiet when you end the turn to wait.
+
+**Ending.** For each author: verify its result (a verifier's report or your own check), then land it in your working
+copy — `git -C <ws> add -A && git -C <ws> diff --cached | git apply` (`swarm status` shows each member's `<ws>`; new
+files count too) — and run the project's checks on the merged result. Only then `swarm{action:"kill", name}`: kill is
+permanent and deletes a share/branch workspace. Kill helpers a killed member leaves behind; post `[done] <summary>`
+when a monitor runs. Report to the user as in §6.
+
+**Pitfalls.** Two members on one file; a brief that assumes context the member hasn't got; `@all` for status (wakes
+everyone); copying one member's report into another's message; killing as a pause (a waiting member costs nothing);
+killing before landing; a crowded swarm burning quota while members wait.

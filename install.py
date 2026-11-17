@@ -162,6 +162,32 @@ def write_hooks(dest: str, python: str) -> None:
         f.write(text)
 
 
+def write_mcp(dest: str, python: str) -> None:
+    """Rewrite mcp_config.json so the MCP server uses this computer's Python command (e.g. `py -3 -X utf8` on Windows)."""
+    path = os.path.join(dest, "mcp_config.json")
+    if not os.path.isfile(path):
+        return
+    parts = python.split()
+    if not parts:
+        return
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    if not isinstance(servers, dict):
+        return
+    cmd, extra = parts[0], parts[1:]
+    for srv in servers.values():
+        if isinstance(srv, dict) and srv.get("command") == "python3":
+            args = list(srv.get("args") or [])
+            if extra[-2:] == ["-X", "utf8"] and args[:2] == ["-X", "utf8"]:
+                args = args[2:]
+            srv["command"] = cmd
+            srv["args"] = extra + args
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
 # ─────────────────────────────── modules ───────────────────────────────
 
 def language(arg: Optional[str]) -> str:
@@ -466,6 +492,7 @@ def stage(chosen: Set[str], python: str) -> str:
                     f.write(new)
     if python != "python3":
         write_hooks(dest, python)
+        write_mcp(dest, python)
     return root
 
 
@@ -597,7 +624,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         shutil.rmtree(staged, ignore_errors=True)
     if not WINDOWS:
-        for sub in ("hooks", "skills"):
+        for sub in ("hooks", "skills", "mcp"):
             for dp, _dns, fns in os.walk(os.path.join(DEST, sub)):
                 for fn in fns:
                     if fn.endswith((".py", ".sh")):

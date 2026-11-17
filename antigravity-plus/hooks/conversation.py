@@ -42,6 +42,7 @@ BG_TASK = re.compile(r"running as a background task with task id:\s*(\S+)\s*\n\s
 AGENT_ID = re.compile(r'"conversationId":\s*"([\w-]{8,80})"')
 REPORT = re.compile(rb"\[Message\] timestamp=(\S+) sender=([\w./:-]+)")
 GONE_IDLE = re.compile(rb"Subagent ([\w-]{8,80}) has gone idle")
+SUBAGENT_ERROR = re.compile(rb'The subagent [^\n]{1,200} with id "([\w-]{8,80})" encountered an error')
 STATUS_CHECK = re.compile(r"\b(status|progress|done yet|are you done|finished yet|ready yet|answer now|provide (your|the) "
                           r"(answer|result|report)|how(?:'s| is) it going)\b|как\s+(дела|успехи|прогресс)|готов[оа]?\s*\?|"
                           r"\bстатус|\bну\s+что\b", re.I)
@@ -52,6 +53,11 @@ WAIT_CMD = re.compile(r"^\s*(sleep\s+\d|timeout\s+(/t\s+)?\d|start-sleep\b|echo\
 CLAUDE_ASK = re.compile(r"delegate\.py[\"']?\s+ask\b")
 CLAUDE_SAYS = re.compile(rb"sender=system\b[^\n]{0,200}?content=(?:Claude Code answers your question|Claude Code says:|"
                          rb"Follow-up from Claude Code:)")
+# Antigravity's native swarm: the coordinator's `swarm` tool adds members (action add: name, brief, n or tasks for a
+# numbered group <name>-1..<name>-k) and kills them (action kill: name, a group by its prefix); the members talk on a
+# message board (post_message, read_board, swarm_wait), not through [Message] reports.
+SWARM_TOOLS = ("swarm", "post_message", "read_board", "swarm_wait")
+SWARM_GROUP_MAX = 64      # copies of one numbered group tracked
 POLL_TIMER = 180          # schedule timers shorter than this, set while work is running, are polling
 BG_KEEP = 60              # finished entries kept in the state
 # How the steps go (hooks/speed.py).
@@ -223,9 +229,10 @@ def load(payload: dict, save: bool = True) -> Optional[dict]:
 
 
 def track_background(st: dict, kind: bytes, raw: bytes) -> None:
-    """Keep st["bg"] = {id: {"k": "agent"|"cmd"|"timer", "t": type, "r": role or description, "s": step, "ts": started,
-    "st": "run"|"done"|"killed", "end": ts}} and st["calls"] = {"search_run": web-search-only steps in a row,
-    "poll_step": the last step that only checked on running work}."""
+    """Keep st["bg"] = {id: {"k": "agent"|"cmd"|"timer"|"swarm", "t": type, "r": role or description, "s": step,
+    "ts": started, "st": "run"|"done"|"killed", "end": ts}} (a swarm member's id is `swarm:<name>`) and st["calls"] =
+    {"search_run": web-search-only steps in a row, "poll_step": the last step that only checked on running work,
+    "swarm_ts": when the agent last used the swarm or its board}."""
     bg = st.setdefault("bg", {})
     calls = st.setdefault("calls", {})
     if kind == b"SYSTEM_MESSAGE":
@@ -240,6 +247,10 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
             it = bg.get(m.group(1).decode())
             if it and it.get("st") == "run":
                 it.update(st="done", end="")
+        for m in SUBAGENT_ERROR.finditer(raw):
+            it = bg.get(m.group(1).decode())
+            if it and it.get("st") == "run":
+                it.update(st="killed", end="")
         return
     if kind == b"GENERIC":
         if CREATED not in raw and BG_STARTED not in raw:
@@ -267,10 +278,15 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
     step = d.get("step_index", st["last_step"])
     names = [str(c.get("name") or "") for c in tcs]
     pending: List[dict] = []
-    polling = bool(tcs) and any(it.get("st") == "run" and it.get("k") in ("agent", "cmd") for it in bg.values())
+    polling = bool(tcs) and any(it.get("st") == "run" and it.get("k") in ("agent", "cmd", "swarm") for it in bg.values())
     for name, c in zip(names, tcs):
-        a = c.get("args") if isinstance(c.get("args"), dict) else {}
+        raw_args = c.get("args")
+        a: dict = raw_args if isinstance(raw_args, dict) else {}
         action = str(a.get("Action") or "list").lower()
+        if name in SWARM_TOOLS:
+            calls["swarm_ts"] = d.get("created_at", "")  # the board is how a coordinator waits: never polling
+            if name == "swarm":
+                track_swarm(bg, a or {}, step, d.get("created_at", ""))
         if name == "invoke_subagent":
             specs = a.get("Subagents") if isinstance(a.get("Subagents"), list) else [a]
             pending += [{"t": str(s.get("TypeName") or ""), "r": str(s.get("Role") or "")[:80]}
@@ -286,7 +302,7 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
         elif name == "manage_subagents":
             if action in ("kill", "kill_all"):
                 polling = False
-                ids = a.get("ConversationId")
+                ids = a.get("ConversationIds") if a.get("ConversationIds") is not None else a.get("ConversationId")
                 ids = [str(i) for i in ids] if isinstance(ids, list) else [str(ids or "")]
                 for cid, it in bg.items():
                     if it.get("k") == "agent" and it.get("st") == "run" and (action == "kill_all" or cid in ids):
@@ -318,6 +334,35 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
     if polling:
         calls["poll_step"] = step
     calls["search_run"] = calls.get("search_run", 0) + 1 if tcs and all(n == "search_web" for n in names) else 0
+
+
+def track_swarm(bg: dict, a: dict, step: int, ts: str) -> None:
+    """A `swarm` tool call: `add` starts members (bg["swarm:<name>"], or <name>-1..<name>-k for `n` copies or a list of
+    `tasks`), `kill` ends a member or a whole numbered group. Members stay until killed: they wait on the board between
+    tasks, so the coordinator's own board activity (calls["swarm_ts"]) says whether the swarm is still alive."""
+    action = str(a.get("action") or a.get("Action") or "").strip().lower()
+    name = str(a.get("name") or a.get("Name") or "").strip().lstrip("@")
+    if not name or name in ("all", "coordinator"):
+        return
+    if action == "add":
+        tasks = a.get("tasks")
+        try:
+            k = len(tasks) if isinstance(tasks, list) and tasks else int(a.get("n") or 0)
+        except (TypeError, ValueError):
+            k = 0
+        brief = " ".join(str(a.get("brief") or "").split())
+        members = [f"{name}-{i}" for i in range(1, min(k, SWARM_GROUP_MAX) + 1)] if k > 1 else [name]
+        for i, member in enumerate(members):
+            task = tasks[i] if isinstance(tasks, list) and i < len(tasks) else ""
+            role = " ".join(str(task).split()) if isinstance(task, str) and task else brief
+            bg["swarm:" + member] = {"k": "swarm", "t": "swarm", "n": member, "r": role[:120], "s": step, "ts": ts,
+                                     "st": "run"}
+    elif action == "kill":
+        group = re.compile(re.escape("swarm:" + name) + r"(-\d+)?$")
+        for key, it in bg.items():
+            if it.get("k") == "swarm" and it.get("st") == "run" and group.match(key):
+                it.update(st="killed", end=ts)
+    _prune_bg(bg)
 
 
 def command_key(cmdline: str, ws: str = "") -> str:

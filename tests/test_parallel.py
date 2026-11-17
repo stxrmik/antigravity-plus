@@ -252,7 +252,66 @@ add("PLANNER_RESPONSE", calls=[("run_command", {"CommandLine": "pytest -q", "Wai
 background("agp-par-server/task-9", "pytest -q")
 check("tests in the background next to it → listed, server not", pre(), ["command «pytest -q»"], ["npm run dev"])
 
-# 13. parallel-hints off: no hints, and the Stop hook is silent while background tasks run (as before)
+# 14. Antigravity's native swarm: members the `swarm` tool added count as background work until killed
+def swarm(action, ago=0, **args):
+    add("PLANNER_RESPONSE", calls=[("swarm", dict(args, action=action))], ago=ago)
+
+
+start("swarm")
+add("PLANNER_RESPONSE", calls=[("swarm", {"action": "title", "title": "the parser rewrite"}),
+                               ("swarm", {"action": "add", "name": "parser", "brief": "You own src/parser.py.",
+                                          "workspace": "share"}),
+                               ("swarm", {"action": "add", "name": "verifier", "brief": "Check @parser's work."})])
+add("GENERIC", content="Added parser.")
+check("swarm add ×2 → board hint, members listed", pre(),
+      ["Your swarm is working: @parser, @verifier", "swarm_wait", "don't do the members' work", "before you kill"],
+      ["Keep working now", "(id "])
+check("…said once", pre(), empty=True)
+add("PLANNER_RESPONSE", calls=[("run_command", {"CommandLine": "sleep 30"})])
+check("sleep while the swarm works → polling, use swarm_wait", pre(), ["doesn't make them faster", "@parser", "swarm_wait"])
+add("PLANNER_RESPONSE", calls=[("swarm_wait", {"since": 3})])
+add("PLANNER_RESPONSE", calls=[("read_board", {"since": 3})])
+swarm("status")
+check("swarm_wait, read_board, swarm status → not polling", pre(), empty=True)
+swarm("add", name="shard", brief="Port one module.", n=3)
+check("n=3 → shard-1..shard-3 listed", pre(), ["@shard-1", "@shard-3"], ["@shard-4", "@shard «"])
+swarm("add", name="docs", brief="Docs.", tasks=["README", "CHANGELOG"])
+check("tasks list → docs-1, docs-2", pre(), ["@docs-1", "@docs-2"], ["@docs-3"])
+swarm("kill", name="shard")
+swarm("kill", name="docs-1")
+st = conv.load({"conversationId": cid, "transcriptPath": tp})
+alive = sorted(k for k, it in st["bg"].items() if it.get("k") == "swarm" and it.get("st") == "run")
+check("kill by group name and by copy → the rest still run", ", ".join(alive) if alive == [
+    "swarm:docs-2", "swarm:parser", "swarm:verifier"] else "", ["swarm:parser"])
+open(task, "w").write(OPEN)
+for f in ("a.py", "b.py", "c.py"):
+    add("PLANNER_RESPONSE", calls=[("write_file", {"Path": os.path.join(SP, f), "Content": "x = 1\n"})])
+add("PLANNER_RESPONSE", content="Раздал задачи, жду доску.")
+check("coordinator ends its turn while the swarm works → quiet", stop(), empty=True)
+for name in ("parser", "verifier", "docs"):
+    swarm("kill", name=name)
+add("PLANNER_RESPONSE", content="Готово.")
+check("swarm killed, items still open → Stop speaks again", stop(), ["Добавить карточку"])
+
+start("swarm-stale")
+swarm("add", name="parser", brief="Old work.", ago=3 * 3600)
+check("swarm untouched for 3 h → not running", pre(), empty=True)
+start("swarm-plan")
+swarm("add", name="parser", brief="Build it.")
+pre()
+open(task, "w").write("## INCY\n- [/] A — parser\n- [ ] B\n- [ ] C\n")
+check("swarm started in this turn → no plan hint", pre(), empty=True)
+
+# 14b. manage_subagents kill with ConversationIds (plural) and subagent error system messages
+start("kill-plural")
+invoke(("explorer", "Area 1", "sub-kill-0001"))
+invoke(("worker", "Area 2", "sub-kill-0002"))
+add("PLANNER_RESPONSE", calls=[("manage_subagents", {"Action": "kill", "ConversationIds": ["sub-kill-0001"]})])
+check("ConversationIds (plural) stops sub-kill-0001, keeps sub-kill-0002", pre(), ["worker «Area 2»"], ["Area 1"])
+add("SYSTEM_MESSAGE", content='[Message] timestamp=2026-11-17T10:00:00Z sender=system content=The subagent Area 2 (worker) with id "sub-kill-0002" encountered an error and stopped: RESOURCE_EXHAUSTED')
+check("subagent error SYSTEM_MESSAGE clears it from background_work", pre(), empty=True)
+
+# 15. parallel-hints off: no hints, and the Stop hook is silent while background tasks run (as before)
 subprocess.run([sys.executable, MEMORY, "config", "parallel-hints", "off"], capture_output=True)
 start("off")
 invoke(("explorer", "Map", "sub-iiii-0001"))

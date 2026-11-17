@@ -84,9 +84,12 @@ The plugin's commands are skills; your skills list shows each one's SKILL.md pat
 | `/parallel` | a task has 2+ independent parts that each take more than a few tool calls: split it, launch subagents in one step, keep working |
 | `/review` | you finished a substantial change (several files or tricky logic): before you report it done, and before `/commit` or `/pr` |
 | `/security-review` | your change touches auth, sessions, permissions, crypto, secrets, payments, uploads, or builds SQL / shell / HTML from user input |
+| `/deps` | user asks to check dependencies, before `/deploy`, or when `security-auditor` flags manifests (read-only audit) |
 | `/handoff` | the user wraps up with work left, or the conversation was compacted twice and a lot remains |
 | `/memory` search | before asking the user something an earlier conversation may have settled |
 | `/usage` | the user asks about tokens, cost or limits; or a long conversation may be near its context limit |
+| `/context` | user asks what fills context, or context hints warn at 150k/220k tokens |
+| `/insights` | user asks for hook/guard statistics, or when tuning plugin rules and false positives |
 | `/doctor` | a plugin command, hook, panel or subagent misbehaves |
 | `/ui-check` | you changed web UI (HTML, CSS, JS/TS, JSX/TSX, Vue, Svelte): check the pages at phone and desktop width before reporting done |
 | `/mobile` | you changed a mobile app's screens (SwiftUI, UIKit, Compose, layouts, Flutter, React Native): build, run it in the simulator or emulator and look, before reporting done |
@@ -100,10 +103,11 @@ The plugin's commands are skills; your skills list shows each one's SKILL.md pat
 | `/remember` | the user states a lasting rule for the repo, or corrects you in a way that should last |
 | `/settings` (`show`) | before you tell the user anything about their setup; changes only on the user's words |
 
-Only when the user asks, or under full access (you may offer them in one line): `/commit`, `/pr`, `/deploy`, `/fix-issue`, `/simplify`, `/export`, `/hooks`, and forgetting or cleaning up memory. Settings (`/settings`, `/memory`) change only on the user's words. `/update` (a new Antigravity Plus release, or a rollback) runs only on the user's words, even under full access: when the session context announces a release, tell the user once in one line at the end of your reply and offer it.
+Only when the user asks, or under full access (you may offer them in one line): `/commit`, `/pr`, `/release`, `/claude`, `/deploy`, `/fix-issue`, `/simplify`, `/export`, `/hooks`, and forgetting or cleaning up memory. Settings (`/settings`, `/memory`) change only on the user's words. `/update` (a new Antigravity Plus release, or a rollback) runs only on the user's words, even under full access: when the session context announces a release, tell the user once in one line at the end of your reply and offer it.
 
-Subagents use only read-only commands that help their task (a memory search, `/usage`, `/doctor`); `debugger` and `test-writer` may also run `/review` on their own change. Never `/commit`, `/pr`, `/remember`, `/handoff`, `/init`, `/git-init`, `/simplify` or a settings change from a subagent: report to the main agent instead.
+Subagents use only read-only commands that help their task (a memory search, `/usage`, `/context`, `/doctor`); `debugger` and `test-writer` may also run `/review` on their own change. Never `/commit`, `/pr`, `/release`, `/claude`, `/remember`, `/handoff`, `/init`, `/git-init`, `/simplify` or a settings change from a subagent: report to the main agent instead.
 
+When the `antigravity-plus_tools` MCP server is active, call its typed tools (`lsp_*`, `memory_search`, `git_state`, `quota`) directly instead of shell-quoting those scripts.
 When the user asks how many tokens, how full the context is or how much the session costs, also offer the live side panel: [Расход токенов](sidecar://antigravity-plus/usage/).
 
 ## Full access

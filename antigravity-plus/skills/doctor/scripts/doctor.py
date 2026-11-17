@@ -109,6 +109,9 @@ def frontmatter(path: str) -> Dict[str, str]:
 
 # ─────────────────────────────── Antigravity LS ───────────────────────────────
 
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def discover_ls() -> Optional[Tuple[str, str, str]]:
     addr, tok = os.environ.get("ANTIGRAVITY_LS_ADDRESS"), os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
     if addr and tok:
@@ -121,7 +124,7 @@ def discover_ls() -> Optional[Tuple[str, str, str]]:
             continue
         for port in compat.listening_ports(pid):
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1.5) as r:
+                with OPENER.open(f"http://127.0.0.1:{port}/healthz", timeout=1.5) as r:
                     if json.loads(r.read().decode() or "{}").get("status") == "ok":
                         return f"127.0.0.1:{port}", m.group(1), "process"
             except Exception:
@@ -134,14 +137,14 @@ def rpc(ls: Tuple[str, str, str], method: str, body: dict) -> dict:
         f"http://{ls[0]}/exa.language_server_pb.LanguageServerService/{method}",
         data=json.dumps(body).encode(), method="POST",
         headers={"Content-Type": "application/json", "x-codeium-csrf-token": ls[1]})
-    with urllib.request.urlopen(req, timeout=6) as r:
+    with OPENER.open(req, timeout=6) as r:
         return json.loads(r.read().decode() or "{}")
 
 
 # ─────────────────────────────── sections ───────────────────────────────
 
 def local_inventory() -> dict:
-    inv = {"skills": [], "agents": {}, "hooks": None, "manifest": {}, "rules": {}, "errors": []}
+    inv = {"skills": [], "agents": {}, "hooks": None, "manifest": {}, "rules": {}, "mcp": [], "errors": []}
     try:
         inv["manifest"] = load_jsonc(os.path.join(PLUGIN, "plugin.json"))
     except (OSError, ValueError) as e:
@@ -162,6 +165,21 @@ def local_inventory() -> dict:
                 inv["hooks"] = json.load(f)
         except ValueError as e:
             inv["errors"].append(f"hooks.json: {e}")
+    mp = os.path.join(PLUGIN, "mcp_config.json")
+    if os.path.isfile(mp):
+        try:
+            with open(mp, encoding="utf-8") as f:
+                mc = json.load(f)
+            srvs = (mc.get("mcpServers") or {}) if isinstance(mc, dict) else {}
+            inv["mcp"] = sorted(srvs) if isinstance(srvs, dict) else []
+            for sname, cfg in (srvs.items() if isinstance(srvs, dict) else ()):
+                for a in (cfg.get("args") or []) if isinstance(cfg, dict) else []:
+                    if isinstance(a, str) and "${PLUGIN_ROOT}/" in a:
+                        rel = a.split("${PLUGIN_ROOT}/", 1)[1]
+                        if not os.path.isfile(os.path.join(PLUGIN, rel)):
+                            inv["errors"].append(f"mcp {sname}: missing {rel}")
+        except (OSError, ValueError) as e:
+            inv["errors"].append(f"mcp_config.json: {e}")
     rd = os.path.join(PLUGIN, "rules")
     if os.path.isdir(rd):
         inv["rules"] = {fn: os.path.getsize(os.path.join(rd, fn)) for fn in sorted(os.listdir(rd)) if fn.endswith(".md")}
@@ -224,7 +242,7 @@ def off_line(key: str, warn: str) -> str:
 
 MODULE_KEYS = {"quality": ("checkEdits", "finishTasks", "autoReview", "autoVerify"),
                "facts": ("factChecks", "objectiveAnswers"), "memory": ("autoMemory", "recentConversations"),
-               "parallel": ("parallelHints",), "speed": ("speedHints",), "git": ("autoCi", "gitChecks"),
+               "parallel": ("parallelHints",), "speed": ("speedHints", "quotaHints"), "git": ("autoCi", "gitChecks"),
                "lsp": ("lspChecks",)}
 
 
@@ -355,6 +373,33 @@ def hook_selftest() -> List[str]:
         out.append(f"{OK if ok else BAD} speed (PreInvocation): после трёх неудачных команд подряд агент меняет подход"
                    + ("" if ok else f" — {res[:160]!r}"))
         _cleanup_selftest(tp)
+    if os.path.isfile(instr) and memstore and not memstore.settings().get("quotaHints", True):
+        out.append(off_line("quotaHints", "quota: подсказки о лимитах плана выключены (`memory.py config quota-hints on`)"))
+    elif os.path.isfile(instr) and os.path.isfile(os.path.join(hooks, "quota.py")):
+        tp = _fake_transcript(["Сделай задачу"])
+        fd, qcache = tempfile.mkstemp(prefix="agp-doctor-q-", suffix=".json")
+        os.close(fd)
+        try:
+            with open(qcache, "w", encoding="utf-8") as fh:
+                json.dump({"at": time.time(), "groups": [{"name": "Gemini Models", "models": ["gemini 4 carbon"], "buckets": {
+                    "weekly": {"left": 0.08, "reset": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 86400)), "disabled": False},
+                    "5h": {"left": 0.9, "reset": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3600)), "disabled": False}}}]}, fh)
+            r = subprocess.run([py, instr], input=json.dumps({
+                "conversationId": SELFTEST_ID, "transcriptPath": tp, "modelName": "Gemini 4 Carbon (High)"
+            }, ensure_ascii=False), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10,
+                cwd=PLUGIN, env=dict(os.environ, AGP_QUOTA_CACHE=qcache))
+            res = (r.stdout or "") + (r.stderr or "")
+            ok = r.returncode == 0 and "<quota" in res and "week 8.0% left" in res
+            out.append(f"{OK if ok else BAD} quota (PreInvocation): при низком лимите агент видит остаток и советы экономии"
+                       + ("" if ok else f" — {res[:160]!r}"))
+        except (OSError, subprocess.SubprocessError) as e:
+            out.append(f"{BAD} quota (PreInvocation): {e}")
+        finally:
+            try:
+                os.remove(qcache)
+            except OSError:
+                pass
+            _cleanup_selftest(tp)
     stop = os.path.join(hooks, "stop.py")
     if os.path.isfile(instr) and memstore and not memstore.settings().get("autoMemory", True):
         out.append(off_line("autoMemory", "автопамять выключена: агент сохраняет только по просьбе, подсказок нет (`memory.py config auto-memory on`)"))
@@ -613,6 +658,30 @@ def antigravity_view(inv: dict, workspace: Optional[str]) -> List[str]:
         agents.append(f"`{ag.get('name')}` ({tier}: {', '.join(t for t in tools if t != 'send_message')})")
     out.append(f"{OK if agents else WARN} субагенты: " + ("; ".join(agents) if agents else "нет"))
     out.append(f"{OK if me.get('hooksJson') else BAD} хуки: " + ("hooks.json загружен" if me.get("hooksJson") else "не загружены"))
+    plugin_mcp = [str(s.get("serverName") or s.get("originalServerName") or s.get("name"))
+                  for s in (me.get("mcpServers") or [])
+                  if isinstance(s, dict) and (s.get("serverName") or s.get("originalServerName") or s.get("name"))]
+    if inv.get("mcp"):
+        states = {}
+        try:
+            for item in (rpc(ls, "GetMcpServerStates", {}).get("states") or []):
+                spec = item.get("spec") if isinstance(item, dict) else {}
+                sname = str((spec or {}).get("serverName") or "")
+                if sname:
+                    states[sname] = (str(item.get("status") or ""), str(item.get("error") or ""))
+        except Exception:
+            pass
+        parts, ok_mcp = [], bool(plugin_mcp)
+        for mname in plugin_mcp:
+            full = f"{NAME}_{mname}" if not mname.startswith(f"{NAME}_") else mname
+            st, err = states.get(full) or states.get(mname) or ("", "")
+            short = st.replace("MCP_SERVER_STATUS_", "").lower() if st else "?"
+            if err or "error" in short or "fail" in short:
+                ok_mcp = False
+                parts.append(f"`{full}` ({short}: {err[:80]})" if err else f"`{full}` ({short})")
+            else:
+                parts.append(f"`{full}` ({short})")
+        out.append(f"{OK if ok_mcp else WARN} MCP: " + (", ".join(parts) if parts else "не подхвачен (перезапустите Antigravity)"))
     active = sorted(os.path.basename(r.get("absolutePath") or "") for r in me.get("rules") or []
                     if ((r.get("scope") or {}).get("projectScope") or {}).get("trigger") == "CORTEX_MEMORY_TRIGGER_ALWAYS_ON")
     missing_rules = sorted(set(inv["rules"]) - set(active))
@@ -916,7 +985,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     m = inv["manifest"]
     rep = [f"## 🩺 Antigravity Plus — диагностика", "",
            f"**Плагин:** `{PLUGIN}` · версия {m.get('version', '?')} · скиллов {len(inv['skills'])} · "
-           f"субагентов {len(inv['agents'])} · хуков {len(inv['hooks'] or {})}"]
+           f"субагентов {len(inv['agents'])} · хуков {len(inv['hooks'] or {})}"
+           + (f" · MCP {len(inv['mcp'])}" if inv.get("mcp") else "")]
     for e in inv["errors"]:
         rep.append(f"{BAD} {e}")
     for name, size in inv["rules"].items():
