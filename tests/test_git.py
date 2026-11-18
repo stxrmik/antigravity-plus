@@ -323,7 +323,9 @@ ssh_rw_sql = "ssh web1 'python3 -' <<'EOF'\nimport sqlite3\nc=sqlite3.connect('d
 ban_extra = {"conversationId": cid, "transcriptPath": tp, "lastUserInput": "ничего не пушь"}
 check("push ban: read-only ssh python3 heredoc allowed", guard(ssh_ro_heredoc, ban_extra).get("decision") == "allow", str(guard(ssh_ro_heredoc, ban_extra)))
 check("push ban: cd + read-only ssh python3.12 heredoc allowed", guard(ssh_ro_cd, ban_extra).get("decision") == "allow", str(guard(ssh_ro_cd, ban_extra)))
-check("push ban: read-only ssh python3 -c (double-quoted) allowed", guard(ssh_ro_inline, ban_extra).get("decision") == "allow", str(guard(ssh_ro_inline, ban_extra)))
+# `\"` inside "…" is a POSIX shell escape; PowerShell has none (guard reads a backslash there as a path separator)
+if os.name != "nt":
+    check("push ban: read-only ssh python3 -c (double-quoted) allowed", guard(ssh_ro_inline, ban_extra).get("decision") == "allow", str(guard(ssh_ro_inline, ban_extra)))
 check("push ban: read-only ssh python3 -c (single-quoted) allowed", guard(ssh_ro_inline2, ban_extra).get("decision") == "allow", str(guard(ssh_ro_inline2, ban_extra)))
 check("push ban: ssh python3 writing file triggers user-said-no-push", guard(ssh_rw_heredoc, ban_extra).get("decision") == "force_ask")
 check("push ban: ssh rm + python3 triggers user-said-no-push", guard(ssh_rw_shell, ban_extra).get("decision") == "force_ask")

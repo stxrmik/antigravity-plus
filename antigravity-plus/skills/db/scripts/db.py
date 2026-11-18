@@ -1134,15 +1134,26 @@ ORDER BY schemaname, tablename, indexname;
 """
 
 
+def _one_line(sql: str) -> str:
+    """Line breaks outside '…' literals → spaces (comments are already gone by now): a Windows .cmd/.bat wrapper
+    around psql cuts its -c argument at the first line break, which would leave half a statement."""
+    out, quoted = [], False
+    for ch in sql:
+        if ch == "'":
+            quoted = not quoted  # '' (an escaped quote) toggles twice
+        out.append(" " if ch in "\r\n" and not quoted else ch)
+    return "".join(out)
+
+
 def _pg_readonly_script(body: str) -> str:
     """Wrap fixed catalog SQL in a read-only transaction with a server-side statement timeout, then roll back."""
-    return (
-        "SET standard_conforming_strings = on;\n"
-        "BEGIN READ ONLY;\n"
-        "SET LOCAL statement_timeout = '25s';\n"
-        "SET LOCAL default_transaction_read_only = on;\n"
-        f"{body}\n"
-        "ROLLBACK;\n"
+    return _one_line(
+        "SET standard_conforming_strings = on; "
+        "BEGIN READ ONLY; "
+        "SET LOCAL statement_timeout = '25s'; "
+        "SET LOCAL default_transaction_read_only = on; "
+        f"{body} "
+        "ROLLBACK;"
     )
 
 
@@ -1624,7 +1635,7 @@ def _run_explain(ws: str, target_arg: Optional[str], sql: str, analyze: bool) ->
         "BEGIN READ ONLY; "
         "SET LOCAL statement_timeout = '55s'; "
         "SET LOCAL default_transaction_read_only = on; "
-        f"EXPLAIN ({opts}) {cleaned}; "
+        f"EXPLAIN ({opts}) {_one_line(cleaned)}; "
         "ROLLBACK;"
     )
     cmd, env, c_err = _build_psql_cmd(

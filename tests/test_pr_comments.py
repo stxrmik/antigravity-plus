@@ -433,7 +433,7 @@ check(
     all(
         c["git_terminal_prompt"] == "0"
         and c["gh_prompt_disabled"] == "1"
-        and not c["stdin_isatty"]
+        and (os.name == "nt" or not c["stdin_isatty"])  # Windows reports NUL (DEVNULL) as a TTY
         and c["stdin_data"] == ""
         for c in calls
     ),

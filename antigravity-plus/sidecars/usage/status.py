@@ -133,17 +133,16 @@ def _read_json_dict(path: str) -> dict:
 
 
 def _tilde(path: str, home: str) -> str:
+    """A path for the panel: `~` for the home folder and `/` as the separator on every system (like the plugin's
+    other reports), so `C:\\Users\\me\\proj` shows as `~/proj`."""
     if not path:
         return ""
+    p = path.replace("\\", "/") if WINDOWS else path
     if home and len(home) > 1:
-        p = path
-        if p == home or p.startswith(home + os.sep) or p.startswith(home + "/"):
-            return "~" + p[len(home):]
-        if os.sep == "\\":
-            fwd = home.replace("\\", "/")
-            if p == fwd or p.startswith(fwd + "/"):
-                return "~" + p[len(fwd):]
-    return path
+        h = home.replace("\\", "/") if WINDOWS else home
+        if p == h or p.startswith(h.rstrip("/") + "/"):
+            return "~" + p[len(h.rstrip("/")):]
+    return p
 
 
 def _mask(text: str, home: str) -> str:
@@ -382,12 +381,12 @@ def _read_agents(agp: str, home: str, now: float) -> List[dict]:
                 for fp, ts in ordered:
                     if ts and now - ts > COORD_FILES_SEC:
                         continue
-                    rel = os.path.relpath(fp, ws) if ws and fp.startswith(ws + os.sep) else _tilde(fp, home)
+                    rel = os.path.relpath(fp, ws).replace(os.sep, "/") if ws and fp.startswith(ws + os.sep) else _tilde(fp, home)
                     rel_files.append(rel)
             elif isinstance(raw_files, list):
                 for fp in raw_files:
                     if isinstance(fp, str) and fp:
-                        rel = os.path.relpath(fp, ws) if ws and fp.startswith(ws + os.sep) else _tilde(fp, home)
+                        rel = os.path.relpath(fp, ws).replace(os.sep, "/") if ws and fp.startswith(ws + os.sep) else _tilde(fp, home)
                         rel_files.append(rel)
             out.append({
                 "id": str(cid),
