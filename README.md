@@ -553,8 +553,8 @@ Antigravity может спрашивать и сам.
 <summary><b>🛡️ Guard: что останавливается</b></summary>
 
 - **Необратимое:** `git reset --hard`, `git clean -f`, `git checkout .`, force-push, `git branch -D`, `--no-verify`,
-  `rm -rf` на `/`, `~`, `.`, `*`; `DROP`/`TRUNCATE` через клиент БД; `mkfs`, `dd` на диск; `curl | sh`; `sudo`;
-  `terraform destroy`, `kubectl delete`, `npm publish`, `gh pr merge`; чтение ключей SSH и Keychain.
+  `rm -rf` и `find … -delete` на `/`, `~`, `.`, `*`; `DROP`/`TRUNCATE` через клиент БД; `mkfs`, `dd` на диск;
+  `curl | sh`; `sudo`; `terraform destroy`, `kubectl delete`, `npm publish`, `gh pr merge`; чтение ключей SSH и Keychain.
 - **Windows:** `Remove-Item -Recurse -Force` и `rd /s /q` на диск, профиль или текущую папку; `iwr | iex`;
   `format`, `diskpart`; `Set-ExecutionPolicy Unrestricted`, отключение Defender и брандмауэра; автозапуск через
   реестр, планировщик и папку Startup; `Start-Process -Verb RunAs`.
@@ -563,7 +563,8 @@ Antigravity может спрашивать и сам.
   `rm`, `mv`, `cp`, `chmod`, `tee`, `sed -i` или `>` в `/System`, `/usr` (кроме `/usr/local`), `/etc`, `/Library`,
   `C:\Windows`, `Program Files`, в настройки Antigravity и в сам плагин.
 - Текст в кавычках — данные: `git commit -m "…rm -rf…"` и `rg "DROP TABLE"` проходят, а `bash -c '…'`,
-  `powershell -Command "…"` и `ssh host '…'` проверяются. `curl … | python3 -c '…'` и `curl … | jq` читают данные и
+  `powershell -Command "…"`, `ssh host '…'`, `env -S '…'` и `$(…)` проверяются как команды — каждая по своим `&&`
+  и `;` (`sh -c 'cd / && rm -rf *'` останавливается). `curl … | python3 -c '…'` и `curl … | jq` читают данные и
   проходят; `| sh`, `| bash -s`, `| python3` выполняют скачанное и останавливаются. Переменная, заданная в той же
   команде (`S=/path && rm -rf $S/x`), не считается пустой.
 - Всё остальное идёт по вашим настройкам разрешений Antigravity: guard отвечает «нет возражений», а не одобряет.

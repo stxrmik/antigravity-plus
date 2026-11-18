@@ -3,7 +3,8 @@ r"""Antigravity Plus — PreToolUse guard.
 
 Stops and asks the user (decision "force_ask", which ignores cached "always allow" grants) before:
   * run_command (sh/bash/zsh on macOS and Linux, PowerShell or cmd on Windows): irreversible or outward-facing
-    commands — rm -rf / Remove-Item -Recurse -Force on /, ~, C:\, . or *, git reset --hard,
+    commands — rm -rf / find -delete / Remove-Item -Recurse -Force on /, ~, C:\, . or * (also inside `sh -c '…'`,
+    `$(…)` or `env -S '…'`), git reset --hard,
     git clean -f, force-push, --no-verify, DROP/TRUNCATE via a DB client, mkfs/dd to a device,
     curl | sh, sudo, terraform destroy, kubectl delete, npm publish, gh pr merge, keychain/SSH-key reads,
     changes to system folders (/System, /usr, /etc, /Library, C:\Windows…) by rm/mv/cp/chmod/tee/sed -i/redirection…
@@ -92,8 +93,8 @@ PASS = {"decision": "allow"}  # = delegate to Antigravity's default permission p
 AUTO = {"decision": "auto_approve"}
 I = re.I
 
-# (rule id, regex, reason). Regexes run on each shell segment (split on ; && || | newlines),
-# except PIPE_RULES which run on the whole command line.
+# (rule id, regex, reason). Regexes run on each shell segment (split on ; & && || | newlines outside quotes and
+# $(…): split_unquoted), except PIPE_RULES which run on the whole command line.
 SEGMENT_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
     ("git-reset-hard", re.compile(r"\bgit\b.*\breset\b.*--hard\b"),
      "`git reset --hard` безвозвратно удалит незакоммиченные изменения."),
@@ -241,11 +242,13 @@ SYSTEM_RULES = {"disk-format", "disk-format-win", "system-power", "system-power-
 TEXT_PROGRAMS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "git-grep", ":", "true", "test", "["}
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "ssh", "eval", "xargs", "su", "sudo", "doas",
           "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe", "iex", "invoke-expression"}
-# When the command hands text to another interpreter, quoted text is code, not data.
+# When the command hands text to another interpreter, quoted text is code, not data (`env -S '…'` splits its string
+# into a command line of its own).
 INTERPRETER = re.compile(r"\b((ba|z|da|k)?sh|fish)\s+(-\w+\s+)*-c\b|\beval\b|\bxargs\b|\bssh\b|\bwatch\b|\bdocker\s+(exec|run)\b|\bkubectl\s+exec\b"
-                         r"|\b(powershell|pwsh)(\.exe)?\s+(-\w+\s+)*-c(ommand)?\b|\bcmd(\.exe)?\s+/[ck]\b|\b(iex|invoke-expression)\b", I)
+                         r"|\b(powershell|pwsh)(\.exe)?\s+(-\w+\s+)*-c(ommand)?\b|\bcmd(\.exe)?\s+/[ck]\b|\b(iex|invoke-expression)\b"
+                         r"|\benv(\s+(-\w+|\w+=\S*))*\s+(-[iv0]*S|--split-string)", I)
 QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][\w-]*)\1([^\n]*)\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+HEREDOC = re.compile(r"<<-?\s*\\?(['\"]?)([A-Za-z_][\w-]*)\1([^\n]*)\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)", re.S)  # <<EOF <<'EOF' <<\EOF
 
 DANGEROUS_RM_TARGETS = {"/", "/*", "~", "~/", "~/*", "..", "../", "../*",
                         "$HOME", "${HOME}", "$HOME/", "${HOME}/", "$HOME/*", "${HOME}/*", "/Users", "/home"}
@@ -304,9 +307,146 @@ SELF_SWITCH_REASON = ("команда пишет в разговор Antigravity
                       "их включает только сам пользователь своим сообщением.")
 
 
-def split_segments(cmd: str) -> List[str]:
-    parts = re.split(r"\|\||&&|;|\||\r?\n|(?<![<>&])&(?![>&])", cmd)
-    return [p.strip() for p in parts if p.strip()]
+def _opener(s: str, i: int) -> Tuple[str, str]:
+    """(opening, what closes it) when a quoted string or a command substitution starts at s[i] — `'`, `"`, `$'` (an
+    ANSI-C string, where a backslash escapes even the quote), `$(` `<(` `>(` and a backtick — else ("", ""). In
+    PowerShell (Windows) a backtick escapes and `$'` is no string."""
+    c, posix = s[i], not compat.WINDOWS
+    if c in "'\"":
+        return c, c
+    if posix and s.startswith("$'", i):
+        return "$'", "$'"
+    if s.startswith(("$(", "<(", ">("), i):
+        return s[i:i + 2], ")"
+    if posix and c == "`":
+        return c, c
+    return "", ""
+
+
+def _skip(s: str, i: int, close: str) -> int:
+    """s[i:] lies inside a string or substitution that `close` ends (see _opener; ")" also for the parentheses nested
+    in a substitution): the index just past its end, -1 when it never ends. Quotes, $(…) and backticks nest inside it
+    as the shell reads them; in a `#` comment inside $(…) quotes count for nothing."""
+    n, esc = len(s), ("`" if compat.WINDOWS else "\\")
+    stack = [close]
+    while i < n:
+        top, c = stack[-1], s[i]
+        if top == "'":  # nothing is special inside '…' but its end
+            if c == "'":
+                stack.pop()
+            i += 1
+        elif top == "$'":
+            if c == "'":
+                stack.pop()
+            i += 2 if c == "\\" else 1
+        elif c == esc:
+            i += 2
+        elif c == top:
+            stack.pop()
+            i += 1
+        elif top == "`":
+            i += 1
+        elif c == "$" and s.startswith("(", i + 1):
+            stack.append(")")
+            i += 2
+        elif c == "`" and esc == "\\":
+            stack.append("`")
+            i += 1
+        elif top == '"':
+            i += 1
+        elif c == "#" and (i == 0 or s[i - 1] in " \t\n;&|("):  # its quotes count for nothing; `)` still ends $(…) (zsh)
+            while i < n and s[i] not in "\n)":
+                i += 1
+        elif c in "'\"":
+            stack.append(c)
+            i += 1
+        elif c == "$" and s.startswith("'", i + 1) and esc == "\\":
+            stack.append("$'")
+            i += 2
+        elif c == "(" or c in "<>" and s.startswith("(", i + 1):
+            stack.append(")")
+            i += 1 if c == "(" else 2
+        else:
+            i += 1
+        if not stack:
+            return i
+    return -1
+
+
+def _split(cmd: str) -> List[Tuple[str, str]]:
+    """The command's simple commands, each with the operator after it ("" after the last): split at ; & && || | |&
+    and newlines — not inside quotes, $(…), <(…), >(…) or backticks (`sh -c 'cd / && rm -rf *'` and `x=$(a; b)` stay
+    whole), nor at the & or | of a redirection (2>&1, &>, >|). A `#` that starts a word comments out the rest of the
+    line in bash but not in an interactive zsh, so quotes in it count for nothing while separators still split; a
+    quote that never closes is just a character: nothing after either can hide inside a string."""
+    out: List[Tuple[str, str]] = []
+    esc = "`" if compat.WINDOWS else "\\"
+    start, i, n, comment, broken = 0, 0, len(cmd), False, False
+    while i < n:
+        c = cmd[i]
+        if c == "\n":
+            comment = False
+        elif comment or c in ";|&":
+            pass
+        elif c == esc:
+            i += 2
+            continue
+        elif c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|()"):
+            comment = True
+        else:  # a string that never ends is a syntax error the shell runs nothing after — or a heredoc's apostrophe:
+            opening, close = _opener(cmd, i) if not broken else ("", "")  # from there on, split as plain text
+            end = _skip(cmd, i + len(opening), close) if opening else -1
+            broken = broken or bool(opening) and end < 0
+            i = i + 1 if end < 0 else end
+            continue
+        op = ""
+        if c in ";\n":
+            op = c
+        elif c == "|" and not (i and cmd[i - 1] == ">"):
+            op = cmd[i:i + 2] if cmd[i:i + 2] in ("||", "|&") else c
+        elif c == "&" and not (i and cmd[i - 1] in "<>") and not cmd.startswith("&>", i):
+            op = "&&" if cmd.startswith("&&", i) else c
+        if op:
+            out.append((cmd[start:i], op))
+            i += len(op)
+            start = i
+        else:
+            i += 1
+    out.append((cmd[start:], ""))
+    return out
+
+
+def split_unquoted(cmd: str) -> List[str]:
+    """The command's simple commands (_split): `ssh host 'a && b'` and `x=$(a; b)` stay one segment each."""
+    return [s.strip() for s, _op in _split(cmd) if s.strip()]
+
+
+def _bare(seg: str) -> str:
+    """The segment as the rules read it: quoted strings emptied to '' and $(…) / backtick bodies to $() / `` — what
+    the command itself says, not the data it carries or the commands it runs inside (those are analysed on their
+    own, split at their own separators). A comment stays as it is."""
+    out: List[str] = []
+    esc = "`" if compat.WINDOWS else "\\"
+    i, n, broken = 0, len(seg), False
+    while i < n:
+        c = seg[i]
+        if c == esc:
+            out.append(seg[i:i + 2])
+            i += 2
+            continue
+        if c == "#" and (i == 0 or seg[i - 1] in " \t\n;&|()"):
+            out.append(seg[i:])
+            break
+        opening, close = _opener(seg, i) if not broken else ("", "")
+        end = _skip(seg, i + len(opening), close) if opening else -1
+        broken = broken or bool(opening) and end < 0
+        if end < 0:  # no string here, or one that never ends (_split): the character as it is
+            out.append(c)
+            i += 1
+            continue
+        out.append("''" if close in ("'", '"', "$'") else opening + close)
+        i = end
+    return "".join(out)
 
 
 def tokenize(segment: str) -> List[str]:
@@ -370,7 +510,8 @@ def talks_to_claude(cmd: str) -> bool:
     return norm(rest[0]) == norm(CLAUDE_TALK)
 
 
-ENV_VAL_FLAGS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+ENV_VAL_FLAGS = {"-u", "--unset", "-C", "--chdir"}
+ENV_SPLIT = re.compile(r"^(?:-[iv0]*S|--split-string(?==|$))=?(.*)$", re.S)  # env -S 'cmd args', -S'…', --split-string=…
 
 
 def strip_prefixes(tokens: List[str]) -> List[str]:
@@ -381,7 +522,14 @@ def strip_prefixes(tokens: List[str]) -> List[str]:
         elif t == "env":
             tokens = tokens[1:]
             while tokens:
-                if tokens[0] in ENV_VAL_FLAGS and len(tokens) > 1:
+                split = ENV_SPLIT.match(tokens[0])
+                if split:  # the string is a command line of its own: env splits it into the words it runs
+                    line, rest = (split.group(1), tokens[1:]) if split.group(1) else (" ".join(tokens[1:2]), tokens[2:])
+                    try:
+                        tokens = shlex.split(line, posix=True) + rest
+                    except ValueError:
+                        tokens = line.split() + rest
+                elif tokens[0] in ENV_VAL_FLAGS and len(tokens) > 1:
                     tokens = tokens[2:]
                 elif tokens[0] == "--":
                     tokens = tokens[1:]
@@ -468,16 +616,122 @@ def check_rm(segment: str, known: Optional[Dict[str, str]] = None) -> Optional[T
         return "rm-dangerous", "`rm --no-preserve-root` может удалить всю систему."
     if not re.search(r"[rR]", flags):
         return None
+    return wipe_verdict("rm -r {t}", targets, known)
+
+
+def rm_scope(t: str, known: Optional[Dict[str, str]]) -> Tuple[str, str]:
+    """What `rm -r <t>` wipes: "system" (/, the home folder, a top-level folder, above the current folder —
+    rm_reaches_up), "var" (`$DIR/…` with DIR unknown: from / when it is empty), "folder" (everything in the current
+    folder) or "" — with t as the command means it (variables set earlier in the command filled in)."""
+    t = with_known(t, known)  # shlex keeps ~ and $VAR literal, which is what we want to inspect
+    if t in DANGEROUS_RM_TARGETS or t.rstrip("/") in DANGEROUS_RM_TARGETS or TOP_LEVEL.match(t) or rm_reaches_up(t, known):
+        return "system", t
+    if t in FOLDER_RM_TARGETS or t.rstrip("/") in FOLDER_RM_TARGETS:
+        return "folder", t
+    if VAR_ROOT.match(t) and not re.match(r"^\$\{?HOME\}?/", t):
+        return "var", t
+    return "", t
+
+
+def wipe_verdict(form: str, targets: List[str], known: Optional[Dict[str, str]]) -> Optional[Tuple[str, str]]:
+    """The stop for wiping these targets the way `form` says (`rm -r {t}`, `find {t} -delete`): "rm-dangerous" for the
+    system, the home folder or an unknown variable's path, else "rm-folder" for the current folder (the project)."""
     folder = None
-    for t in targets:  # shlex keeps ~ and $VAR literal, which is what we want to inspect
-        t = with_known(t, known)
-        if t in DANGEROUS_RM_TARGETS or t.rstrip("/") in DANGEROUS_RM_TARGETS or TOP_LEVEL.match(t) or rm_reaches_up(t, known):
-            return "rm-dangerous", f"`rm -r {t}` удалит всё содержимое `{t}` без корзины."
-        if t in FOLDER_RM_TARGETS or t.rstrip("/") in FOLDER_RM_TARGETS:
-            folder = folder or ("rm-folder", f"`rm -r {t}` удалит всё содержимое текущей папки без корзины.")
-        elif VAR_ROOT.match(t) and not re.match(r"^\$\{?HOME\}?/", t):
-            return "rm-dangerous", f"`rm -r {t}`: если переменная пустая, удаление пойдёт от корня `/`."
+    for t in targets:
+        kind, t = rm_scope(t, known)
+        what = form.replace("{t}", t)
+        if kind == "system":
+            return "rm-dangerous", f"`{what}` удалит всё содержимое `{t}` без корзины."
+        if kind == "var":
+            return "rm-dangerous", f"`{what}`: если переменная пустая, удаление пойдёт от корня `/`."
+        if kind == "folder":
+            folder = folder or ("rm-folder", f"`{what}` удалит всё содержимое текущей папки без корзины.")
     return folder
+
+
+FIND_OPTIONS = {"-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x"}  # before the starting points (GNU, BSD)
+# Tests that pick files by name (-empty: nothing in what it picks to lose); a name of only `*` picks everything.
+FIND_NARROW = {"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-regex", "-iregex", "-lname",
+               "-ilname", "-inum", "-samefile"}
+FIND_VALUE = FIND_NARROW | {"-type", "-xtype", "-maxdepth", "-mindepth", "-mtime", "-mmin", "-atime", "-amin", "-ctime",
+                            "-cmin", "-Btime", "-Bmin", "-newer", "-anewer", "-cnewer", "-Bnewer", "-size", "-perm",
+                            "-user", "-group", "-uid", "-gid", "-links", "-fstype", "-used", "-context", "-printf",
+                            "-fprint", "-fprint0", "-fls", "-regextype", "-files0-from"}
+FIND_REMOVERS = {"rm", "grm", "unlink", "shred", "srm"}
+
+
+def find_deletion(tokens: List[str]) -> Optional[Tuple[List[str], str, bool]]:
+    """A `find` that deletes (`-delete`, `-exec rm … {}`): (its starting points, the action, whether the action runs
+    for everything it walks — no name test before it in its branch: `find ~ -type f -delete`, not `find . -name
+    '*.pyc' -delete` or `find . \\( -name a -o -name b \\) -delete`); None for any other command."""
+    if not tokens or os.path.basename(tokens[0]) not in ("find", "gfind"):
+        return None
+    args, roots, i = tokens[1:], [], 0
+    while i < len(args):  # options before the starting points
+        if args[i] in FIND_OPTIONS or re.match(r"^-O\d$", args[i]):
+            i += 1
+        elif args[i] in ("-D", "-f") and i + 1 < len(args):  # GNU -D <debug opts>; BSD -f <starting point>
+            roots += args[i + 1:i + 2] if args[i] == "-f" else []
+            i += 2
+        else:
+            i += args[i] == "--"
+            break
+    while i < len(args) and not args[i].startswith("-") and args[i] not in ("(", ")", "!", ","):
+        roots.append(args[i])
+        i += 1
+    expr = args[i:]
+    # An action runs for what the AND-chain before it lets through: in its own -o branch, inside every group around
+    # it. Per open group: has the chain outside it named files ("outer"), has the chain so far ("chain"), has this
+    # branch itself ("own"), had every earlier branch ("all"), is the group negated ("neg").
+    groups: List[Dict[str, bool]] = [{"outer": False, "chain": False, "own": False, "all": True, "neg": False}]
+    action, everything, neg, i = "", False, False, 0
+    while i < len(expr):
+        t, g = expr[i], groups[-1]
+        i += 1
+        if t in ("!", "-not"):
+            neg = not neg
+            continue
+        if t == "(":
+            groups.append({"outer": g["chain"], "chain": g["chain"], "own": False, "all": True, "neg": neg})
+        elif t == ")" and len(groups) > 1:
+            groups.pop()
+            if g["own"] and g["all"] and not g["neg"]:  # every branch picks files by name: so does the group
+                groups[-1]["chain"] = groups[-1]["own"] = True
+        elif t in ("-o", "-or", ","):
+            g["all"], g["chain"], g["own"] = g["all"] and g["own"], g["outer"], False
+        elif t in FIND_NARROW or t == "-empty":
+            value = expr[i] if t != "-empty" and i < len(expr) else "x"
+            i += t != "-empty"
+            if not neg and not re.fullmatch(r"\**" if "regex" not in t else r"\^?(\.\*)*\$?", value):
+                g["chain"] = g["own"] = True
+        elif t in ("-delete", "-exec", "-execdir", "-ok", "-okdir"):
+            if t != "-delete":
+                end = i
+                while end < len(expr) and expr[end] != ";" and not (expr[end] == "+" and expr[end - 1] == "{}"):
+                    end += 1
+                runs = strip_prefixes(expr[i:end])  # -exec sudo rm …
+                runs, i = os.path.basename(runs[0]) if runs else "", end + 1
+                if runs not in FIND_REMOVERS:
+                    neg = False
+                    continue
+                t += " " + runs
+            action = action or t
+            everything = everything or not g["chain"]
+        elif t in FIND_VALUE or re.match(r"^-newer[a-zA-Z]{2}$", t):
+            i += 1
+        elif t == "-fprintf":
+            i += 2
+        neg = False
+    return (roots or ["."], action, everything) if action else None
+
+
+def check_find(segment: str, known: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str]]:
+    """`find <root> -delete` / `-exec rm … {}` that deletes everything it walks: the same stop as `rm -r <root>`
+    (check_rm) — / or the home folder, an unknown variable's path, the current folder."""
+    found = find_deletion(strip_prefixes(tokenize(segment))) if "find" in segment else None
+    if not found or not found[2]:
+        return None
+    return wipe_verdict("find {t} " + found[1], found[0], known)
 
 
 UP_ONLY = re.compile(r"^\.\.(/\.\.)*(/\*?)?$")  # `../..`, `../../*`: above the parent folder too
@@ -581,6 +835,9 @@ def changed_paths(segment: str, known: Optional[Dict[str, str]] = None) -> Tuple
             paths += pos
         elif prog == "dd":
             paths += [a[3:] for a in args if a.startswith("of=")]
+        else:  # find … -delete: each starting point when it deletes all it walks (like rm -r), else what's inside it
+            found = find_deletion(tokens)
+            paths += ([r if found[2] else r.rstrip("/") + "/*" for r in found[0]]) if found else []
     return ([expand_path(p, known) for p in paths if p and p != "-"], [expand_path(p, known) for p in deep])
 
 
@@ -606,44 +863,15 @@ def check_writes(segment: str, known: Optional[Dict[str, str]] = None) -> Option
 
 
 def pipelines(cmd: str) -> List[List[str]]:
-    """The command line's pipelines, each a list of its stages (`a | b`); separators inside quotes don't count."""
+    """The command line's pipelines, each a list of its stages (`a | b`, `a |& b`); separators inside quotes and
+    $(…) don't count (_split)."""
     out: List[List[str]] = [[]]
-    buf: List[str] = []
-    q, i, n = "", 0, len(cmd)
-
-    def cut(new_pipeline: bool) -> None:
-        out[-1].append("".join(buf).strip())
-        buf.clear()
-        if new_pipeline:
+    for seg, op in _split(cmd):
+        if seg.strip():
+            out[-1].append(seg.strip())
+        if op not in ("|", "|&"):
             out.append([])
-
-    while i < n:
-        c = cmd[i]
-        if q:
-            buf.append(c)
-            if c == "\\" and q == '"' and i + 1 < n:
-                buf.append(cmd[i + 1])
-                i += 1
-            elif c == q:
-                q = ""
-        elif c in "'\"":
-            q = c
-            buf.append(c)
-        elif c == "\\" and i + 1 < n:
-            buf += [c, cmd[i + 1]]
-            i += 1
-        elif c in "|&" and i + 1 < n and cmd[i + 1] == c:  # || and &&
-            cut(True)
-            i += 1
-        elif c == "|":
-            cut(False)
-        elif c in ";\n" or (c == "&" and (i == 0 or cmd[i - 1] not in "<>") and (i + 1 == n or cmd[i + 1] != ">")):
-            cut(True)
-        else:
-            buf.append(c)
-        i += 1
-    cut(False)
-    return [[s for s in p if s] for p in out if any(p)]
+    return [p for p in out if p]
 
 
 DOWNLOADER = re.compile(r"^(curl|wget|fetch|aria2c|http|https|xh)(\.exe)?$", re.I)  # http/https: HTTPie
@@ -690,73 +918,51 @@ SQL_IN_EXEC = re.compile(r"\b(psql|mysql|mariadb|sqlite3|mongosh?|clickhouse-cli
 
 
 def _substitutions(s: str) -> List[str]:
-    """Extract shell substitution bodies (`$(...)`, `<(...)`, `>(...)`, backticks) outside single quotes."""
+    """The bodies of the command substitutions in s — `$(…)`, `<(…)`, `>(…)`, backticks — outside single quotes (not
+    of `$((…))` arithmetic, whose own substitutions do count)."""
     out: List[str] = []
-    q, i, n = "", 0, len(s)
+    esc = "`" if compat.WINDOWS else "\\"
+    i, n, dq = 0, len(s), False
     while i < n:
         c = s[i]
-        if q == "'":
-            if c == "'":
-                q = ""
-            i += 1
-            continue
-        if c == "\\" and i + 1 < n:
+        if c == esc:
             i += 2
             continue
-        if q == '"':
-            if c == '"':
-                q = ""
-                i += 1
-                continue
-        elif c in "'\"":
-            q = c
+        if c == '"':
+            dq = not dq
             i += 1
             continue
-        if c == "`":
-            j = i + 1
-            while j < n:
-                if s[j] == "\\" and j + 1 < n:
-                    j += 2
-                elif s[j] == "`":
-                    break
-                else:
-                    j += 1
-            if j < n and j > i + 1:
-                out.append(s[i + 1:j])
-            i = j + 1 if j < n else n
+        if s.startswith("$((", i):
+            i += 3
             continue
-        if s[i:i + 2] in ("$(", "<(", ">(") and s[i:i + 3] != "$((" :
-            j, depth, sub_q = i + 2, 1, ""
-            while j < n and depth > 0:
-                sc = s[j]
-                if sub_q == "'":
-                    if sc == "'":
-                        sub_q = ""
-                elif sc == "\\" and j + 1 < n:
-                    j += 1
-                elif sub_q == '"':
-                    if sc == '"':
-                        sub_q = ""
-                elif sc in "'\"":
-                    sub_q = sc
-                elif sc == "(":
-                    depth += 1
-                elif sc == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                j += 1
-            if depth == 0 and j > i + 2:
-                out.append(s[i + 2:j])
-            i = j + 1 if depth == 0 else n
+        opening, close = _opener(s, i)
+        if not opening or dq and opening not in ("$(", "`"):  # inside "…" only $(…) and backticks run
+            i += 1
             continue
-        i += 1
+        end = _skip(s, i + len(opening), close)
+        if close in (")", "`") and end > i + len(opening) + 1:
+            out.append(s[i + len(opening):end - 1])
+        i = n if end < 0 else end
     return out
 
 
-def analyze_command(cmd: str, depth: int = 0, system_only: bool = False) -> Optional[Tuple[str, str]]:
+def command_strings(seg: str) -> List[str]:
+    """The quoted strings of a segment that hands them to an interpreter (`bash -c '…'`, `ssh host "…"`, `eval "…"`),
+    also as the interpreter gets them, quotes resolved: `bash -c 'echo '\\''hi'\\''; rm -rf ~'` runs one string,
+    `echo 'hi'; rm -rf ~`."""
+    found = [q[1:-1] for q in QUOTED.findall(seg)]
+    try:
+        found += [w for w in shlex.split(seg, posix=True) if re.search(r"\s", w)]
+    except ValueError:
+        pass
+    return [s for s in dict.fromkeys(found) if s.strip()]
+
+
+def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
+                    known: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str]]:
     """The command's first stop as (rule id, reason), or None. system_only (Bypass Mode): only the stops that hold
-    there (SYSTEM_RULES), looked for in the whole command — past any project-level match."""
+    there (SYSTEM_RULES), looked for in the whole command — past any project-level match. known: what the command
+    around this one set (its variables and current folder: `cd / && bash -c 'rm -rf *'`, `x=$(rm -rf $S/y)`)."""
     if not cmd or not cmd.strip() or depth > 2:
         return None
     keep = (lambda rid: rid in SYSTEM_RULES) if system_only else (lambda rid: True)  # noqa: E731
@@ -773,10 +979,11 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False) -> Opti
             return rid, reason
     if keep("curl-pipe-shell") and pipe_runs_download(cmd):
         return "curl-pipe-shell", CURL_REASON
-    known: Dict[str, str] = {}
-    for seg in split_segments(cmd):
-        for sub in _substitutions(seg):
-            hit = analyze_command(sub, depth + 1, system_only)
+    known = dict(known or {})
+    deeper = depth < 2  # what a segment runs inside — $(…), a quoted command string — is analysed on its own
+    for seg in split_unquoted(cmd):
+        for sub in _substitutions(seg):  # a subshell of this shell: the same variables and folder
+            hit = analyze_command(sub, depth + 1, system_only, known)
             if hit:
                 return hit
         note_assignments(seg, known)
@@ -789,10 +996,14 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False) -> Opti
         if keep("sql-destructive") and (prog in SQL_PROGRAMS or prog in ("docker", "kubectl", "ssh")
                                          and SQL_IN_EXEC.search(seg)) and SQL_DESTRUCTIVE.search(seg):
             return "sql-destructive", SQL_REASON
-        r = check_rm(seg, known) or check_win_rm(seg)
+        r = check_rm(seg, known) or check_find(seg, known) or check_win_rm(seg)
         if r and keep(r[0]):
             return r
-        target = seg if INTERPRETER.search(seg) else QUOTED.sub("''", seg)
+        bare = _bare(seg)
+        code = prog in SHELLS or bool(INTERPRETER.search(bare))  # bash -c '…', ssh host '…', env -S '…'
+        # The rules read the command's own words; a quoted command string is split at its own separators below, so
+        # `ssh h 'git pull && make clean && rm -f x'` is no `git clean -f`. Too deep for that: the whole text.
+        target = bare if deeper else seg if INTERPRETER.search(seg) else QUOTED.sub("''", seg)
         for rid, rx, reason in SEGMENT_RULES:
             if keep(rid) and rx.search(target):
                 return rid, reason
@@ -803,9 +1014,10 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False) -> Opti
         w = check_writes(seg, known)
         if w:
             return w
-        if prog in SHELLS:  # bash -c '…', ssh host '…', eval "…": the quoted text is a command
-            for q in QUOTED.findall(seg):
-                hit = analyze_command(q[1:-1], depth + 1, system_only)
+        if code and deeper:  # the quoted text is a command, run from this folder (its variables are not passed on)
+            cwd = {"__cwd__": known["__cwd__"]} if "__cwd__" in known else None
+            for line in command_strings(seg):
+                hit = analyze_command(line, depth + 1, system_only, cwd)
                 if hit:
                     return hit
     for owner, body in heredocs:  # bodies fed to a shell or a DB client are code
@@ -850,38 +1062,6 @@ READ_ONLY_SUB = {
 }
 COMPOSE_READ = {"ps", "logs", "config", "images", "top", "version", "ls"}
 REDIRECT = re.compile(r"(?<![0-9&<>])>{1,2}(?!\s*&)(?!\s*/dev/null)")
-
-
-def split_unquoted(cmd: str) -> List[str]:
-    """Like split_segments, but separators inside quotes don't count (ssh host 'a && b' stays one segment)."""
-    parts: List[str] = []
-    buf: List[str] = []
-    q, i, n = "", 0, len(cmd)
-    while i < n:
-        c = cmd[i]
-        if q:
-            buf.append(c)
-            if c == "\\" and q == '"' and i + 1 < n:
-                buf.append(cmd[i + 1])
-                i += 1
-            elif c == q:
-                q = ""
-        elif c in "'\"":
-            q = c
-            buf.append(c)
-        elif c == "\\" and i + 1 < n:
-            buf += [c, cmd[i + 1]]
-            i += 1
-        elif c in ";|\n" or (c == "&" and (i == 0 or cmd[i - 1] not in "<>") and (i + 1 == n or cmd[i + 1] != ">")):
-            if c in "|&" and i + 1 < n and cmd[i + 1] == c:
-                i += 1
-            parts.append("".join(buf))
-            buf = []
-        else:
-            buf.append(c)
-        i += 1
-    parts.append("".join(buf))
-    return [p.strip() for p in parts if p.strip()]
 
 
 def ssh_remote(tokens: List[str]) -> Optional[str]:

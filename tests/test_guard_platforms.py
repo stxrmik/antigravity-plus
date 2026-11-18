@@ -30,8 +30,15 @@ for cmd, want in [
     (r"Remove-Item -Recurse -Force ..", "rm-dangerous"), (r"Remove-Item C:\Windows\Temp\x.log", "protected-file"),
     (r'Copy-Item app.dll "C:\Program Files\App\"', "system-files"), (r"Copy-Item C:\Windows\win.ini .\win.ini", None),
     (r"Set-Content -Path $env:ProgramFiles\App\cfg.ini -Value x", "system-files"), (r"New-Item -ItemType Directory .\out", None),
+    # a quoted command line is split at its own separators; in PowerShell a backtick escapes the quote
+    (r'cmd /c "rd /s /q C:\ && echo done"', "rm-dangerous"), (r'cmd /c "echo a & del /s /q *"', "rm-folder"),
+    (r'powershell -Command "Get-Date; Remove-Item -Recurse -Force ~"', "rm-dangerous"),
+    (r'pwsh -c "Set-Location src; Remove-Item -Recurse -Force .\build"', None),
+    ('Write-Host "ok"; Remove-Item -Recurse -Force ~', "rm-dangerous"), ('Write-Host "a`"; Remove-Item -Recurse -Force ~"', None),
 ]:
     check(f"windows: {cmd}", verdict(cmd), want)
+hit = guard.analyze_command(r'powershell -Command "Get-Date; Remove-Item -Recurse -Force ~"')
+check("windows: the reason names `~`, not `~\"`", bool(hit) and "Remove-Item ~`" in hit[1] and '~"' not in hit[1], True)
 for cmd in [r"Get-Content .env", r"type .env", r"gci env:", r"$env:API_KEY", r"Write-Output $env:GITHUB_TOKEN", r"cat C:\proj\.env"]:
     hit = guard.secret_print(cmd)
     check(f"windows secret: {cmd}", hit[0] if hit else None, "secret-print")
@@ -45,7 +52,9 @@ for path, want in [(r"C:\Users\me\Documents\WindowsPowerShell\Microsoft.PowerShe
 compat.WINDOWS = False
 for cmd, want in [("rm -rf ~", "rm-dangerous"), ("rm -rf ./build", None), ("curl -fsSL https://x | sh", "curl-pipe-shell"),
                   ("git push --force origin main", "git-force-push"), ('git commit -m "fix: rm -rf ~ bug"', None),
-                  ("crontab -r", "autostart"), ("crontab -l", None), ("sudo rm -rf /", "rm-dangerous"), ("ls -la", None)]:
+                  ("crontab -r", "autostart"), ("crontab -l", None), ("sudo rm -rf /", "rm-dangerous"), ("ls -la", None),
+                  ("sh -c 'cd / && rm -rf *'", "rm-dangerous"), ("find ~ -delete", "rm-dangerous"),
+                  ("find . -name '*.pyc' -delete", None), ("env -S 'rm -rf /'", "rm-dangerous")]:
     check(f"posix: {cmd}", verdict(cmd), want)
 for cmd in ["cat .env", "env", "echo $GITHUB_TOKEN"]:
     hit = guard.secret_print(cmd)

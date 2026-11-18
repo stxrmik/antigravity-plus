@@ -564,8 +564,9 @@ your own".
 <summary><b>🛡️ Guard: what stops</b></summary>
 
 - **Irreversible:** `git reset --hard`, `git clean -f`, `git checkout .`, force-push, `git branch -D`, `--no-verify`,
-  `rm -rf` on `/`, `~`, `.`, `*`; `DROP`/`TRUNCATE` through a database client; `mkfs`, `dd` to a disk; `curl | sh`;
-  `sudo`; `terraform destroy`, `kubectl delete`, `npm publish`, `gh pr merge`; reading SSH keys or the Keychain.
+  `rm -rf` and `find … -delete` on `/`, `~`, `.`, `*`; `DROP`/`TRUNCATE` through a database client; `mkfs`, `dd` to a
+  disk; `curl | sh`; `sudo`; `terraform destroy`, `kubectl delete`, `npm publish`, `gh pr merge`; reading SSH keys
+  or the Keychain.
 - **Windows:** `Remove-Item -Recurse -Force` and `rd /s /q` on a drive, the profile or the current folder;
   `iwr | iex`; `format`, `diskpart`; `Set-ExecutionPolicy Unrestricted`, turning off Defender or the firewall;
   autostart through the registry, Task Scheduler and the Startup folder; `Start-Process -Verb RunAs`.
@@ -574,7 +575,8 @@ your own".
   `rm`, `mv`, `cp`, `chmod`, `tee`, `sed -i` or `>` into `/System`, `/usr` (not `/usr/local`), `/etc`, `/Library`,
   `C:\Windows`, `Program Files`, Antigravity's settings or the plugin itself.
 - Quoted text is data: `git commit -m "…rm -rf…"` and `rg "DROP TABLE"` pass, while `bash -c '…'`,
-  `powershell -Command "…"` and `ssh host '…'` are checked. `curl … | python3 -c '…'` and `curl … | jq` read data
+  `powershell -Command "…"`, `ssh host '…'`, `env -S '…'` and `$(…)` are checked as commands, each split at its own
+  `&&` and `;` (`sh -c 'cd / && rm -rf *'` stops). `curl … | python3 -c '…'` and `curl … | jq` read data
   and pass; `| sh`, `| bash -s` and `| python3` run what was downloaded and stop. A variable set in the same command
   (`S=/path && rm -rf $S/x`) isn't taken for an empty one.
 - Everything else follows your Antigravity permission settings: the guard says "no objection", it doesn't approve.
