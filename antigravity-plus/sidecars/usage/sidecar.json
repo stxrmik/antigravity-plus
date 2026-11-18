@@ -2,14 +2,14 @@
   "command": "node",
   "args": ["server.mjs"],
   "restart_policy": "always",
-  "display_name": "Antigravity Plus · Расход токенов",
-  "description": "Live token usage, context-window fill and API-equivalent cost of the current conversation (like Claude Code's status line, /usage and /context), plus today / 7-day totals and recent conversations.",
+  "display_name": "Antigravity Plus · Центр управления",
+  "description": "Live token usage, context-window fill, plan limits, active agents, Claude Code bridge tasks, running LSP daemons, plugin settings and recent guard log.",
   "has_web_ui": true,
   "ui_config": {
-    "display_name": "Antigravity Plus · Расход токенов",
+    "display_name": "Antigravity Plus · Центр управления",
     "views": [
       {
-        "title": "Расход токенов",
+        "title": "Центр управления",
         "path": "/",
         "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE"
       }

@@ -58,6 +58,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "exit_plan_mode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 hooks/guard.py",
+            "timeout": 10
+          }
+        ]
       }
     ]
   },

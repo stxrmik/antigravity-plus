@@ -18,6 +18,8 @@ Reads, never writes:
         steps after it;
   * ~/.gemini/antigravity-plus/guard.log — every guard match, one JSON per line {ts, conversation, tool, rule,
     subject} (hooks/guard.py log()); asks are matched to their tool step to see whether the command then ran;
+    `overwrite:*` rules are commands the guard fixed on the fly (git flags, BypassSandbox) — «rewritten», neither
+    asks nor denials, so they never count as approved asks or false-positive candidates;
   * ~/.gemini/antigravity-plus/state/<id>.checks.json — files whose last edit check still found errors
     (hooks/check_edit.py: sigs «tool|code|msg»).
 Commands are shortened, the home folder shows as ~, and anything token-like is masked. User messages are never
@@ -73,8 +75,10 @@ HINT_KINDS = {  # tag → the hook that injects it
     "objectivity": "objective.py: straight answer",
     "quota": "quota.py: plan limits getting short",
     "bypass_notice": "instructions.py: Bypass Mode switched",
+    "orchestrator_handoff": "orchestrator.py: planner/executor handoff",
+    "orchestrator_review": "orchestrator.py: review plan before execution",
 }
-BYPASS_NOTE = re.compile(r"^\s*(The user turned Bypass Mode (ON|OFF)|Bypass Mode was turned (ON|OFF) in another conversation)")
+BYPASS_NOTE = re.compile(r"^\s*(The user turned Bypass Mode (ON|OFF)|Bypass Mode was turned (ON|OFF) in another conversation)", re.M)
 STOP_RE = re.compile(r"(?:^|<SYSTEM_MESSAGE>)\s*Stop hook blocked termination:\s*(.*?)\s*(?:</SYSTEM_MESSAGE>\s*)?$", re.S)
 STOP_KINDS: List[Tuple[str, "re.Pattern[str]"]] = [(k, re.compile(p, re.S)) for k, p in [
     ("facts", r"Antigravity Plus — facts:"),
@@ -99,7 +103,9 @@ TIMED_OUT = re.compile(r"timed out waiting for user response", re.I)
 REFUSED = re.compile(r"\b(denied|rejected|declined|refused)\b", re.I)
 DENY_RULES = {"secret-read", "secret-print", "fake-check", "memory-secret", "memory-elsewhere", "stale-write",
               "git-interactive-patch", "git-interactive", "git-continue-editor", "git-rebase-interactive",
-              "gh-auth-login", "gh-web", "gh-prompt"}  # hooks/guard.py decide() + hooks/gitcheck.py: refused, not asked
+              "gh-auth-login", "gh-web", "gh-prompt",
+              "orchestrator-unverified-plan"}  # hooks/guard.py + orchestrator.py + gitcheck.py (a banned plan step asks)
+REWRITE_PREFIX = "overwrite:"  # guard.py's PreToolUse `overwrite`: the command ran in a fixed form, nobody was asked
 CHECK_LINE = re.compile(r"^✗ (.+?) — (.*)$")
 FIXED_LINE = re.compile(r"^✓ .+ — fixed")
 OLD_LINT = re.compile(r"^\d+ linter errors in this file")
@@ -259,6 +265,7 @@ class Conv:
         self.events: List[tuple] = []      # (step, kind, data) in step order, for reactions
         self.hints: List[Tuple[int, str, Optional[dt.datetime], str]] = []   # (step, kind, ts, model-at-step)
         self.checks: List[Tuple[int, str]] = []    # edit_check content
+        self.ui_notices: List[Tuple[int, str, Optional[dt.datetime], bool]] = []  # (step, kind, ts, zero_token)
         self.blocks: List[dict] = []
         self.calls: List[dict] = []        # tool calls with their result step
         self.step_model: Dict[int, str] = {}
@@ -277,6 +284,46 @@ def _uri_to_path(uri: str) -> str:
     if re.match(r"^/[A-Za-z]:/", p):
         p = p[1:]
     return p
+
+
+def _unwrap_sys(content: str) -> str:
+    parts = content.split("<SYSTEM_MESSAGE>")
+    body = parts[2] if len(parts) > 2 else parts[-1]
+    return re.sub(r"</SYSTEM_MESSAGE>\s*$", "", body).strip()
+
+
+def _user_markdown(st: dict) -> str:
+    meta = st.get("metadata")
+    if isinstance(meta, dict) and isinstance(meta.get("user_markdown"), str):
+        return meta["user_markdown"]
+    sys_msg = st.get("systemMessage")
+    if isinstance(sys_msg, dict) and isinstance(sys_msg.get("metadata"), dict):
+        um = sys_msg["metadata"].get("user_markdown")
+        if isinstance(um, str):
+            return um
+    um = st.get("user_markdown")
+    return um if isinstance(um, str) else ""
+
+
+def _ui_kind(md: str) -> str:
+    low = md.lower()
+    if "квота" in low or "sidecar://antigravity-plus/usage" in low:
+        return "quota"
+    if "bypass mode" in low:
+        return "bypass"
+    if "обновлен" in low or "/update" in low:
+        return "update"
+    return "other"
+
+
+def _scan_hint(c: Conv, step: int, text: str, ts: Optional[dt.datetime]) -> None:
+    kinds = list(dict.fromkeys(HINT_TAG.findall(text)))
+    if BYPASS_NOTE.search(text):
+        kinds.append("bypass_notice")
+    for k in kinds:
+        c.hints.append((step, k, ts, ""))
+    if "edit_check" in kinds:
+        c.checks.append((step, text))
 
 
 def scan(cid: str, path: str) -> Conv:
@@ -299,6 +346,9 @@ def scan(cid: str, path: str) -> Conv:
         if typ == "SYSTEM_MESSAGE":
             if not c.workspaces and "antigravity_plus_session_context" in content:
                 c.workspaces = [w.strip() for w in WORKSPACE_RE.findall(content)]
+            um = _user_markdown(st)
+            if um.strip():
+                c.ui_notices.append((i, _ui_kind(um), ts, not _unwrap_sys(content)))
             m = STOP_RE.search(content)
             if m:
                 text = m.group(1)
@@ -306,14 +356,12 @@ def scan(cid: str, path: str) -> Conv:
                          "items": [ln[2:].strip() for ln in text.splitlines() if ln.startswith("- ")]}
                 c.blocks.append(block)
                 c.events.append((i, "stop", block))
+            elif "antigravity_plus_session_context" not in content:
+                body = _unwrap_sys(content)
+                if 'source="Antigravity Plus"' in body or BYPASS_NOTE.search(body):
+                    _scan_hint(c, i, body, ts)
         elif typ == "EPHEMERAL_MESSAGE":
-            kinds = list(dict.fromkeys(HINT_TAG.findall(content)))
-            if BYPASS_NOTE.search(content):
-                kinds.append("bypass_notice")
-            for k in kinds:
-                c.hints.append((i, k, ts, ""))
-            if "edit_check" in kinds:
-                c.checks.append((i, content))
+            _scan_hint(c, i, content, ts)
         elif typ == "PLANNER_RESPONSE":
             calls = [t for t in (st.get("tool_calls") or []) if isinstance(t, dict)]
             queue = list(calls)
@@ -438,7 +486,8 @@ def guard_entries(since: dt.datetime) -> List[dict]:
         if ts is None or ts < since:
             continue
         rule = str(d["rule"])
-        d["decision"] = "logged (bypass)" if rule.startswith("bypass:") else "deny" if rule in DENY_RULES else "ask"
+        d["decision"] = ("logged (bypass)" if rule.startswith("bypass:") else "rewritten" if rule.startswith(REWRITE_PREFIX)
+                         else "deny" if rule in DENY_RULES else "ask")
         d["when"] = ts
         out.append(d)
     return out
@@ -503,8 +552,17 @@ def analyze(days: float, workspace: Optional[str]) -> dict:
                                                  "repeated": 0, "identical": 0})
     blocks_all: List[Tuple[Conv, dict]] = []
     transcript_guard = Counter()
+    ui_total = ui_zero = 0
+    ui_by_kind: Counter = Counter()
     active = set()
     for c in convs.values():
+        for _step, ukind, ts, zero in c.ui_notices:
+            if not recent(ts):
+                continue
+            ui_total += 1
+            ui_zero += int(zero)
+            ui_by_kind[ukind] += 1
+            active.add(c.cid)
         for step, kind, ts, model in c.hints:
             if not recent(ts):
                 continue
@@ -589,6 +647,7 @@ def analyze(days: float, workspace: Optional[str]) -> dict:
         "scanned": {"conversations": len(convs), "with_hook_activity": len(active), "guard_log_entries": len(entries)},
         "hints": {k: {**plain(v), "hook": HINT_KINDS.get(k, "")}
                   for k, v in sorted(hints.items(), key=lambda kv: -kv[1]["fired"])},
+        "ui_notices": {"total": ui_total, "zero_token": ui_zero, "by_kind": dict(ui_by_kind.most_common())},
         "stop": {"blocks": len(blocks_all), "conversations": len({c.cid for c, _b in blocks_all}),
                  "by_category": {k: {**plain(v), **{x: v[x] for x in ("acted", "re-ended", "no-reply", "repeated",
                                                                        "identical")}}
@@ -675,6 +734,11 @@ def render(r: dict) -> str:
                        f"{models_cell(v['models'])} | {v['hook']} |")
     else:
         out.append("None in this period.")
+    ui = r.get("ui_notices") or {}
+    if ui.get("total"):
+        kinds_str = ", ".join(f"{k} {n}" for k, n in (ui.get("by_kind") or {}).items())
+        out.append(f"\nUI notices (`user_markdown`): {ui['total']} ({ui.get('zero_token', 0)} zero-token)"
+                   + (f" — {kinds_str}" if kinds_str else "") + ".")
 
     st = r["stop"]
     out.append(f"\n## Stop hook blocks — {st['blocks']} in {st['conversations']} conversations")

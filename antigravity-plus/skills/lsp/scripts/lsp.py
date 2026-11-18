@@ -248,7 +248,7 @@ def word_re(name: str) -> "re.Pattern":
 
 def short_name(name: str) -> str:
     """`Class.method`, `Class/method`, `Type::method`, `Class#method`, `method(x:)` → `method`."""
-    name = re.split(r"[(<\s]", name.strip(), 1)[0]
+    name = re.split(r"[(<\s]", name.strip(), maxsplit=1)[0]
     return re.split(r"\.|/|::|#", name)[-1] if name else name
 
 
@@ -2554,7 +2554,8 @@ def cmd_stop(args, cwd: str) -> Tuple[int, str]:
     stopped = []
     for key, st in all_states():
         root = str(st.get("root") or "")
-        if args.all or scope is None or under(root, scope) or under(scope, root):
+        match = (key == args.key) if args.key else (args.all or scope is None or under(root, scope) or under(scope, root))
+        if match:
             stop_daemon(key, st)
             stopped.append(f"{st.get('server')} ({root})")
     return 0, ("Stopped: " + ", ".join(stopped)) if stopped else "Nothing to stop."

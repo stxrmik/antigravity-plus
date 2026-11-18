@@ -26,7 +26,7 @@ import os
 import re
 import subprocess
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
 import compat
@@ -461,7 +461,7 @@ def is_subagent(payload: dict) -> bool:
         return False
 
 
-def build(payload: dict) -> str:
+def _build_with_notices(payload: dict) -> Tuple[str, List[str]]:
     paths = []
     for p in payload.get("workspacePaths") or []:
         if isinstance(p, str) and p:
@@ -469,7 +469,7 @@ def build(payload: dict) -> str:
             if os.path.isdir(path) and path not in paths:
                 paths.append(path)
     if not paths:
-        return ""
+        return "", []
     paths = paths[:MAX_WORKSPACES]
     sub = is_subagent(payload)
     st = conv.load(payload) if not sub else None
@@ -483,6 +483,7 @@ def build(payload: dict) -> str:
                     "and skills say `python3`.")
     bridge: List[str] = []
     tops: Dict[str, str] = {}
+    notices: List[str] = []
     for ws in paths:
         top = git(["rev-parse", "--show-toplevel"], ws)
         if top:
@@ -523,6 +524,11 @@ def build(payload: dict) -> str:
         if lines:
             head.append("\n## Antigravity Plus")
             head.extend(lines)
+            if not (sub or handed) and any(ln.startswith("Update:") for ln in lines):
+                m = re.search(r"Antigravity Plus\s+(\d+\.\d+(?:\.\d+)*)", " ".join(lines))
+                ver = f" {m.group(1)}" if m else ""
+                notices.append(f"📦 **Доступно обновление Antigravity Plus{ver}** — напишите `/update` в чате "
+                               "(установка и откат в один шаг).")
     except Exception as e:  # the session context must come through anyway
         print(f"session_start: update: {e}", file=sys.stderr)
     bridge.extend(user_claude_md())
@@ -537,7 +543,11 @@ def build(payload: dict) -> str:
     if len(msg) > TOTAL_LIMIT + 400:
         msg = msg[:TOTAL_LIMIT] + "\n… [session context truncated]\n</antigravity_plus_session_context>"
     conv.prune_states()
-    return msg
+    return msg, notices
+
+
+def build(payload: dict) -> str:
+    return _build_with_notices(payload)[0]
 
 
 def main() -> None:
@@ -546,11 +556,18 @@ def main() -> None:
     except ValueError:
         payload = {}
     try:
-        msg = build(payload if isinstance(payload, dict) else {})
+        msg, notices = _build_with_notices(payload if isinstance(payload, dict) else {})
     except Exception as e:  # a hook must never break the session
-        msg = ""
+        msg, notices = "", []
         print(f"session_start: {e}", file=sys.stderr)
-    out = {"injectSteps": [{"systemMessage": {"systemMessage": msg}}]} if msg else {}
+    if msg:
+        steps: List[Dict[str, Any]] = [{"systemMessage": {"systemMessage": msg}}]
+        if notices and conv.ui_notices_enabled():
+            for md in notices:
+                steps.append({"systemMessage": {"systemMessage": "", "metadata": {"user_markdown": md}}})
+        out = {"injectSteps": steps}
+    else:
+        out = {}
     sys.stdout.write(json.dumps(out, ensure_ascii=False))
 
 

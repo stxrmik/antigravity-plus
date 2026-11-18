@@ -243,7 +243,7 @@ def off_line(key: str, warn: str) -> str:
 MODULE_KEYS = {"quality": ("checkEdits", "finishTasks", "autoReview", "autoVerify"),
                "facts": ("factChecks", "objectiveAnswers"), "memory": ("autoMemory", "recentConversations"),
                "parallel": ("parallelHints",), "speed": ("speedHints", "quotaHints"), "git": ("autoCi", "gitChecks"),
-               "lsp": ("lspChecks",)}
+               "lsp": ("lspChecks",), "core": ("uiNotices",)}
 
 
 def modules_line() -> str:
@@ -311,9 +311,23 @@ def hook_selftest() -> List[str]:
         tp = _fake_transcript(["Сделай фичу", "Самое главное, пока что ничего не пушь на сервер"])
         push = call(guard, {"toolCall": {"name": "run_command", "args": {"CommandLine": "git push"}},
                             "conversationId": SELFTEST_ID, "transcriptPath": tp})
+        plan_ban = call(guard, {"toolCall": {"name": "exit_plan_mode", "args": {"plan": "1. Edit app.py\n2. Run git push origin main\n3. Run pytest"}},
+                                "conversationId": SELFTEST_ID, "transcriptPath": tp})
         ok = '"force_ask"' in push[1] and "user-said" not in push[1] and "ничего не пушь" in push[1]
         out.append(f"{OK if ok else BAD} guard помнит запреты из разговора: после «ничего не пушь» `git push` → подтверждение"
                    + ("" if ok else f" — вывод: {push[1][:160]!r}"))
+        ok_plan = '"force_ask"' in plan_ban[1] and "exit_plan_mode" in plan_ban[1] and "ничего не пушь" in plan_ban[1]
+        out.append(f"{OK if ok_plan else BAD} Orchestrator: план с шагом, который вы запретили, `exit_plan_mode` передаёт "
+                   "исполнителю только после вашего подтверждения"
+                   + ("" if ok_plan else f" — вывод: {plan_ban[1][:160]!r}"))
+        if memstore and not memstore.settings().get("gitChecks", True):  # type: ignore[attr-defined]
+            out.append(off_line("gitChecks", "git: автоисправления и проверки git выключены (`memory.py config git-checks on`)"))
+        else:
+            reb = call(guard, {"toolCall": {"name": "run_command", "args": {"CommandLine": "git rebase --continue"}},
+                               "conversationId": SELFTEST_ID})
+            ok_ov = '"overwrite"' in reb[1] and "GIT_EDITOR=" in reb[1]
+            out.append(f"{OK if ok_ov else BAD} guard overwrite: интерактивный `git rebase --continue` чинится на лету без потери шага"
+                       + ("" if ok_ov else f" — вывод: {reb[1][:160]!r}"))
         _cleanup_selftest(tp)
         ctl = call(guard, {"toolCall": {"name": "write_file", "args": {"Path": os.path.expanduser("~/.gemini/config/config.json")}},
                            "conversationId": SELFTEST_ID})
@@ -460,7 +474,7 @@ def hook_selftest() -> List[str]:
             fh.write("x = 2  # changed by someone else\n")
         stale = call(guard, {**base, "conversationId": SELFTEST_ID, "toolCall": {"name": "edit_file", "args": {"Path": f}}})
         secret = call(guard, {**base, "conversationId": SELFTEST_ID, "toolCall": {"name": "run_command", "args": {"CommandLine": "cat .env"}}})
-        ok = '"deny"' in stale[1] and "перечитайте" in stale[1]
+        ok = '"deny"' in stale[1] and ("разница" in stale[1] or "перечитайте" in stale[1]) and "read_file" in stale[1]
         out.append(f"{OK if ok else BAD} совместная работа: правка поверх чужой версии файла отклоняется, агент перечитывает"
                    + ("" if ok else f" — {stale[1][:120]!r}"))
         ok = '"deny"' in secret[1]

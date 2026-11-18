@@ -116,9 +116,15 @@ ANNOUNCE_LAST = re.compile(
     r"|^\W*(?:let me|i'?ll|i will|i'?m going to|i am going to|now i'?ll|next,? i'?ll)\b", re.I)
 ANNOUNCE_QUOTE = 240
 CONTINUE = re.compile(r"^\W*(продолж|дальше|доделай|давай дальше|go on|continue|keep going|carry on)", re.I)
-# A task.md item handed to a subagent: «Найти обработчики — explorer», «… (researcher)».
-DELEGATED = re.compile(r"(?:[—–(]|\s-|→)\s*(explorer|researcher|worker|code-reviewer|security-auditor|debugger|"
-                       r"test-writer|субагент\w*|subagent)\b", re.I)
+# A task.md item handed to a subagent: «Найти обработчики — explorer», «… (researcher)», and — only as the item's last
+# words, so «Fix: background color» or «Bug: explorer crashes» stay the agent's own — «…: worker», «… (в фоне)».
+_SUBAGENTS = r"explorer|researcher|worker|code-reviewer|security-auditor|debugger|test-writer|субагент\w*|subagent"
+DELEGATED = re.compile(
+    rf"(?:[—–(]|->|→|\s-)\s*(?:antigravity-plus:)?(?:{_SUBAGENTS})\b"
+    rf"|(?:[—–(:]|->|→|\s-)\s*(?:in\s+(?:the\s+)?)?(?:antigravity-plus:)?(?:{_SUBAGENTS}|swarm|в\s+фоне|background)\b"
+    r"[\s)\]»\"'`.!…]*$",
+    re.I,
+)
 # «Жду ответа researcher», «жду результатов от explorer»: waiting for its own subagents, not for the user.
 AGENT_WAIT = re.compile(r"\bжд(у|ём|ем)\s+(ответ\w*|результат\w*|заверш\w*|отч[её]т\w*)(\s+(от|у))?\s+"
                         r"(?!(вас|тебя|ваш\w*|тво\w*)\b)[\w`«»\"'-]+", re.I)
@@ -627,15 +633,23 @@ def waiting_on_background(payload: dict, st: dict, run: List[dict]) -> Optional[
     everything left needs their results; open task.md items it kept for itself are not."""
     if not st["users"] or not setting("finishTasks"):
         return None
+    if payload.get("continuationActive") and st.get("bg_nudge_turn") == len(st["users"]):
+        return None
     items = [(mark, text) for mark, text in task_items(payload, st)
              if not DELEGATED.search(text) and not CI_WAIT_ITEM.search(text)]
     tp = conv.transcript_path(payload)
     if not items or handing_over(AGENT_WAIT.sub(" ", last_answer(tp) if tp else "")):
         return None
-    if not first_time(st, ["background|" + text for _mark, text in items]):
+    msg = parallel.stop_message(run, items, SHOWN)
+    if not msg:
         return None
+    ids = sorted(str(it.get("id") or "") for it in run)
+    key = ["background|" + i for i in ids] or ["background"]
+    if not first_time(st, key):
+        return None
+    st["bg_nudge_turn"] = len(st["users"])
     conv.store(payload["conversationId"], st)
-    return parallel.stop_message(run, items, SHOWN)
+    return msg
 
 
 def facts_check(payload: dict, st: dict, answer: str) -> Optional[str]:
@@ -707,14 +721,24 @@ def decide(payload: dict) -> Optional[str]:
         return None
     if conv.delegated(st) and conv.waiting_for_claude(st):
         return None  # it asked Claude Code and waits: the answer arrives as a message and wakes it up
+    in_plan = False
+    try:
+        import orchestrator  # type: ignore[import-not-found]
+        before_orch = json.dumps(st, sort_keys=True, ensure_ascii=False)
+        fn = getattr(orchestrator, "in_plan_mode", None)
+        in_plan = bool(fn(payload, st)) if callable(fn) else False
+        if json.dumps(st, sort_keys=True, ensure_ascii=False) != before_orch and isinstance(payload.get("conversationId"), str):
+            conv.store(payload["conversationId"], st)
+    except Exception:
+        in_plan = False
     hints = setting("parallelHints")
     run = parallel.running(st) if hints else []
     work = parallel.busy(run)
-    if work or (payload.get("fullyIdle") is False and hints and len(work) == len(run)):
-        return waiting_on_background(payload, st, work)  # its own subagents/commands, or background tasks we didn't see start
+    if work and not in_plan:
+        return waiting_on_background(payload, st, work)  # its own subagents/commands
     if payload.get("fullyIdle") is False:
-        return None  # only its dev server or watcher runs, or parallel hints are off: as before
-    broken = broken_files(payload)
+        return None  # only its dev server or watcher runs, nothing tracked, or parallel hints are off
+    broken = [] if in_plan else broken_files(payload)
     items = task_items(payload, st) if st["users"] and setting("finishTasks") else []  # subagents: no task.md
     tp = conv.transcript_path(payload)
     review: List[str] = []
@@ -727,7 +751,7 @@ def decide(payload: dict) -> Optional[str]:
     answer = last_answer(tp) if tp else ""
     announced = announcement(answer) if st["users"] else ""
     handed = conv.delegated(st)  # a task from Claude Code: it reviews the result itself and never pushes from here
-    if not broken and not items and st["users"] and tp:
+    if not in_plan and not broken and not items and st["users"] and tp:
         turn = turn_changes(tp, st["users"][-1].get("step", -1), payload)
         setup = [] if handed else setup_left(payload, turn, st, answer)
         ci_need = None if handed else ci_left(payload, turn, st)
@@ -743,7 +767,7 @@ def decide(payload: dict) -> Optional[str]:
     if (not broken and not items and not review and not unverified and not unseen and not mobile
             and not setup and not ci_need and not git_left and not announced):
         return (facts_check(payload, st, answer) or (objective_check(payload, st, answer) if st["users"] else None)
-                or (memory_check(payload, st, answer) if st["users"] and not handed else None))
+                or (memory_check(payload, st, answer) if st["users"] and not handed and not in_plan else None))
     if handing_over(answer):
         if not (setup and only_setup_questions(answer)):
             return None  # the agent handed the turn to the user on purpose

@@ -70,8 +70,9 @@ def pre(model=""):
     if model:
         p["modelName"] = model
     out = subprocess.run([sys.executable, os.path.join(HOOKS, "instructions.py")], input=json.dumps(p),
-                         capture_output=True, text=True, encoding="utf-8")
-    msgs = [s["ephemeralMessage"] for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+    msgs = [(s.get("systemMessage") or {}).get("systemMessage") or s.get("ephemeralMessage", "")
+            for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
     return "\n".join(m for m in msgs if any(t in m for t in ("<sandbox", "<error_loop", "<context_budget"))), out.stderr.strip()
 
 
@@ -166,6 +167,27 @@ cmd("./deploy/ssh.sh 'uptime'", 0, "up 3 days")
 pre()
 same("worked inside twice → forgotten", sorted(stored()), [])
 
+# 4b. a piped or chained command is learned by its program, as in 0.24 (only the guard's BypassSandbox overwrite leaves
+#     chains alone); an inline `python3 -c` script names no program and is not learned
+start("pipe")
+cmd("./deploy/logs.sh 'web' 2>&1 | tail -20", 1, "open /Users/x/.ssh/known_hosts: operation not permitted", note=True)
+cmd("./deploy/logs.sh 'web' 2>&1 | tail -20", 0, "log lines", bypass=True)
+check("piped command that needed BypassSandbox → remembered by its program", pre(),
+      ["<sandbox", "`./deploy/logs.sh`", "remembered"])
+start("chain")
+cmd("cd deploy && docker compose up -d && docker ps", 1, "permission denied while trying to connect to the Docker daemon",
+    note=True)
+cmd("cd deploy && docker compose up -d && docker ps", 0, "web  Up", bypass=True)
+pre()
+same("chained docker command → remembered as `docker`", sorted(stored()), ["./deploy/logs.sh", "docker"])
+start("inline")
+cmd("python3 -c 'import socket; socket.create_connection((\"x\", 1))'", 1, "PermissionError: operation not permitted",
+    note=True)
+cmd("python3 -c 'import socket; socket.create_connection((\"x\", 1))'", 0, "ok", bypass=True)
+pre()
+same("…an inline python3 -c script is not remembered", sorted(stored()), ["./deploy/logs.sh", "docker"])
+json.dump({"projects": {}}, open(STORE, "w"))
+
 # 5. loops of failing commands
 start("loop")
 cmd("./deploy/ssh.sh 'docker exec web python3 -c \"import x\"'", 2, "bash: -c: unexpected EOF while looking for matching quote")
@@ -254,7 +276,46 @@ start("bigsub", main=False)
 read(os.path.join(WS, "app.py"), 900)
 check("subagent reading a big file → nothing", pre(), empty=True)
 
-# 8. speed-hints off → nothing, and the session context doesn't list commands
+# 8. guard.py BypassSandbox overwrite for learned commands
+def guard_cmd(line, bypass_sbx=None, extra=None):
+    args = {"CommandLine": line}
+    if bypass_sbx is not None:
+        args["BypassSandbox"] = bypass_sbx
+    p = {"conversationId": cid, "transcriptPath": tp, "workspacePaths": [WS],
+         "toolCall": {"name": "run_command", "args": args}, **(extra or {})}
+    r = subprocess.run([sys.executable, os.path.join(HOOKS, "guard.py")], input=json.dumps(p),
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return json.loads(r.stdout or "{}")
+
+start("ow")
+json.dump({"projects": {WS: {"./deploy/ssh.sh": {"n": 1, "ok": 0}, "git fetch": {"n": 1, "ok": 0}}}}, open(STORE, "w"))
+d1 = guard_cmd("./deploy/ssh.sh 'uptime'")
+same("learned command → guard overwrites BypassSandbox: True",
+     (d1.get("decision"), d1.get("overwrite")), ("allow", {"BypassSandbox": True}))
+d2 = guard_cmd(f"{WS}/deploy/ssh.sh 'uptime'")
+same("absolute path to learned script → also overwrites BypassSandbox",
+     (d2.get("decision"), d2.get("overwrite")), ("allow", {"BypassSandbox": True}))
+d3 = guard_cmd("./deploy/ssh.sh 'uptime'", bypass_sbx=True)
+same("already BypassSandbox: true → no overwrite", ("overwrite" in d3, d3.get("decision")), (False, "allow"))
+d4 = guard_cmd("git fetch origin")
+want_pfx = "$env:GIT_TERMINAL_PROMPT='0'; " if os.name == "nt" else "GIT_TERMINAL_PROMPT=0 "
+same("learned git fetch → combines CommandLine + BypassSandbox overwrite",
+     d4.get("overwrite"), {"CommandLine": want_pfx + "git fetch origin", "BypassSandbox": True})
+d5 = guard_cmd("./deploy/ssh.sh 'systemctl restart app'", extra={"lastUserInput": "ничего не пушь"})
+same("push-banned learned command → force_ask WITHOUT overwrite",
+     (d5.get("decision"), "overwrite" in d5), ("force_ask", False))
+os.makedirs(os.path.dirname(AG_CONFIG), exist_ok=True)
+json.dump({"userSettings": {"enableTerminalSandbox": False}}, open(AG_CONFIG, "w"))
+same("sandbox disabled in config → no BypassSandbox overwrite", "overwrite" in guard_cmd("./deploy/ssh.sh 'uptime'"), False)
+os.remove(AG_CONFIG)
+
+json.dump({"projects": {WS: {"git fetch": {"n": 1, "ok": 0}, "python3 -c": {"n": 1, "ok": 0}}}}, open(STORE, "w"))
+same("compound chained command gets NO BypassSandbox overwrite",
+     "BypassSandbox" in (guard_cmd("git fetch origin && rm -rf /tmp/x").get("overwrite") or {}), False)
+same("inline python3 -c gets NO BypassSandbox overwrite",
+     "BypassSandbox" in (guard_cmd("python3 -c 'print(1)'").get("overwrite") or {}), False)
+
+# 9. speed-hints off → nothing, no overwrite, and the session context doesn't list commands
 json.dump({"projects": {WS: {"docker": {"n": 1, "ok": 0}}}}, open(STORE, "w"))
 subprocess.run([sys.executable, MEMORY, "config", "speed-hints", "off"], capture_output=True)
 start("off")
@@ -263,6 +324,7 @@ for i in range(3):
 think(10_000, 160_000)
 check("speed-hints off → no hints", pre(), empty=True)
 check("speed-hints off → no sandbox list at the start", session(), [], ["Terminal sandbox"])
+same("speed-hints off → no BypassSandbox overwrite", "overwrite" in guard_cmd("docker ps"), False)
 subprocess.run([sys.executable, MEMORY, "config", "speed-hints", "on"], capture_output=True)
 
 shutil.rmtree(art, ignore_errors=True)

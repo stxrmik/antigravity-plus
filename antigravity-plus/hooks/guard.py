@@ -48,9 +48,11 @@ Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import json
 import os
+import posixpath
 import re
 import shlex
 import sys
@@ -69,6 +71,14 @@ try:
     import gitcheck
 except Exception:  # optional like facts: git commands that would hang the agent
     gitcheck = None
+try:
+    import speed
+except Exception:  # optional: sandbox bypass overwrite
+    speed = None
+try:
+    import orchestrator
+except Exception:  # optional: exit_plan_mode checks
+    orchestrator = None
 
 PLUGIN = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.join(PLUGIN, "skills", "memory", "scripts"))
@@ -168,6 +178,34 @@ SEGMENT_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
         r"[^\s\"']*\b(?:sudo|rm|ssh|scp|rsync|curl|wget|git\s+push)\b))", I),
      "запуск Claude Code с обходом ограничений прав (bypassPermissions / широкий Bash)."),
 ]
+# The usage panel's routes that change something (sidecars/usage/server.mjs): a plugin setting, a running LSP daemon.
+# Only these two, so a project's own `localhost:3000/api/settings` is not taken for the panel.
+SIDECAR_API = re.compile(r"(?:localhost\.?|0\.0\.0\.0|127(?:\.\d+){1,3}|\[::1?\]|::1):\d+/+api/+(?:toggle|lsp/+stop)\b", I)
+SIDECAR_API_REASON = "команда обращается к управляющему API боковой панели Antigravity Plus (настройки или LSP)."
+SCHEDULE_REASON = "команда создаёт или удаляет расписание Antigravity: по нему агент будет сам запускаться без вас."
+
+
+def schedule_change(seg: str) -> bool:
+    """`[python3 …] …/schedule_task.py create|remove …` (/schedule-task): it writes an Antigravity automation."""
+    tokens = strip_prefixes(tokenize(seg))
+    for i, t in enumerate(tokens[:6]):
+        if os.path.basename(t.replace("\\", "/")).lower() == "schedule_task.py":
+            sub = next((a for a in tokens[i + 1:] if not a.startswith("-")), "")
+            return sub in ("create", "remove")
+    return False
+
+
+def _sidecar_api_hit(seg: str) -> bool:
+    if SIDECAR_API.search(seg):
+        return True
+    unquoted = seg.replace('"', "").replace("'", "")
+    if SIDECAR_API.search(unquoted):
+        return True
+    if ":" in seg:
+        collapsed = re.sub(r"['\"\s]*\+['\"\s]*", "", unquoted)
+        if SIDECAR_API.search(collapsed):
+            return True
+    return False
 
 # SQL is checked only when a DB client is the program being run (so `rg "DROP TABLE"` stays quiet).
 SQL_PROGRAMS = {"psql", "mysql", "mariadb", "sqlite3", "sqlcmd", "clickhouse", "clickhouse-client", "cockroach",
@@ -197,7 +235,7 @@ PIPE_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
 SYSTEM_RULES = {"disk-format", "disk-format-win", "system-power", "system-power-win", "security-off", "security-off-win",
                 "sudo", "run-as-admin", "autostart", "kill-all", "fork-bomb", "secrets-read", "agent-tools",
                 "protection-off", "claude-permissions", "rm-dangerous", "system-files", "protected-file",
-                "agent-settings"}
+                "agent-settings", "scheduled-sidecar"}
 
 # Programs whose arguments are just text (a commit message or a search pattern can mention `rm -rf /`).
 TEXT_PROGRAMS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "git-grep", ":", "true", "test", "["}
@@ -207,7 +245,7 @@ SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "ssh", "eval", "xargs", "s
 INTERPRETER = re.compile(r"\b((ba|z|da|k)?sh|fish)\s+(-\w+\s+)*-c\b|\beval\b|\bxargs\b|\bssh\b|\bwatch\b|\bdocker\s+(exec|run)\b|\bkubectl\s+exec\b"
                          r"|\b(powershell|pwsh)(\.exe)?\s+(-\w+\s+)*-c(ommand)?\b|\bcmd(\.exe)?\s+/[ck]\b|\b(iex|invoke-expression)\b", I)
 QUOTED = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
-HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][\w-]*)\1[^\n]*\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][\w-]*)\1([^\n]*)\n(.*?)\n[ \t]*\2[ \t]*(?=\n|$)", re.S)
 
 DANGEROUS_RM_TARGETS = {"/", "/*", "~", "~/", "~/*", "..", "../", "../*",
                         "$HOME", "${HOME}", "$HOME/", "${HOME}/", "$HOME/*", "${HOME}/*", "/Users", "/home"}
@@ -231,6 +269,9 @@ AGENT_CONTROL = re.compile(r"/\.gemini/config/(config\.json|mcp_config\.json|pro
                            r"|/\.claude/skills/antigravity/")
 AGENT_CONTROL_DIR = re.compile(r"/\.gemini(/config(/(projects|plugins)(/antigravity-plus)?)?|/antigravity-plus)?/?$"
                                r"|/\.claude/skills/antigravity/?$")  # a whole folder of them (rm -rf, mv, chmod -R)
+# Antigravity's own sidecars (`<configDir>/sidecars/<id>/sidecar.json`; jetski = an older path in its docs): a command it
+# starts by itself, or a `"builtin": "schedule"` automation that starts agent conversations on a cron schedule.
+SCHEDULED_SIDECAR = re.compile(r"/\.gemini/(?:config|jetski)/sidecars(?:/|$)", I)
 # Folders of the operating system itself. Not the user's ~/Library, not /usr/local or /opt (Homebrew), not the temp
 # folders (/tmp, /var/folders, /var/tmp) or /dev/null.
 SYSTEM_DIR = re.compile(
@@ -288,8 +329,9 @@ def split_heredocs(cmd: str) -> Tuple[str, List[Tuple[str, str]]]:
 
     def repl(m: "re.Match[str]") -> str:
         start = cmd.rfind("\n", 0, m.start()) + 1
-        docs.append((cmd[start:m.start()], m.group(3)))
-        return "<<" + m.group(2) + "\n"
+        rest = m.group(3)
+        docs.append((cmd[start:m.start()] + rest, m.group(4)))
+        return "<<" + m.group(2) + rest + "\n"
 
     return HEREDOC.sub(repl, cmd), docs
 
@@ -328,14 +370,44 @@ def talks_to_claude(cmd: str) -> bool:
     return norm(rest[0]) == norm(CLAUDE_TALK)
 
 
+ENV_VAL_FLAGS = {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"}
+
+
 def strip_prefixes(tokens: List[str]) -> List[str]:
     while tokens:
         t = tokens[0]
-        if re.match(r"^\w+=", t) or t in ("command", "exec", "time", "nohup", "env", "builtin", "noglob"):
+        if re.match(r"^\w+=", t) or t in ("builtin", "noglob"):
             tokens = tokens[1:]
-        elif t in ("sudo", "doas"):
+        elif t == "env":
+            tokens = tokens[1:]
+            while tokens:
+                if tokens[0] in ENV_VAL_FLAGS and len(tokens) > 1:
+                    tokens = tokens[2:]
+                elif tokens[0] == "--":
+                    tokens = tokens[1:]
+                    break
+                elif tokens[0].startswith("-") or re.match(r"^\w+=", tokens[0]):
+                    tokens = tokens[1:]
+                else:
+                    break
+        elif t == "command":
+            tokens = tokens[1:]
+            if tokens and tokens[0] in ("-v", "-V"):
+                return tokens  # `command -v rm` looks up rm without executing it
+            while tokens and tokens[0] in ("-p", "--"):
+                if tokens[0] == "--":
+                    tokens = tokens[1:]
+                    break
+                tokens = tokens[1:]
+        elif t in ("sudo", "doas", "exec", "time", "nohup"):
             tokens = tokens[1:]
             while tokens and tokens[0].startswith("-"):
+                if t == "exec" and tokens[0] == "-a" and len(tokens) > 1:
+                    tokens = tokens[2:]
+                    continue
+                if tokens[0] == "--":
+                    tokens = tokens[1:]
+                    break
                 tokens = tokens[1:]
         else:
             break
@@ -346,6 +418,15 @@ def note_assignments(segment: str, known: Dict[str, str]) -> None:
     """A segment that only sets variables (`S=/path`, `export APP="…"`): remember the ones that can't be empty, so
     `S=/path && rm -rf $S/x` isn't taken for `rm -rf /x`. A value from `$(…)` or another variable is unknown."""
     tokens = tokenize(segment)
+    if tokens[:1] == ["cd"]:  # where relative paths of the next segments point (`cd / && rm -rf *`)
+        dest = HOME if len(tokens) == 1 else ""
+        if len(tokens) == 2 and not tokens[1].startswith("-") and "`" not in tokens[1] and "$(" not in tokens[1]:
+            dest = expand_path(tokens[1], known)
+        if dest:
+            known["__cwd__"] = dest
+        else:  # `cd -`, `cd -P …`: the folder is unknown from here on
+            known.pop("__cwd__", None)
+        return
     if tokens and tokens[0] in ("export", "local", "declare", "typeset", "readonly"):
         tokens = [t for t in tokens[1:] if not t.startswith("-")]
     pairs = [re.match(r"^([A-Za-z_]\w*)=(.*)$", t, re.S) for t in tokens]
@@ -390,13 +471,31 @@ def check_rm(segment: str, known: Optional[Dict[str, str]] = None) -> Optional[T
     folder = None
     for t in targets:  # shlex keeps ~ and $VAR literal, which is what we want to inspect
         t = with_known(t, known)
+        if t in DANGEROUS_RM_TARGETS or t.rstrip("/") in DANGEROUS_RM_TARGETS or TOP_LEVEL.match(t) or rm_reaches_up(t, known):
+            return "rm-dangerous", f"`rm -r {t}` удалит всё содержимое `{t}` без корзины."
         if t in FOLDER_RM_TARGETS or t.rstrip("/") in FOLDER_RM_TARGETS:
             folder = folder or ("rm-folder", f"`rm -r {t}` удалит всё содержимое текущей папки без корзины.")
-        elif t in DANGEROUS_RM_TARGETS or t.rstrip("/") in DANGEROUS_RM_TARGETS or TOP_LEVEL.match(t):
-            return "rm-dangerous", f"`rm -r {t}` удалит всё содержимое `{t}` без корзины."
         elif VAR_ROOT.match(t) and not re.match(r"^\$\{?HOME\}?/", t):
             return "rm-dangerous", f"`rm -r {t}`: если переменная пустая, удаление пойдёт от корня `/`."
     return folder
+
+
+UP_ONLY = re.compile(r"^\.\.(/\.\.)*(/\*?)?$")  # `../..`, `../../*`: above the parent folder too
+
+
+def rm_reaches_up(t: str, known: Optional[Dict[str, str]]) -> bool:
+    """`rm -r` target that is / , the home folder or a top-level folder once `..` is resolved and an earlier `cd`
+    applied (`/usr/../`, `$HOME/x/..`, `cd / && rm -rf *`), or a relative path that climbs above the parent folder."""
+    p = expand_path(t, known)
+    if not p:
+        return False
+    if p.startswith("/") or re.match(r"^[A-Za-z]:/", p):
+        bare = p[:-1] if p.endswith("/*") else p
+        bare = bare.rstrip("/") or "/"
+        same = (lambda a, b: a.lower() == b.lower()) if compat.WINDOWS else (lambda a, b: a == b)  # noqa: E731
+        return bare == "/" or bool(re.match(r"^[A-Za-z]:$", bare)) or same(bare, HOME.rstrip("/")) \
+            or bool(TOP_LEVEL.match(bare))
+    return bool(UP_ONLY.match(posixpath.normpath(p)))
 
 
 WIN_RM = {"remove-item", "ri", "rm", "del", "erase", "rd", "rmdir", "rmdir.exe"}
@@ -429,6 +528,19 @@ def check_win_rm(segment: str) -> Optional[Tuple[str, str]]:
     return folder
 
 
+def _norm_guard_path(p: str) -> str:
+    if not p:
+        return ""
+    if p.startswith("/") or re.match(r"^[A-Za-z]:/", p):
+        if p.endswith("/*"):
+            base = posixpath.normpath(p[:-2] or "/")
+            return "/*" if base == "/" else base + "/*"
+        had_slash = len(p) > 1 and p.endswith("/")
+        norm = posixpath.normpath(p)
+        return norm + ("/" if had_slash and not norm.endswith("/") else "")
+    return p
+
+
 def expand_path(p: str, known: Optional[Dict[str, str]] = None) -> str:
     """A path as a command writes it → absolute with forward slashes where it can be told: ~, $HOME, %USERPROFILE%,
     %WINDIR%, $env:ProgramFiles and variables set earlier in the command; anything else stays as it is."""
@@ -436,7 +548,11 @@ def expand_path(p: str, known: Optional[Dict[str, str]] = None) -> str:
     for rx, repl in WIN_ENV:
         p = rx.sub(repl, p, count=1)
     p = HOME_REF.sub(lambda _m: HOME, p, count=1)
-    return re.sub(r"/{2,}", "/", p)
+    p = re.sub(r"/{2,}", "/", p)
+    if known and "__cwd__" in known and p and not (p.startswith("/") or re.match(r"^[A-Za-z]:/", p) or p.startswith("$")):
+        cwd = known["__cwd__"].rstrip("/")
+        p = f"{cwd}/{p}" if cwd else f"/{p}"
+    return _norm_guard_path(p)
 
 
 def changed_paths(segment: str, known: Optional[Dict[str, str]] = None) -> Tuple[List[str], List[str]]:
@@ -460,7 +576,8 @@ def changed_paths(segment: str, known: Optional[Dict[str, str]] = None) -> Tuple
             if dest is None and len(pos) >= 2:
                 dest = pos[-1]
             paths += [dest] if dest else []
-        elif prog in ("sed", "gsed", "perl") and any(a == "--in-place" or re.match(r"^-[a-zA-Z]*i", a) for a in args):
+        elif prog in ("sed", "gsed", "perl") and any(
+                a == "--in-place" or a.startswith("--in-place=") or re.match(r"^-[a-zA-Z]*i", a) for a in args):
             paths += pos
         elif prog == "dd":
             paths += [a[3:] for a in args if a.startswith("of=")]
@@ -476,6 +593,8 @@ def check_writes(segment: str, known: Optional[Dict[str, str]] = None) -> Option
         if AGENT_CONTROL.search(p) or AGENT_CONTROL_DIR.search(p):
             return "agent-settings", (f"команда меняет `{p}`: эти файлы решают, что агенту разрешено (разрешения "
                                       "Antigravity, MCP-серверы, плагины, настройки Antigravity Plus).")
+        if SCHEDULED_SIDECAR.search(p) and not perms_only:
+            return "scheduled-sidecar", f"команда меняет `{p}`: sidecar-процессы и расписания Antigravity запускаются сами."
         if PROTECTED_FILE.search(p) and not perms_only:
             return "protected-file", f"команда меняет служебный файл `{p}` (автозапуск, SSH-ключи, профиль оболочки, /etc)."
         if SYSTEM_DIR.search(p):
@@ -570,6 +689,71 @@ SQL_REASON = "SQL-команда удаляет таблицы или данны
 SQL_IN_EXEC = re.compile(r"\b(psql|mysql|mariadb|sqlite3|mongosh?|clickhouse-client)\b")
 
 
+def _substitutions(s: str) -> List[str]:
+    """Extract shell substitution bodies (`$(...)`, `<(...)`, `>(...)`, backticks) outside single quotes."""
+    out: List[str] = []
+    q, i, n = "", 0, len(s)
+    while i < n:
+        c = s[i]
+        if q == "'":
+            if c == "'":
+                q = ""
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if q == '"':
+            if c == '"':
+                q = ""
+                i += 1
+                continue
+        elif c in "'\"":
+            q = c
+            i += 1
+            continue
+        if c == "`":
+            j = i + 1
+            while j < n:
+                if s[j] == "\\" and j + 1 < n:
+                    j += 2
+                elif s[j] == "`":
+                    break
+                else:
+                    j += 1
+            if j < n and j > i + 1:
+                out.append(s[i + 1:j])
+            i = j + 1 if j < n else n
+            continue
+        if s[i:i + 2] in ("$(", "<(", ">(") and s[i:i + 3] != "$((" :
+            j, depth, sub_q = i + 2, 1, ""
+            while j < n and depth > 0:
+                sc = s[j]
+                if sub_q == "'":
+                    if sc == "'":
+                        sub_q = ""
+                elif sc == "\\" and j + 1 < n:
+                    j += 1
+                elif sub_q == '"':
+                    if sc == '"':
+                        sub_q = ""
+                elif sc in "'\"":
+                    sub_q = sc
+                elif sc == "(":
+                    depth += 1
+                elif sc == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if depth == 0 and j > i + 2:
+                out.append(s[i + 2:j])
+            i = j + 1 if depth == 0 else n
+            continue
+        i += 1
+    return out
+
+
 def analyze_command(cmd: str, depth: int = 0, system_only: bool = False) -> Optional[Tuple[str, str]]:
     """The command's first stop as (rule id, reason), or None. system_only (Bypass Mode): only the stops that hold
     there (SYSTEM_RULES), looked for in the whole command — past any project-level match."""
@@ -591,6 +775,10 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False) -> Opti
         return "curl-pipe-shell", CURL_REASON
     known: Dict[str, str] = {}
     for seg in split_segments(cmd):
+        for sub in _substitutions(seg):
+            hit = analyze_command(sub, depth + 1, system_only)
+            if hit:
+                return hit
         note_assignments(seg, known)
         prog = program(seg)
         if prog in TEXT_PROGRAMS:  # its arguments are text, but `echo … >> ~/.zshrc` still writes a file
@@ -608,6 +796,10 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False) -> Opti
         for rid, rx, reason in SEGMENT_RULES:
             if keep(rid) and rx.search(target):
                 return rid, reason
+        if keep("agent-settings") and prog.lower() not in ("git", "git.exe") and _sidecar_api_hit(seg):
+            return "agent-settings", SIDECAR_API_REASON
+        if keep("scheduled-sidecar") and schedule_change(seg):
+            return "scheduled-sidecar", SCHEDULE_REASON
         w = check_writes(seg, known)
         if w:
             return w
@@ -709,44 +901,431 @@ def ssh_remote(tokens: List[str]) -> Optional[str]:
     return " ".join(tokens[i + 1:])
 
 
-def remote_writes(remote: str) -> bool:
-    """Could this command, run on the server, change it? Only clearly read-only commands say no."""
-    if not remote.strip():
-        return True  # interactive shell on the server
-    remote, docs = split_heredocs(re.sub(r"\\\r?\n", " ", remote))
-    if docs:
+SAFE_PY_MODULES = {
+    "os", "os.path", "sys", "json", "re", "time", "datetime", "math", "collections", "itertools", "functools",
+    "pathlib", "urllib.request", "urllib.parse", "http.client", "socket", "ssl", "sqlite3", "psycopg", "psycopg2",
+    "asyncpg", "redis", "hashlib", "base64", "csv", "io", "stat", "glob", "gzip",
+}
+FORBIDDEN_PY_NAMES = {
+    "exec", "eval", "compile", "__import__", "__builtins__", "builtins", "importlib",
+    "setattr", "delattr", "breakpoint", "vars", "globals", "locals", "dir",
+    "__dict__", "__class__", "__subclasses__", "__mro__", "__bases__", "__globals__",
+    "__code__", "__closure__", "__getattribute__", "__getattr__", "__setattr__", "__delattr__",
+    "input", "FileIO", "RawIOBase", "BufferedWriter", "BufferedRandom", "TextIOWrapper",
+}
+FORBIDDEN_PY_CALLS = {
+    "system", "popen", "spawn", "spawnl", "spawnle", "spawnlp", "spawnlpe",
+    "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn", "posix_spawnp",
+    "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
+    "fork", "forkpty", "kill", "killpg",
+    "remove", "unlink", "rmdir", "removedirs", "rename", "renames", "replace",
+    "makedirs", "mkdir", "chmod", "fchmod", "lchmod", "chown", "fchown", "lchown",
+    "truncate", "ftruncate", "write", "writelines", "write_text", "write_bytes",
+    "pwrite", "pwritev", "writev", "sendfile", "copy_file_range",
+    "touch", "symlink_to", "hardlink_to", "link", "symlink", "mkfifo", "mknod",
+    "putenv", "unsetenv", "commit", "executemany", "executescript", "execute_command", "callproc",
+    "post", "put", "delete", "patch", "putrequest", "putheader", "endheaders", "makefile",
+    "load_extension", "backup",
+    "set", "setex", "psetex", "setnx", "mset", "msetnx", "hset", "hsetnx", "hmset",
+    "hdel", "hincrby", "hincrbyfloat", "lpush", "rpush", "lpop", "rpop", "lrem", "ltrim",
+    "linsert", "lset", "lmove", "blpop", "brpop", "brpoplpush", "rpoplpush",
+    "sadd", "srem", "spop", "smove", "zadd", "zrem", "zpopmin", "zpopmax", "bzpopmin", "bzpopmax", "zincrby",
+    "incr", "incrby", "incrbyfloat", "decr", "decrby", "append", "setrange", "getset", "getdel", "getex",
+    "expire", "pexpire", "renamenx", "flushdb", "flushall", "publish", "restore", "migrate",
+    "evalsha", "fcall", "fcall_ro", "config_set", "save", "bgsave", "bgrewriteaof", "shutdown", "slaveof", "replicaof",
+    "sendall", "send", "sendto", "sendmsg",
+}
+SQL_PY_MUTATION = re.compile(
+    r"\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s+(?:TABLE|INDEX|DATABASE|SCHEMA|VIEW|TRIGGER|FUNCTION)"
+    r"|ALTER\s+TABLE|CREATE\s+(?:TABLE|INDEX|TRIGGER|FUNCTION)|TRUNCATE|REPLACE\s+INTO|MERGE\s+INTO"
+    r"|GRANT|REVOKE|COPY\s+\w+\s+FROM|CALL|VACUUM|ATTACH|DETACH)\b",
+    I,
+)
+SAFE_DYNAMIC_SQL_START = re.compile(r"^\s*(?:SELECT|WITH|EXPLAIN|SHOW)\b", I)
+PYTHON_CMD_RE = re.compile(r"^(?:python(?:\d+(?:\.\d+)?)?|py)$", re.I)
+PY_VAL_FLAGS = {"-X", "-W", "-Q", "--check-hash-based-pycs"}
+PY_BOOL_FLAGS = re.compile(r"^-[BbdEIiOPqRsSuvVx3]+$")
+
+
+def _is_const_none(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _const_str_join(node: ast.AST) -> Optional[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.FormattedValue):
+        inner = _const_str_join(node.value)
+        return inner if inner is not None else " _VAR_ "
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            _const_str_join(v) if isinstance(v, ast.FormattedValue)
+            else (v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else " _VAR_ ")
+            for v in node.values
+        )
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _const_str_join(node.left)
+        right = _const_str_join(node.right)
+        if left is not None and right is not None:
+            return left + right
+    return None
+
+
+def _safe_open_call(node: ast.Call, is_std_hint: Optional[bool] = None) -> bool:
+    if any(isinstance(a, ast.Starred) for a in node.args) or any(kw.arg is None for kw in node.keywords):
+        return False
+    kw_map = {kw.arg: kw.value for kw in node.keywords}
+    if "opener" in kw_map:
+        return False
+    mode_node = kw_map.get("mode")
+    if mode_node is None:
+        is_std = is_std_hint if is_std_hint is not None else (
+            (isinstance(node.func, ast.Name) and node.func.id == "open") or (
+                isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in ("io", "gzip", "builtins")
+            )
+        )
+        pos_idx = 1 if is_std else 0
+        if len(node.args) > pos_idx:
+            mode_node = node.args[pos_idx]
+    if mode_node is None:
         return True
-    for seg in split_unquoted(remote):
-        if REDIRECT.search(QUOTED.sub("''", seg)):
+    if isinstance(mode_node, ast.Constant) and isinstance(mode_node.value, str):
+        return bool(mode_node.value) and set(mode_node.value) <= {"r", "b", "t"}
+    return False
+
+
+def _safe_http_call(node: ast.Call, name: str, has_http_client: bool) -> bool:
+    if any(isinstance(a, ast.Starred) for a in node.args) or any(kw.arg is None for kw in node.keywords):
+        return False
+    kw_map = {kw.arg: kw.value for kw in node.keywords}
+    if name in ("Request", "urlopen"):
+        if len(node.args) >= 2 and not _is_const_none(node.args[1]):
+            return False
+        if "data" in kw_map and not _is_const_none(kw_map["data"]):
+            return False
+        if name == "Request":
+            method_node = kw_map.get("method")
+            if method_node is None and len(node.args) >= 6:
+                method_node = node.args[5]
+            if method_node is not None and not _is_const_none(method_node):
+                if not (isinstance(method_node, ast.Constant) and isinstance(method_node.value, str)
+                        and method_node.value.upper() in ("GET", "HEAD")):
+                    return False
+        return True
+    if name == "request" and has_http_client:
+        if len(node.args) >= 3 and not _is_const_none(node.args[2]):
+            return False
+        if "body" in kw_map and not _is_const_none(kw_map["body"]):
+            return False
+        method_node = kw_map.get("method") or (node.args[0] if node.args else None)
+        if not (isinstance(method_node, ast.Constant) and isinstance(method_node.value, str)
+                and method_node.value.upper() in ("GET", "HEAD")):
+            return False
+    return True
+
+
+def readonly_python_code(src: str) -> bool:
+    """AST check: True only when Python source uses allowed read-only stdlib/DB modules and performs no mutations."""
+    if not isinstance(src, str) or not src.strip() or len(src) > 20_000:
+        return False
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return False
+
+    call_funcs = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    has_http_client = False
+    open_aliases: Set[str] = set()
+    http_aliases: Dict[str, str] = {}
+    urllib_req_aliases: Set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name not in SAFE_PY_MODULES:
+                    return False
+                if alias.name in ("http.client", "http"):
+                    has_http_client = True
+        elif isinstance(node, ast.ImportFrom):
+            if node.level != 0 or not node.module:
+                return False
+            if any(a.name == "*" or a.name in FORBIDDEN_PY_NAMES or a.name in FORBIDDEN_PY_CALLS for a in node.names):
+                return False
+            if node.module == "os" and any(a.name == "open" for a in node.names):
+                return False
+            if node.module in SAFE_PY_MODULES:
+                if node.module == "http.client":
+                    has_http_client = True
+                for a in node.names:
+                    local = a.asname or a.name
+                    if a.name == "open" and node.module in ("io", "gzip", "builtins"):
+                        open_aliases.add(local)
+                    if node.module == "urllib.request" and a.name in ("Request", "urlopen"):
+                        http_aliases[local] = a.name
+            elif node.module == "urllib" and all(a.name in ("request", "parse") for a in node.names):
+                for a in node.names:
+                    if a.name == "request":
+                        urllib_req_aliases.add(a.asname or a.name)
+            elif node.module == "http" and all(a.name == "client" for a in node.names):
+                has_http_client = True
+            else:
+                return False
+
+    guarded_names = {"open", "getattr", "Request", "urlopen"} | open_aliases | set(http_aliases)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if node.id in FORBIDDEN_PY_NAMES:
+                return False
+            if node.id in guarded_names and id(node) not in call_funcs:
+                return False
+            if node.id in FORBIDDEN_PY_CALLS and node.id != "set" and id(node) not in call_funcs:
+                return False
+        elif isinstance(node, ast.Attribute):
+            if node.attr in FORBIDDEN_PY_NAMES or node.attr in FORBIDDEN_PY_CALLS:
+                return False
+            if node.attr in ("autocommit", "isolation_level") and isinstance(node.ctx, ast.Store):
+                return False
+            if node.attr in ("open", "Request", "urlopen") and id(node) not in call_funcs:
+                return False
+        elif isinstance(node, ast.Constant):
+            if isinstance(node.value, str):
+                if SQL_PY_MUTATION.search(node.value):
+                    return False
+            elif isinstance(node.value, bytes):
+                if SQL_PY_MUTATION.search(node.value.decode("utf-8", errors="ignore")):
+                    return False
+        elif isinstance(node, (ast.JoinedStr, ast.BinOp)):
+            joined = _const_str_join(node)
+            if joined and SQL_PY_MUTATION.search(joined):
+                return False
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            if isinstance(fn, ast.Name):
+                if fn.id in FORBIDDEN_PY_NAMES or (fn.id in FORBIDDEN_PY_CALLS and fn.id != "set"):
+                    return False
+                if fn.id == "getattr":
+                    if (len(node.args) not in (2, 3) or any(isinstance(a, ast.Starred) for a in node.args)
+                            or node.keywords):
+                        return False
+                    attr = node.args[1]
+                    if not (isinstance(attr, ast.Constant) and isinstance(attr.value, str)):
+                        return False
+                    if attr.value in FORBIDDEN_PY_NAMES or attr.value in FORBIDDEN_PY_CALLS:
+                        return False
+                elif fn.id == "print":
+                    for kw in node.keywords:
+                        if kw.arg == "file" and not _is_const_none(kw.value) and not (
+                            isinstance(kw.value, ast.Attribute)
+                            and isinstance(kw.value.value, ast.Name)
+                            and kw.value.value.id == "sys"
+                            and kw.value.attr in ("stdout", "stderr")
+                        ):
+                            return False
+                elif fn.id == "open" or fn.id in open_aliases:
+                    if not _safe_open_call(node, is_std_hint=True):
+                        return False
+                elif fn.id in http_aliases and not _safe_http_call(node, http_aliases[fn.id], has_http_client):
+                    return False
+            elif isinstance(fn, ast.Attribute):
+                if fn.attr in FORBIDDEN_PY_NAMES or fn.attr in FORBIDDEN_PY_CALLS:
+                    return False
+                if fn.attr == "open":
+                    if isinstance(fn.value, ast.Name) and fn.value.id == "os":
+                        return False
+                    if not _safe_open_call(node):
+                        return False
+                if fn.attr in ("Request", "urlopen", "request") and not _safe_http_call(node, fn.attr, has_http_client):
+                    return False
+                if fn.attr == "connect":
+                    kw_map = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+                    if "isolation_level" in kw_map and _is_const_none(kw_map["isolation_level"]):
+                        return False
+                    if len(node.args) >= 4 and _is_const_none(node.args[3]):
+                        return False
+                    if "autocommit" in kw_map and isinstance(kw_map["autocommit"], ast.Constant) and kw_map["autocommit"].value is True:
+                        return False
+                if fn.attr == "execute" and node.args:
+                    arg0 = node.args[0]
+                    if not isinstance(arg0, (ast.Constant, ast.Name)):
+                        joined = _const_str_join(arg0)
+                        if not joined or ";" in joined or not SAFE_DYNAMIC_SQL_START.match(joined):
+                            return False
+            else:
+                return False
+    return True
+
+
+def _python_inline(tokens: List[str]) -> Optional[str]:
+    """Return Python `-c` code if `tokens` invokes `python[3[.x]] -c <code>`, else None."""
+    if not tokens or not PYTHON_CMD_RE.match(os.path.basename(tokens[0])):
+        return None
+    i = 1
+    while i < len(tokens):
+        t = tokens[i]
+        if t in PY_VAL_FLAGS:
+            i += 2
+            continue
+        if t.startswith(("-X", "-W", "-Q")) and len(t) > 2:
+            i += 1
+            continue
+        if t == "-c" or re.fullmatch(r"-[BbdEIiOPqRsSuvVx3]+c", t):
+            return tokens[i + 1] if i + 1 < len(tokens) else None
+        if t.startswith("-c") and len(t) > 2:
+            return t[2:]
+        if PY_BOOL_FLAGS.match(t):
+            i += 1
+            continue
+        return None
+    return None
+
+
+def _python_stdin(tokens: List[str]) -> bool:
+    """True if `tokens` invokes `python[3[.x]] [-]` reading code from stdin."""
+    if not tokens or not PYTHON_CMD_RE.match(os.path.basename(tokens[0])):
+        return False
+    i = 1
+    while i < len(tokens):
+        t = tokens[i]
+        if t in PY_VAL_FLAGS:
+            i += 2
+            continue
+        if t.startswith(("-X", "-W", "-Q")) and len(t) > 2:
+            i += 1
+            continue
+        if PY_BOOL_FLAGS.match(t):
+            i += 1
+            continue
+        return t == "-"
+    return True
+
+
+FIND_MUTATORS = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprint0", "-fprintf"}
+
+
+def _segment_writes(seg: str, heredoc_body: Optional[str] = None, depth: int = 0) -> bool:
+    if depth > 2:
+        return True
+    if REDIRECT.search(QUOTED.sub("''", seg)):
+        return True
+    if any(remote_writes(sub, depth + 1) for sub in _substitutions(seg)):
+        return True
+    tokens = strip_prefixes(tokenize(seg))
+    if not tokens:
+        return False
+    prog, args = os.path.basename(tokens[0]), tokens[1:]
+    if heredoc_body is not None:
+        if _python_stdin(tokens):
+            return not readonly_python_code(heredoc_body)
+        if prog == "docker" and args[:1] == ["exec"]:
+            rest = args[1:]
+            while rest and rest[0].startswith("-"):
+                rest = rest[2:] if rest[0] in ("-e", "--env", "-u", "--user", "-w", "--workdir") else rest[1:]
+            if len(rest) >= 2 and _python_stdin(rest[1:]):
+                return not readonly_python_code(heredoc_body)
+        if prog in SH_RUNNERS:
+            return remote_writes(heredoc_body, depth + 1)
+        return True
+    py_src = _python_inline(tokens)
+    if py_src is not None:
+        return not readonly_python_code(py_src)
+    if prog in READ_ONLY:
+        if prog == "sed" and any(a == "--in-place" or a.startswith(("-i", "--in-place=")) for a in args):
             return True
+        if prog == "find" and any(a in FIND_MUTATORS for a in args):
+            return True
+        if prog == "sort" and any(a == "-o" or a.startswith(("-o", "--output")) for a in args):
+            return True
+        if prog in ("awk", "gawk", "mawk", "nawk") and (
+            "system(" in seg or re.search(r"\b(?:print|printf)\b[^;\n]*>", seg)
+            or re.search(r"\|\s*getline\b|getline\s*<", seg)
+        ):
+            return True
+        if prog in ("curl", "wget") and any(a.startswith((
+            "-X", "--request", "--method", "-d", "--data", "--json", "-F", "--form", "-T", "--upload",
+            "-o", "-O", "--output", "--remote-name", "-J", "--remote-header-name", "--post", "-K", "--config",
+        )) for a in args):
+            return True
+        return False
+    sub = next((a for a in args if not a.startswith("-") or prog == "crontab"), "")
+    if prog == "docker" and sub == "compose":
+        if set(args) & COMPOSE_READ and not set(args) & {"up", "down", "restart", "build", "pull", "rm", "stop",
+                                                         "start", "exec", "run", "kill", "create", "push"}:
+            return False
+        return True
+    if prog == "docker" and sub == "exec":
+        rest = args[args.index("exec") + 1:]
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in ("-e", "--env", "-u", "--user", "-w", "--workdir") else rest[1:]
+        if len(rest) >= 2:
+            if os.path.basename(rest[1]) in READ_ONLY:
+                return False
+            sub_py = _python_inline(rest[1:])
+            if sub_py is not None:
+                return not readonly_python_code(sub_py)
+        return True
+    if prog == "service" and "status" in args:
+        return False
+    if sub in READ_ONLY_SUB.get(prog, ()):
+        return False
+    return True
+
+
+def _ssh_heredoc_writes(remote: str, body: str, depth: int = 0) -> bool:
+    if depth > 2:
+        return True
+    if not remote.strip():
+        return remote_writes(body, depth + 1)
+    segs = split_unquoted(re.sub(r"\\\r?\n", " ", remote))
+    consumed = False
+    for seg in segs:
         tokens = strip_prefixes(tokenize(seg))
         if not tokens:
             continue
-        prog, args = os.path.basename(tokens[0]), tokens[1:]
-        if prog in READ_ONLY:
-            if prog == "sed" and any(a.startswith("-i") for a in args):
+        if not consumed and _python_stdin(tokens):
+            consumed = True
+            if _segment_writes(seg, body, depth + 1):
                 return True
-            if prog in ("curl", "wget") and any(a.startswith(("-X", "--request", "-d", "--data", "-F", "--form", "-T",
-                                                              "--upload", "-o", "-O", "--output", "--post")) for a in args):
-                return True
-            continue
-        sub = next((a for a in args if not a.startswith("-") or prog == "crontab"), "")
-        if prog == "docker" and sub == "compose":
-            if set(args) & COMPOSE_READ and not set(args) & {"up", "down", "restart", "build", "pull", "rm", "stop",
-                                                             "start", "exec", "run", "kill", "create", "push"}:
-                continue
-            return True
-        if prog == "docker" and sub == "exec":
-            rest = args[args.index("exec") + 1:]
+        elif not consumed and os.path.basename(tokens[0]) == "docker" and "exec" in tokens[1:]:
+            rest = tokens[tokens.index("exec") + 1:]
             while rest and rest[0].startswith("-"):
                 rest = rest[2:] if rest[0] in ("-e", "--env", "-u", "--user", "-w", "--workdir") else rest[1:]
-            if len(rest) >= 2 and os.path.basename(rest[1]) in READ_ONLY:
-                continue
+            if len(rest) >= 2 and _python_stdin(rest[1:]):
+                consumed = True
+                if _segment_writes(seg, body, depth + 1):
+                    return True
+            elif _segment_writes(seg, depth=depth + 1):
+                return True
+        elif not consumed and os.path.basename(tokens[0]) in SH_RUNNERS and len(segs) == 1:
+            consumed = True
+            if _segment_writes(seg, body, depth + 1):
+                return True
+        elif _segment_writes(seg, depth=depth + 1):
             return True
-        if prog == "service" and "status" in args:
-            continue
-        if sub in READ_ONLY_SUB.get(prog, ()):
-            continue
+    if not consumed:
+        return remote_writes(body, depth + 1)
+    return False
+
+
+def remote_writes(remote: str, depth: int = 0) -> bool:
+    """Could this command, run on the server, change it? Only clearly read-only commands say no."""
+    if depth > 2 or not remote.strip():
+        return True  # interactive shell on the server
+    remote_cmd, docs = split_heredocs(remote)
+    remote_cmd = re.sub(r"\\\r?\n", " ", remote_cmd)
+    doc_idx = 0
+    for seg in split_unquoted(remote_cmd):
+        bare = QUOTED.sub("''", seg)
+        body = None
+        if "<<" in bare and doc_idx < len(docs):
+            body = docs[doc_idx][1]
+            doc_idx += 1
+        elif "<<" in bare:
+            return True
+        if _segment_writes(seg, body, depth + 1):
+            return True
+    if doc_idx < len(docs):
         return True
     return False
 
@@ -789,7 +1368,7 @@ def outward_kinds(cmd: str, depth: int = 0) -> Set[str]:
             continue
         remote = ssh_remote(tokens)
         if remote is not None:
-            if "<<" not in seg and remote_writes(remote):  # ssh host <<EOF … is checked with the heredocs below
+            if "<<" not in QUOTED.sub("''", seg) and remote_writes(remote):  # ssh host <<EOF … is checked with the heredocs below
                 kinds.add("push")
             continue
         bare = seg if INTERPRETER.search(seg) else QUOTED.sub("''", seg)
@@ -802,9 +1381,11 @@ def outward_kinds(cmd: str, depth: int = 0) -> Set[str]:
             for q in QUOTED.findall(seg):
                 kinds |= outward_kinds(q[1:-1], depth + 1)
     for owner, body in heredocs:
-        otok = strip_prefixes(tokenize(owner.split("<<")[0]))
-        if ssh_remote(otok) is not None:
-            if remote_writes(body):
+        owner_segs = split_unquoted(owner.split("<<")[0])
+        otok = strip_prefixes(tokenize(owner_segs[-1])) if owner_segs else []
+        oremote = ssh_remote(otok)
+        if oremote is not None:
+            if _ssh_heredoc_writes(oremote, body):
                 kinds.add("push")
         elif program(owner) in SHELLS:
             kinds |= outward_kinds(body, depth + 1)
@@ -867,18 +1448,32 @@ def secret_print(cmd: str) -> Optional[Tuple[str, str]]:
 def analyze_path(path: str) -> Optional[Tuple[str, str]]:
     """A file write's stop: startup files, SSH keys and /etc ("protected-file"), the agent's own permissions
     ("agent-settings"), the system's folders ("system-files"), git's internals ("git-internals": the project's)."""
-    p = compat.slashes(os.path.expanduser(path or ""))
-    if not p:
+    raw = compat.slashes(os.path.expanduser(path or ""))
+    if not raw:
         return None
-    if PROTECTED_FILE.search(p):
-        return "protected-file", f"запись в служебный/системный файл `{path}` (автозапуск, SSH-ключи, профиль оболочки, /etc)."
-    if AGENT_CONTROL.search(p):
-        return "agent-settings", (f"запись в `{path}`: эти настройки решают, что агенту разрешено (разрешения "
-                                  "Antigravity, MCP-серверы, плагины, настройки Antigravity Plus).")
-    if SYSTEM_DIR.search(p):
-        return "system-files", f"запись в системную папку: `{path}`."
-    if GIT_INTERNALS.search(p):
-        return "git-internals", f"запись во внутренние файлы git `{path}` — так можно испортить репозиторий."
+    norm = _norm_guard_path(raw) if (raw.startswith("/") or re.match(r"^[A-Za-z]:/", raw)) else posixpath.normpath(raw)
+    cands = [norm]
+    if (norm.startswith("/") and os.name != "nt") or (os.name == "nt" and re.match(r"^[A-Za-z]:/", norm)):
+        try:
+            rp = compat.slashes(os.path.realpath(norm))
+            if rp.startswith("/System/Volumes/Data/"):
+                rp = rp[len("/System/Volumes/Data"):]
+            if rp and rp not in cands:
+                cands.append(rp)
+        except OSError:
+            pass
+    for p in cands:
+        if PROTECTED_FILE.search(p):
+            return "protected-file", f"запись в служебный/системный файл `{path}` (автозапуск, SSH-ключи, профиль оболочки, /etc)."
+        if AGENT_CONTROL.search(p):
+            return "agent-settings", (f"запись в `{path}`: эти настройки решают, что агенту разрешено (разрешения "
+                                      "Antigravity, MCP-серверы, плагины, настройки Antigravity Plus).")
+        if SCHEDULED_SIDECAR.search(p):
+            return "scheduled-sidecar", f"запись в `{path}`: sidecar-процессы и расписания Antigravity запускаются сами."
+        if SYSTEM_DIR.search(p):
+            return "system-files", f"запись в системную папку: `{path}`."
+        if GIT_INTERNALS.search(p):
+            return "git-internals", f"запись во внутренние файлы git `{path}` — так можно испортить репозиторий."
     return None
 
 
@@ -957,9 +1552,21 @@ def decide(payload: dict) -> dict:
         except ValueError:
             args = {}
     hit, subject = None, ""
+    rewritten = None
     st = conv.load(payload)
     bypass = bypass_on(payload, st)
     full = lambda: conv.full_access(payload, st) is not None  # noqa: E731 — only computed when nothing else decided
+    if tool == "exit_plan_mode":
+        plan = unwrap(args.get("plan") or args.get("Plan") or "")
+        check = orchestrator.check_plan(payload, st, conv.with_current(st, payload), {**args, "plan": plan}) if orchestrator else None
+        if check:
+            rid, reason = check[0], check[1]
+            log(payload, tool, rid, plan[:300])
+            # A step the user banned is the user's call (they may have asked for it since): ask, never deny — a denied
+            # plan can only be re-planned, again and again. A missing check is the planner's to fix (once: orchestrator).
+            decision = "force_ask" if rid == "orchestrator-ban-in-plan" else "deny"
+            return {"decision": decision, "reason": f"🛡️ Antigravity Plus: {reason}"}
+        return PASS
     if tool == "read_file":
         subject = unwrap(args.get("Path") or args.get("path") or "")
         if protect_secrets() and SECRET_FILE.search(compat.slashes(subject)) and not subject.endswith(".pub"):
@@ -971,25 +1578,27 @@ def decide(payload: dict) -> dict:
         subject = unwrap(args.get("CommandLine") or args.get("command") or "")
         if talks_to_claude(subject):
             return AUTO  # a delegated agent's question or message for Claude Code: it only prints a line
-        stall = gitcheck.interactive(subject) if gitcheck and git_checks() else None
+        rewritten = gitcheck.rewrite(subject) if gitcheck and git_checks() else None
+        effective = rewritten[1] if rewritten else subject
+        stall = gitcheck.interactive(effective) if gitcheck and git_checks() else None
         if stall:  # it would wait at the keyboard (or fail on GIT_EDITOR=false): refuse with the form that works
             log(payload, tool, stall[0], subject)
             return {"decision": "deny", "reason": f"🛡️ Antigravity Plus: {stall[1]}"}
-        hit = analyze_command(subject, system_only=bypass)
+        hit = analyze_command(effective, system_only=bypass)
         if bypass and not hit:  # what Bypass Mode lets through still goes to the log
-            skipped = analyze_command(subject)
+            skipped = analyze_command(effective)
             if skipped:
                 log(payload, tool, "bypass:" + skipped[0], subject)
-        secret = secret_print(subject) if not hit and protect_secrets() else None
+        secret = secret_print(effective) if not hit and protect_secrets() else None
         if secret:  # refuse rather than ask: the agent can do the same without printing the value
             log(payload, tool, secret[0], subject)
             return {"decision": "deny", "reason": f"🛡️ Antigravity Plus: {secret[1]}"}
-        fake = facts.fake_check(subject) if not hit and facts else None
+        fake = facts.fake_check(effective) if not hit and facts else None
         if fake:  # `echo "tests passed"` checks nothing: refuse, the agent runs the real check
             log(payload, tool, "fake-check", subject)
             return {"decision": "deny", "reason": fake}
-        if not hit and outward_kinds(subject):
-            hit = restriction(conv.with_current(st, payload), subject)
+        if not hit and outward_kinds(effective):
+            hit = restriction(conv.with_current(st, payload), effective)
     elif tool in ("write_file", "edit_file"):
         subject = unwrap(args.get("Path") or args.get("TargetFile") or args.get("path") or "")
         if memstore and memstore.memory_dir_of(subject):
@@ -1006,7 +1615,13 @@ def decide(payload: dict) -> dict:
         if misplaced:  # a memory written into the project (weak models shorten the long path): say where it goes
             log(payload, tool, "memory-elsewhere", subject)
             return {"decision": "deny", "reason": misplaced}
-        stale = coord.check_write(payload, subject, unwrap(args.get("Content")) if tool == "write_file" and "Content" in args else None)
+        target_text = (unwrap(args.get("Target") or args.get("TargetContent"))
+                       if tool == "edit_file" and ("Target" in args or "TargetContent" in args) else None)
+        stale = coord.check_write(
+            payload, subject,
+            unwrap(args.get("Content")) if tool == "write_file" and "Content" in args else None,
+            target=target_text,
+        )
         if stale:  # refuse rather than ask: the agent re-reads the file and retries on its own
             log(payload, tool, "stale-write", subject)
             return {"decision": "deny", "reason": stale}
@@ -1015,7 +1630,18 @@ def decide(payload: dict) -> dict:
             log(payload, tool, "bypass:" + hit[0], subject)
             hit = None
     if not hit:
-        return AUTO if tool in ("run_command", "write_file", "edit_file") and (bypass or full()) else PASS
+        overwrite: Dict[str, object] = {}
+        if tool == "run_command":
+            effective = rewritten[1] if rewritten else subject
+            if rewritten:
+                key = "CommandLine" if ("CommandLine" in args or "command" not in args) else "command"
+                overwrite[key] = effective
+                log(payload, tool, rewritten[0], subject)
+            if speed and speed.needs_bypass_sandbox(payload, effective, args):
+                overwrite["BypassSandbox"] = True
+                log(payload, tool, "overwrite:bypass-sandbox", subject)
+        base = AUTO if tool in ("run_command", "write_file", "edit_file") and (bypass or full()) else PASS
+        return {**base, "overwrite": overwrite} if overwrite else base
     rid, reason = hit
     log(payload, tool, rid, subject)
     shown = subject if len(subject) <= 160 else subject[:159] + "…"

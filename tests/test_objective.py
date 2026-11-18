@@ -77,7 +77,8 @@ def pre():
     p = {"conversationId": cid, "transcriptPath": tp, "artifactDirectoryPath": art, "workspacePaths": [WS]}
     out = subprocess.run([sys.executable, os.path.join(HOOKS, "instructions.py")], input=json.dumps(p),
                          capture_output=True, text=True, encoding="utf-8")
-    msgs = [s["ephemeralMessage"] for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
+    msgs = [(s.get("systemMessage") or {}).get("systemMessage") or s.get("ephemeralMessage") or ""
+            for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
     return "\n".join(m for m in msgs if "<objectivity" in m)
 
 

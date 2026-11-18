@@ -443,8 +443,9 @@ def pre():
     p = {"conversationId": "lsp-hint-test-0001", "transcriptPath": tp, "workspacePaths": [PROJ]}
     out = subprocess.run([sys.executable, os.path.join(HOOKS, "instructions.py")], input=json.dumps(p), env=ENV,
                          capture_output=True, text=True, encoding="utf-8", timeout=60)
-    return "\n".join(x["ephemeralMessage"] for x in json.loads(out.stdout or "{}").get("injectSteps", [])
-                     if "<code_navigation" in x["ephemeralMessage"]), out.stderr
+    return "\n".join(m for x in json.loads(out.stdout or "{}").get("injectSteps", [])
+                     for m in [(x.get("systemMessage") or {}).get("systemMessage") or x.get("ephemeralMessage") or ""]
+                     if "<code_navigation" in m), out.stderr
 add("USER_INPUT", content="<USER_REQUEST>Переименуй award</USER_REQUEST>")
 run('rg -n "timed out after" pkg/')
 run('rg -n "XpService" pkg/')

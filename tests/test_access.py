@@ -22,7 +22,8 @@ def run(script, extra):
 def guard(cmd): return run("guard.py", {"toolCall": {"name": "run_command", "args": {"CommandLine": cmd}}}).get("decision")
 def pre():
     out = run("instructions.py", {})
-    return " | ".join(s["ephemeralMessage"] for s in out.get("injectSteps", []))
+    return " | ".join((s.get("systemMessage") or {}).get("systemMessage") or s.get("ephemeralMessage") or ""
+                      for s in out.get("injectSteps", []))
 ok = True
 def check(name, got, want):
     global ok

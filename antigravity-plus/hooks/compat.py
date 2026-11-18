@@ -197,3 +197,34 @@ def listening_ports(pid: int) -> List[int]:
         return ports
     out = run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:LISTEN"])
     return [int(p) for p in re.findall(r"127\.0\.0\.1:(\d+) \(LISTEN\)", out)]
+
+
+def kill_tree(pid: int) -> None:
+    """Terminate a process together with its child process group / tree."""
+    if not pid or pid <= 0:
+        return
+    if WINDOWS:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            creationflags=0x08000000,
+        )
+        return
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)
+        except OSError:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                return
+        for _ in range(10):
+            try:
+                os.killpg(pid, 0)
+            except OSError:
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    return
+            time.sleep(0.05)

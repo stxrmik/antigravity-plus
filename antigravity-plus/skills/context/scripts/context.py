@@ -47,6 +47,7 @@ CYRILLIC_RE = re.compile("[\u0400-\u04ff]")
 WIDE_RE = re.compile("[\u2e80-\U0010ffff]")  # CJK and the like: about a token per character
 CODE_CHARS = "{}()[];=<>/\\_|`#$*&+%^~\"'"
 TAG_RE = re.compile(r"<([a-z][a-z0-9_]*)\b[^>]*>.*?</\1>", re.S)
+BYPASS_NOTE = re.compile(r"^\s*(?:The user turned Bypass Mode (?:ON|OFF)|Bypass Mode was turned (?:ON|OFF) in another conversation)", re.M)
 SENDER_RE = re.compile(r"\[Message\][^\n]{0,120}?\bsender=(\S+)")
 WARN = 150_000  # = hooks/speed.py CTX_WARN: every step re-reads it all, details from the middle get lost
 # The transcript keeps a summary of the model's thinking; what the next call re-reads of it is about twice as much
@@ -214,6 +215,12 @@ def target(name: str, args: dict, workspaces: List[str]) -> Tuple[str, bool]:
     return "", False
 
 
+def _unwrap_sys(content: str) -> str:
+    parts = content.split("<SYSTEM_MESSAGE>")
+    body = parts[2] if len(parts) > 2 else parts[-1]
+    return re.sub(r"</SYSTEM_MESSAGE>\s*$", "", body).strip()
+
+
 def system_kind(content: str) -> Tuple[str, str, str]:
     """(category, sub, label) of a SYSTEM_MESSAGE."""
     parts = content.split("<SYSTEM_MESSAGE>")
@@ -303,6 +310,8 @@ def collect(steps: List[dict], workspaces: List[str]) -> dict:
     for pos, st in enumerate(steps):
         typ = st.get("type", "")
         content = st.get("content") or ""
+        if typ == "SYSTEM_MESSAGE" and not _unwrap_sys(content):
+            continue  # zero-token user_markdown or empty system message: 0 model tokens
         step = int(st.get("step_index", -1)) if str(st.get("step_index", "")).lstrip("-").isdigit() else -1
         if first is not None and pos < first:
             before_first += estimate(content)
@@ -342,8 +351,19 @@ def collect(steps: List[dict], workspaces: List[str]) -> dict:
                 add("hooks", f"<{tag}>" if tag else "прочее", f"подсказка <{tag}>" if tag else "подсказка", text,
                     ephemeral=True)
         elif typ == "SYSTEM_MESSAGE":
-            cat, sub, label = system_kind(content)
-            add(cat, sub, label, content)
+            body = _unwrap_sys(content)
+            if 'source="Antigravity Plus"' in body or BYPASS_NOTE.search(body):
+                for tag, text in hook_parts(body):
+                    if tag:
+                        sub, label = f"<{tag}>", f"подсказка <{tag}>"
+                    elif BYPASS_NOTE.search(text):
+                        sub, label = "bypass_notice", "подсказка Bypass Mode"
+                    else:
+                        sub, label = "прочее", "подсказка"
+                    add("hooks", sub, label, text)
+            else:
+                cat, sub, label = system_kind(content)
+                add(cat, sub, label, content)
         elif typ == "ERROR_MESSAGE":
             add("errors", "", "ошибка", content + str(st.get("error") or ""))
         elif content:

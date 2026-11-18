@@ -39,6 +39,7 @@ PROBE = 0.5              # seconds per /healthz probe while looking for the lang
 WEEK = 7 * 86400.0
 WEEK_TIGHT = 0.15        # weekly fraction left below which the group is tight
 H5_TIGHT = 0.10          # 5-hour fraction left below which the group is tight
+CRIT_LEFT = 0.05         # fraction left at or below which a zero-token critical UI badge fires once
 PACE_TIGHT = 0.6         # weekly fraction left ÷ fraction of the week left: spending far ahead of time
 NEW_WINDOW = 3600        # a reset this much later than the one already told about = a new window (readings jitter)
 LEVELS = {"tight": 1, "exhausted": 2}
@@ -187,6 +188,24 @@ def until(ts: str, now: float) -> str:
     return "" if t is None else ("now" if t <= now else "in " + span(t - now))
 
 
+def span_ru(seconds: float) -> str:
+    s = int(max(seconds, 0))
+    if s < 90:
+        return f"{s} с"
+    if s < 5400:
+        return f"{round(s / 60)} мин"
+    if s < 36000:
+        return f"{s // 3600} ч" + (f" {s % 3600 // 60} мин" if s % 3600 // 60 else "")
+    if s < 172800:
+        return f"{round(s / 3600)} ч"
+    return f"{s // 86400} дн." + (f" {s % 86400 // 3600} ч" if s % 86400 // 3600 else "")
+
+
+def until_ru(ts: str, now: float) -> str:
+    t = parse_ts(ts)
+    return "" if t is None else ("сейчас" if t <= now else "через " + span_ru(t - now))
+
+
 def pct(v: float) -> str:
     return f"{v * 100:.1f}%" if 0 < v < 0.1 else f"{v * 100:.0f}%"
 
@@ -268,8 +287,39 @@ def render(model: str, group: dict, st: dict, others: List[Tuple[dict, dict]]) -
     return f'<quota source="Antigravity Plus">\n{head}\n{body}\n</quota>'
 
 
-def message(payload: dict, st: Optional[dict]) -> Optional[str]:
-    """The quota hint for this model call, or None. Updates st["quota"] (the caller stores st)."""
+def render_ui(group: dict, st: dict, now: float, critical: bool = False) -> str:
+    """One-line user-facing Markdown badge for tight, critical (<= 5%), or exhausted quota."""
+    link = "[Расход токенов](sidecar://antigravity-plus/usage/)"
+    if st["status"] == "exhausted":
+        weekly = st["week"] is not None and st["week"] <= 0
+        kind = "недельный лимит 0%" if weekly else "5-часовой лимит 0%"
+        rst = until_ru(st["reset"], now)
+        return f"⚠️ **Квота «{group['name']}» исчерпана** — {kind}" + (f" (сброс {rst})" if rst else "") + f". {link}"
+    parts = []
+    if st["week"] is not None:
+        rst = until_ru(st["w_window"], now)
+        parts.append(f"неделя {pct(st['week'])}" + (f" (сброс {rst})" if rst else ""))
+    if st["h5"] is not None:
+        rst = until_ru(st["h_window"], now)
+        parts.append(f"5ч {pct(st['h5'])}" + (f" (сброс {rst})" if rst else ""))
+    is_crit = critical or any(v is not None and 0 < v <= CRIT_LEFT for v in (st["week"], st["h5"]))
+    icon = "🔴" if is_crit else "⏳"
+    title = "на исходе" if is_crit else "заканчивается"
+    detail = ", ".join(parts) or "лимит на исходе"
+    return f"{icon} **Квота «{group['name']}» {title}** — {detail}. {link}"
+
+
+def _crit_seen(entry: dict, bucket: str, ts: Optional[float]) -> bool:
+    if bucket not in entry:
+        return False
+    prev = entry[bucket]
+    if ts is not None and isinstance(prev, (int, float)) and ts - prev > NEW_WINDOW:
+        return False
+    return True
+
+
+def _evaluate(payload: dict, st: Optional[dict], with_ui: bool) -> Optional[Tuple[str, str]]:
+    """Evaluate quota for this model call; returns (model_msg, user_md) or None. Mutates st."""
     if not st or not st.get("users") or conv.delegated(st, payload):
         return None  # subagents and tasks from Claude Code: nobody to save the quota for
     if os.environ.get("AGP_QUOTA_CHECK", "").lower() == "off" or not setting():
@@ -299,16 +349,49 @@ def message(payload: dict, st: Optional[dict]) -> Optional[str]:
         seen_w = 0  # the weekly window rolled over
     if h_ts is not None and isinstance(seen_h_ts, (int, float)) and h_ts - seen_h_ts > NEW_WINDOW:
         seen_h = 0  # the 5-hour window rolled over
-    if s["w_level"] <= seen_w and s["h_level"] <= seen_h:
-        return None
-    told[group["name"]] = {
-        "w_level": max(seen_w, s["w_level"]),
-        "w_window": w_ts if w_ts is not None else seen_w_ts,
-        "h_level": max(seen_h, s["h_level"]),
-        "h_window": h_ts if h_ts is not None else seen_h_ts,
-    }
-    others = [(g, state(g, now)) for g in groups if g is not group]
-    return render(model, group, s, others)
+    if s["w_level"] > seen_w or s["h_level"] > seen_h:
+        told[group["name"]] = {
+            "w_level": max(seen_w, s["w_level"]),
+            "w_window": w_ts if w_ts is not None else seen_w_ts,
+            "h_level": max(seen_h, s["h_level"]),
+            "h_window": h_ts if h_ts is not None else seen_h_ts,
+        }
+        others = [(g, state(g, now)) for g in groups if g is not group]
+        model_msg = render(model, group, s, others)
+        user_md = ""
+        if with_ui:
+            user_md = render_ui(group, s, now)
+            for bucket, left, b_ts in (("weekly", s["week"], w_ts), ("5h", s["h5"], h_ts)):
+                if left is not None and 0 < left <= CRIT_LEFT:
+                    crit_entry = st.setdefault("quota_ui_crit", {}).setdefault(group["name"], {})
+                    crit_entry[bucket] = b_ts if b_ts is not None else True
+        return model_msg, user_md
+    if with_ui and conv.ui_notices_enabled():
+        raw_crit = st.get("quota_ui_crit")
+        crit_store = raw_crit if isinstance(raw_crit, dict) else {}
+        raw_entry = crit_store.get(group["name"])
+        crit_entry = raw_entry if isinstance(raw_entry, dict) else {}
+        hits = []
+        for bucket, left, b_ts, seen_lvl in (("weekly", s["week"], w_ts, seen_w), ("5h", s["h5"], h_ts, seen_h)):
+            if seen_lvl >= 1 and left is not None and 0 < left <= CRIT_LEFT and not _crit_seen(crit_entry, bucket, b_ts):
+                hits.append((bucket, b_ts))
+        if hits:
+            target = st.setdefault("quota_ui_crit", {}).setdefault(group["name"], {})
+            for bucket, b_ts in hits:
+                target[bucket] = b_ts if b_ts is not None else True
+            return "", render_ui(group, s, now, critical=True)
+    return None
+
+
+def message(payload: dict, st: Optional[dict]) -> Optional[str]:
+    """The quota hint for this model call, or None. Updates st["quota"] (the caller stores st)."""
+    res = _evaluate(payload, st, with_ui=False)
+    return res[0] if res and res[0] else None
+
+
+def message_with_ui(payload: dict, st: Optional[dict]) -> Optional[Tuple[str, str]]:
+    """(model_msg, user_md) for this model call, or None. Emits ("", user_md) once when a bucket drops <= 5%."""
+    return _evaluate(payload, st, with_ui=True)
 
 
 def main() -> int:

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Расход токенов · Antigravity Plus</title>
+<title>Центр управления · Antigravity Plus</title>
 <script src="/preload.js"></script>
 <style>
   /* Host tokens (pushed by Antigravity via theme-change) with fallbacks for a standalone browser. */
@@ -38,26 +38,29 @@
   button, select { font: inherit; color: inherit; }
   .muted { color: var(--ap-muted); }
   .small { font-size: 12px; }
-  .row { display: flex; align-items: center; gap: 8px; }
+  .row { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .between { justify-content: space-between; }
   .wrap { flex-wrap: wrap; }
   .grow { flex: 1; min-width: 0; }
   .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .num { font-variant-numeric: tabular-nums; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; overflow-wrap: anywhere; word-break: break-word; }
 
-  .top { position: sticky; top: 0; z-index: 2; background: var(--ap-bg); padding-bottom: 10px; margin: -12px -14px 4px; padding: 12px 14px 10px; border-bottom: 1px solid var(--ap-border); }
-  .tabs { display: inline-flex; border: 1px solid var(--ap-border); border-radius: 8px; padding: 2px; gap: 2px; }
-  .tabs button { border: 0; background: transparent; padding: 3px 10px; border-radius: 6px; cursor: pointer; color: var(--ap-muted); white-space: nowrap; }
+  .top { position: sticky; top: 0; z-index: 2; background: var(--ap-bg); margin: -12px -14px 4px; padding: 12px 14px 10px; border-bottom: 1px solid var(--ap-border); }
+  .top-bar { display: flex; align-items: center; justify-content: space-between; gap: 6px 8px; flex-wrap: wrap; }
+  .tabs { display: inline-flex; max-width: 100%; border: 1px solid var(--ap-border); border-radius: 8px; padding: 2px; gap: 2px; overflow-x: auto; }
+  .tabs button { border: 0; background: transparent; padding: 3px 9px; border-radius: 6px; cursor: pointer; color: var(--ap-muted); white-space: nowrap; }
   .tabs button[aria-selected="true"] { background: var(--ap-card); color: var(--ap-fg); box-shadow: 0 0 0 1px var(--ap-border); }
+  @media (max-width: 460px) {
+    .tabs button { padding: 3px 7px; font-size: 12px; }
+  }
   select { width: 100%; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--ap-border); background: var(--ap-card); }
-  .live { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; min-width: 0; flex: 1; justify-content: flex-end; }
+  .live { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; min-width: 0; margin-left: auto; justify-content: flex-end; }
   #live-text { overflow: hidden; text-overflow: ellipsis; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ap-muted); flex: none; }
-  .dot.on { background: var(--ap-good); animation: pulse 1.6s ease-in-out infinite; }
-  @keyframes pulse { 50% { opacity: .35; } }
-  @media (prefers-reduced-motion: reduce) { .dot.on { animation: none; } }
+  .dot.on { background: var(--ap-good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ap-good) 24%, transparent); }
 
-  .card { background: var(--ap-card); border: 1px solid var(--ap-border); border-radius: 12px; padding: 12px; margin-top: 10px; }
+  .card { background: var(--ap-card); border: 1px solid var(--ap-border); border-radius: 12px; padding: 12px; margin-top: 10px; min-width: 0; }
   .card h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
   .card h3 .muted { font-weight: 400; }
   .hero { font-size: 40px; font-weight: 600; letter-spacing: -0.5px; line-height: 1.1; }
@@ -104,11 +107,39 @@
   tr.click { cursor: pointer; }
   tr.click:hover td { background: color-mix(in srgb, var(--ap-fg) 5%, transparent); }
   details summary { cursor: pointer; color: var(--ap-muted); font-size: 12px; margin-top: 6px; }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-  .chip { border: 1px solid var(--ap-border); border-radius: 999px; padding: 1px 8px; font-size: 12px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chip { border: 1px solid var(--ap-border); border-radius: 999px; padding: 1px 8px; font-size: 12px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { text-align: center; padding: 28px 8px; }
   .err { border-color: var(--ap-crit); }
   .stale { opacity: .6; transition: opacity .2s; }
+
+  .btn { border: 1px solid var(--ap-border); background: var(--ap-card); color: var(--ap-fg); border-radius: 8px; padding: 4px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+  .btn:hover:not(:disabled) { background: color-mix(in srgb, var(--ap-fg) 6%, var(--ap-card)); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn.primary { border-color: var(--ap-accent); color: var(--ap-accent); }
+  .btn.danger { border-color: var(--ap-crit); color: var(--ap-crit); }
+  .badge { display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; border: 1px solid var(--ap-border); white-space: nowrap; flex: none; }
+  .badge.good { border-color: var(--ap-good); color: var(--ap-good); }
+  .badge.warn { border-color: var(--ap-warn); color: var(--ap-warn); }
+  .badge.crit { border-color: var(--ap-crit); color: var(--ap-crit); }
+  .badge.accent { border-color: var(--ap-accent); color: var(--ap-accent); }
+  .badge.muted { color: var(--ap-muted); }
+
+  .item { padding: 8px 0; min-width: 0; }
+  .item:first-child { padding-top: 2px; }
+  .item:last-child { padding-bottom: 0; }
+  .item + .item { border-top: 1px solid var(--ap-border); }
+
+  .toggle-group-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--ap-muted); margin: 12px 0 4px; }
+  .toggle-group-title:first-of-type { margin-top: 2px; }
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; }
+  .toggle-row + .toggle-row { border-top: 1px solid var(--ap-border); }
+  .switch { position: relative; flex: none; width: 34px; height: 20px; border-radius: 999px; border: 1px solid var(--ap-border); background: var(--ap-base); cursor: pointer; padding: 0; transition: background .15s, border-color .15s; }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--ap-card); transition: transform .15s; }
+  .switch[aria-checked="true"] { background: var(--ap-accent); border-color: var(--ap-accent); }
+  .switch[aria-checked="true"]::after { transform: translateX(14px); background: #ffffff; }
+  .switch:disabled { opacity: .45; cursor: default; }
+
   #tip { position: fixed; z-index: 10; pointer-events: none; max-width: 280px; background: var(--ap-card); color: var(--ap-fg); border: 1px solid var(--ap-border); border-radius: 8px; padding: 6px 8px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.18); display: none; }
   #tip .tv { font-weight: 600; font-size: 13px; }
   #tip .key { display: inline-block; width: 12px; height: 2px; vertical-align: middle; margin-right: 6px; }
@@ -118,10 +149,12 @@
 <body>
 <div id="app">
   <div class="top">
-    <div class="row between">
+    <div class="top-bar">
       <div class="tabs" role="tablist">
-        <button role="tab" id="tab-session" aria-selected="true">Разговор</button>
-        <button role="tab" id="tab-all" aria-selected="false">Все разговоры</button>
+        <button role="tab" id="tab-session" aria-selected="true">Сессия</button>
+        <button role="tab" id="tab-all" aria-selected="false">Сводка</button>
+        <button role="tab" id="tab-activity" aria-selected="false">Активность</button>
+        <button role="tab" id="tab-control" aria-selected="false">Управление</button>
       </div>
       <span class="live small muted" id="live"><span class="dot" id="dot"></span><span id="live-text">загрузка…</span></span>
     </div>
@@ -137,8 +170,17 @@
   'use strict';
   const params = new URLSearchParams(location.search);
   const PANE_CONV = (window.sidecar && window.sidecar.conversationId) || params.get('conversationId') || '';
-  const state = { tab: 'session', selected: '', session: null, recent: null, sessionKey: '', recentKey: '',
-                  updatedAt: 0, error: null, loading: false, limits: null, limitsError: null };
+  const initialTab = ['session', 'all', 'activity', 'control'].includes(params.get('tab')) ? params.get('tab') : 'session';
+  const state = {
+    tab: initialTab, selected: '',
+    session: null, recent: null, sessionKey: '', recentKey: '',
+    status: null, statusKey: '', statusError: null, statusUpdatedAt: 0,
+    updatedAt: 0, error: null, loading: false,
+    limits: null, limitsError: null,
+    busyLsp: false, lspNote: '',
+    busyUpdate: false, updateNote: '',
+    busyToggles: {}, toggleError: '',
+  };
 
   // ───────── helpers ─────────
   function h(tag, attrs, ...kids) {
@@ -201,13 +243,46 @@
     if (sec < 86400) return Math.round(sec / 3600) + ' ч назад';
     return new Date(iso).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
   }
+  const fmtEpochAgo = (secEpoch) => secEpoch ? fmtAgo(new Date(secEpoch * 1000).toISOString()) : '—';
   const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '';
+  const fmtSec = (sec) => {
+    sec = Math.max(0, Number(sec) || 0);
+    if (sec < 60) return sec + ' с';
+    const m = Math.round(sec / 60);
+    return m < 60 ? m + ' мин' : Math.floor(m / 60) + ' ч ' + (m % 60) + ' мин';
+  };
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   function niceMax(v) {
     if (v <= 0) return 1;
     const p = Math.pow(10, Math.floor(Math.log10(v)));
     for (const m of [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (m * p >= v) return m * p;
     return 10 * p;
+  }
+
+  async function copyCmd(btn, text) {
+    const orig = btn.dataset.origLabel || btn.textContent;
+    btn.dataset.origLabel = orig;
+    let ok = false;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        ok = true;
+      }
+    } catch { ok = false; }
+    if (!ok) {
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+        document.body.appendChild(ta);
+        ta.select();
+        ok = document.execCommand('copy');
+        ta.remove();
+      } catch { ok = false; }
+    }
+    btn.textContent = ok ? 'Скопировано ✓' : `Команда: ${text}`;
+    clearTimeout(btn._copyTimer);
+    btn._copyTimer = setTimeout(() => { btn.textContent = orig; }, 1600);
   }
 
   // ───────── theme: follow the host's --background (pushed by preload.js) ─────────
@@ -247,15 +322,22 @@
   const hideTip = () => { tip.style.display = 'none'; };
 
   // ───────── API ─────────
-  async function api(path, body) {
-    const opts = { method: 'POST', body: JSON.stringify(body || {}) };
+  async function requestApi(path, opts) {
     const res = window.sidecar && window.sidecar.fetch
       ? await window.sidecar.fetch(path, opts)
-      : await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', 'X-Sidecar-Token': params.get('token') || '' } });
+      : await fetch(path, {
+          ...opts,
+          headers: {
+            ...(opts.method === 'POST' ? { 'Content-Type': 'application/json' } : {}),
+            'X-Sidecar-Token': params.get('token') || '',
+          },
+        });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || res.statusText || 'request failed');
     return data;
   }
+  const api = (path, body) => requestApi(path, { method: 'POST', body: JSON.stringify(body || {}) });
+
   async function loadSession() {
     const id = state.selected || PANE_CONV;
     try {
@@ -279,6 +361,95 @@
     try { state.limits = await api('/api/limits', {}); state.limitsError = null; }
     catch (e) { state.limitsError = e.message; }  // keep showing the last good numbers
     renderLimits();
+  }
+  async function loadStatus() {
+    try {
+      const data = await api('/api/status', {});
+      const stable = {
+        ...data,
+        lsp: (data.lsp || []).map((d) => ({
+          ...d,
+          idle_min: Math.floor((d.idle_sec || 0) / 60),
+          idle_sec: undefined,
+          up_sec: undefined,
+        })),
+      };
+      delete stable.ts;
+      const key = JSON.stringify(stable);
+      state.statusError = null;
+      state.statusUpdatedAt = Date.now();
+      if (key !== state.statusKey) {
+        state.statusKey = key;
+        state.status = data;
+        if (state.tab === 'activity' || state.tab === 'control') render();
+      } else {
+        state.status = data;
+        if (state.tab === 'activity' || state.tab === 'control') renderLive();
+      }
+    } catch (e) {
+      state.statusError = e.message;
+      if (state.tab === 'activity' || state.tab === 'control') render();
+    }
+  }
+
+  async function stopLsp(target) {
+    if (state.busyLsp) return;
+    state.busyLsp = true;
+    state.lspNote = '';
+    render();
+    try {
+      const res = await api('/api/lsp/stop', target ? { target } : {});
+      state.lspNote = res.output || 'Готово';
+      state.statusKey = '';
+      await loadStatus();
+    } catch (e) {
+      state.lspNote = `Ошибка: ${e.message}`;
+    } finally {
+      state.busyLsp = false;
+      render();
+    }
+  }
+
+  async function checkUpdates() {
+    if (state.busyUpdate) return;
+    state.busyUpdate = true;
+    state.updateNote = '';
+    render();
+    try {
+      const res = await api('/api/update/check', {});
+      state.updateNote = res.available
+        ? `Найдена новая версия: ${res.best}`
+        : res.error ? `Не удалось проверить: ${res.error}` : 'Установлена последняя версия.';
+      state.statusKey = '';
+      await loadStatus();
+    } catch (e) {
+      state.updateNote = `Ошибка проверки: ${e.message}`;
+    } finally {
+      state.busyUpdate = false;
+      render();
+    }
+  }
+
+  async function toggleSetting(key, nextValue) {
+    if (state.busyToggles[key]) return;
+    state.busyToggles[key] = true;
+    state.toggleError = '';
+    render();
+    try {
+      const res = await api('/api/toggle', { key, value: nextValue });
+      if (state.status && state.status.settings && res.settings) {
+        state.status.settings = res.settings;
+        state.statusKey = JSON.stringify(state.status);
+      } else {
+        state.statusKey = '';
+        await loadStatus();
+      }
+    } catch (e) {
+      state.toggleError = `Не удалось изменить ${key}: ${e.message}`;
+    } finally {
+      delete state.busyToggles[key];
+      render();
+    }
   }
 
   // ───────── charts ─────────
@@ -304,8 +475,8 @@
     let maxIdx = items.findIndex((d) => d.value === max);
     items.forEach((d, i) => {
       const cx = padL + band * i + band / 2;
-      const top = y(d.value);
-      const path = s('path', { class: 'bar', d: roundedTop(cx - bw / 2, top, bw, H - padB - top, 4), fill: color });
+      const topY = y(d.value);
+      const path = s('path', { class: 'bar', d: roundedTop(cx - bw / 2, topY, bw, H - padB - topY, 4), fill: color });
       svg.append(path);
       const hit = s('rect', { class: 'hit', x: padL + band * i, y: padT - 14, width: band, height: H - padT - padB + 14 + padB, tabindex: 0,
         onpointermove: (ev) => { path.classList.add('hover'); showTip(ev, opt.fmt(d.value), d.tip, color); },
@@ -313,7 +484,7 @@
         onfocus: (ev) => { const r = ev.target.getBoundingClientRect(); showTip({ clientX: r.left + r.width / 2, clientY: r.top }, opt.fmt(d.value), d.tip, color); },
         onblur: hideTip });
       svg.append(hit);
-      if (i === maxIdx && max > 0) svg.append(s('text', { class: 'val', x: cx, y: top - 5, 'text-anchor': 'middle' }, opt.fmt(d.value)));
+      if (i === maxIdx && max > 0) svg.append(s('text', { class: 'val', x: cx, y: topY - 5, 'text-anchor': 'middle' }, opt.fmt(d.value)));
       if (opt.xLabel && (items.length <= 8 || i === 0 || i === items.length - 1 || i % Math.ceil(items.length / 6) === 0)) {
         svg.append(s('text', { x: cx, y: H - 6, 'text-anchor': 'middle' }, opt.xLabel(d, i)));
       }
@@ -322,9 +493,9 @@
   }
 
   // Context size per model call: 2px line + 10% wash, end dot with surface ring, window/compaction hairlines, crosshair tooltip.
-  function contextLine(host, calls, win, comp) {
+  function contextLine(host, callList, win, comp) {
     const W = chartWidth(host), H = 130, padL = 40, padR = 52, padT = 12, padB = 20;
-    const vals = calls.map((c) => c.prompt);
+    const vals = callList.map((c) => c.prompt);
     const peak = Math.max(...vals, 1);
     const showComp = comp && comp < (win || Infinity) && peak > comp * 0.35;
     const showWin = win && (peak > win * 0.35 || showComp);
@@ -370,7 +541,7 @@
         const r = svg.getBoundingClientRect();
         const px = (ev.clientX - r.left) * (W / r.width);
         const i = Math.max(0, Math.min(n - 1, Math.round(((px - padL) / (W - padL - padR)) * (n - 1))));
-        const c = calls[i];
+        const c = callList[i];
         if (!c) return;
         cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.setAttribute('visibility', 'visible');
         dot.setAttribute('cx', x(i)); dot.setAttribute('cy', y(c.prompt)); dot.setAttribute('visibility', 'visible');
@@ -390,7 +561,7 @@
   function chartBox(draw) {
     const box = h('div');
     resizers.push(() => draw(box));
-    requestAnimationFrame(() => draw(box));
+    setTimeout(() => draw(box), 0);
     return box;
   }
 
@@ -403,7 +574,6 @@
   // Plan limits: one persistent card, refilled in place so polling never resets the rest of the view.
   const limitsCard = h('div', { class: 'card' });
   const WINDOWS = { '5h': '5 часов', weekly: 'Неделя' };
-  // the quota group's description names Orchestrator (Carbon / Argon) itself, next to the Gemini families
   const family = (name) => (String(name || '').match(/gemini|claude|gpt|orchestrator/i) || [''])[0].toLowerCase();
   const groupTitle = (g) => String(g.displayName || '').replace(/\s+models?$/i, '').replace(/\band\b/g, 'и');
   function fmtIn(iso) {
@@ -432,7 +602,6 @@
             h('span', { class: 'small muted ellipsis grow', title: models }, models),
             cur && `${g.displayName} ${g.description}`.toLowerCase().includes(cur) ? h('span', { class: 'chip' }, 'модель разговора') : null),
           h('div', { class: 'limits' }, buckets.map((b) => {
-            // proto3 JSON drops zero values: no remainingFraction means nothing is left
             const left = Math.min(1, Math.max(0, Number(b.remainingFraction) || 0));
             const used = 1 - left, fresh = left >= 0.9995;
             const color = used >= 0.9 ? 'var(--ap-crit)' : used >= 0.7 ? 'var(--ap-warn)' : 'var(--ap-s1)';
@@ -612,6 +781,233 @@
     return out;
   }
 
+  function taskBadge(t) {
+    if (t.waiting || t.status === 'question') return h('span', { class: 'badge warn' }, 'ждёт ответа');
+    if (t.status === 'approval') return h('span', { class: 'badge warn' }, 'ждёт вашего разрешения');
+    if (t.status === 'running' || t.status === 'timeout') return h('span', { class: 'badge accent' }, 'работает');
+    if (t.status === 'background') return h('span', { class: 'badge accent' }, 'работает в фоне');
+    if (t.status === 'done') return h('span', { class: 'badge good' }, 'готово');
+    if (t.status === 'failed') return h('span', { class: 'badge crit' }, 'ошибка');
+    if (t.status === 'canceled') return h('span', { class: 'badge muted' }, 'отменено');
+    return h('span', { class: 'badge muted' }, t.status || '?');
+  }
+
+  function renderActivity() {
+    const st = state.status;
+    if (!st) return [h('div', { class: 'empty muted' }, state.statusError ? 'Не удалось загрузить активность.' : 'Загрузка…')];
+    const agents = st.agents || [];
+    const bridge = st.bridge || [];
+    const lsp = st.lsp || [];
+    const out = [];
+
+    // 1. Active agents across projects
+    out.push(h('div', { class: 'card' },
+      h('div', { class: 'row between', style: 'margin-bottom:6px' },
+        h('h3', { style: 'margin:0' }, 'Активные агенты ', h('span', { class: 'muted' }, '— за 10 мин')),
+        h('span', { class: `badge ${agents.length ? 'good' : 'muted'}` }, String(agents.length))),
+      agents.length ? agents.map((a) => h('div', { class: 'item' },
+        h('div', { class: 'row between wrap' },
+          h('div', { class: 'row grow', style: 'gap:6px' },
+            h('span', { class: 'chip', style: 'flex:none;max-width:130px', title: a.workspace }, a.workspace_name || a.workspace || 'проект'),
+            h('span', { style: 'font-weight:600', class: 'ellipsis grow', title: a.title }, a.title || 'без названия')),
+          h('span', { class: 'small muted num' }, a.ago_min === 0 ? 'только что' : `${a.ago_min} мин назад`)),
+        h('div', { class: 'small muted ellipsis', style: 'margin-top:2px', title: a.workspace },
+          `${a.workspace || '—'} · ${a.id.slice(0, 8)}${a.parent ? ' · субагент' : ''}`),
+        (a.files || []).length ? h('div', { class: 'chips', style: 'margin-top:5px' },
+          a.files.slice(0, 6).map((f) => h('span', { class: 'chip mono', title: f }, f)),
+          a.files.length > 6 ? h('span', { class: 'chip muted' }, `+${a.files.length - 6}`) : null) : null))
+        : h('div', { class: 'small muted' }, 'Сейчас в проектах нет активных агентов.')));
+
+    // 2. Claude Code <-> Antigravity bridge tasks
+    out.push(h('div', { class: 'card' },
+      h('div', { class: 'row between', style: 'margin-bottom:6px' },
+        h('h3', { style: 'margin:0' }, 'Мост Claude ↔ Antigravity'),
+        h('span', { class: 'badge muted' }, String(bridge.length))),
+      bridge.length ? bridge.map((t) => h('div', { class: 'item' },
+        h('div', { class: 'row between wrap' },
+          h('div', { class: 'row grow', style: 'gap:6px' },
+            h('span', { class: 'chip', style: 'flex:none' }, t.direction),
+            h('span', { style: 'font-weight:600', class: 'ellipsis grow', title: t.title }, t.title || t.id.slice(0, 8))),
+          taskBadge(t)),
+        h('div', { class: 'small muted ellipsis', style: 'margin-top:2px' },
+          [t.model, t.workspace, fmtEpochAgo(t.started)].filter(Boolean).join(' · '))))
+        : h('div', { class: 'small muted' }, 'Недавних делегированных задач нет.')));
+
+    // 3. Running LSP daemons
+    out.push(h('div', { class: 'card' },
+      h('div', { class: 'row between wrap', style: 'margin-bottom:6px' },
+        h('h3', { style: 'margin:0' }, 'Языковые серверы (LSP)'),
+        h('button', {
+          class: 'btn danger',
+          disabled: state.busyLsp || !lsp.length,
+          onclick: () => stopLsp('all'),
+        }, state.busyLsp ? 'Остановка…' : 'Остановить все')),
+      state.lspNote ? h('div', { class: 'small muted', style: 'margin-bottom:6px' }, state.lspNote) : null,
+      lsp.length ? lsp.map((d) => h('div', { class: 'item' },
+        h('div', { class: 'row between wrap' },
+          h('div', { class: 'grow', style: 'min-width:0' },
+            h('div', { class: 'row wrap', style: 'gap:6px' },
+              h('span', { style: 'font-weight:600' }, d.server),
+              d.lang ? h('span', { class: 'chip' }, d.lang) : null,
+              d.ram_mb !== null && d.ram_mb !== undefined ? h('span', { class: 'chip num' }, `${d.ram_mb} MB`) : null,
+              h('span', { class: 'small muted num' }, `простой ${fmtSec(d.idle_sec)}`)),
+            h('div', { class: 'small muted ellipsis', style: 'margin-top:2px', title: d.root },
+              `${d.root || '—'} · PID ${d.pid}`)),
+          h('button', {
+            class: 'btn',
+            disabled: state.busyLsp,
+            onclick: () => stopLsp(d.key),
+          }, 'Остановить'))))
+        : h('div', { class: 'small muted' }, 'Запущенных фоновых серверов LSP сейчас нет.')));
+
+    return out;
+  }
+
+  const TOGGLE_GROUPS = [
+    {
+      title: 'Дисциплина и проверки',
+      items: [
+        { key: 'checkEdits', label: 'Проверка правок', desc: 'Синтаксис и линтеры после каждого изменения', req: 'quality' },
+        { key: 'finishTasks', label: 'Доводить задачи до конца', desc: 'Не завершать ход с открытыми пунктами task.md', req: 'quality' },
+        { key: 'autoReview', label: 'Авто-ревью кода', desc: 'Запускать /review после крупных изменений', req: 'quality' },
+        { key: 'autoVerify', label: 'Авто-проверка тестами', desc: 'Требовать запуск тестов/сборки после правок', req: 'quality' },
+        { key: 'gitChecks', label: 'Защита команд git/gh', desc: 'Не давать интерактивным командам подвесить терминал', req: 'git' },
+        { key: 'autoCi', label: 'Контроль CI после push/PR', desc: 'Напоминать дождаться статуса пайплайна', req: 'git' },
+      ],
+    },
+    {
+      title: 'Память и навигация',
+      items: [
+        { key: 'autoMemory', label: 'Авто-память', desc: 'Сохранять важные факты и решения между сессиями', req: 'memory' },
+        { key: 'lspChecks', label: 'LSP-навигация и типы', desc: 'Подсказки языкового сервера вместо текстового поиска', req: 'lsp' },
+        { key: 'autoSetup', label: 'Авто-настройка проекта', desc: 'Создавать git-репозиторий и AGENTS.md в новых папках' },
+        { key: 'updateCheck', label: 'Ежедневная проверка обновлений', desc: 'Раз в сутки проверять выход новой версии плагина' },
+      ],
+    },
+    {
+      title: 'Подсказки',
+      items: [
+        { key: 'parallelHints', label: 'Параллельная работа', desc: 'Предлагать выносить независимые части субагентам', req: 'parallel' },
+        { key: 'speedHints', label: 'Ускорение и контекст', desc: 'Память песочницы, бюджет контекста и выход из циклов', req: 'speed' },
+        { key: 'quotaHints', label: 'Подсказки по квоте', desc: 'Предупреждать при низком остатке лимитов плана', req: 'speed' },
+        { key: 'factChecks', label: 'Проверка фактов в отчёте', desc: 'Сверять утверждения о тестах, путях и ссылках', req: 'facts' },
+        { key: 'objectiveAnswers', label: 'Объективные ответы', desc: 'Проверять код перед согласием с догадкой', req: 'facts' },
+      ],
+    },
+  ];
+
+  function renderControl() {
+    const st = state.status;
+    if (!st) return [h('div', { class: 'empty muted' }, state.statusError ? 'Не удалось загрузить панель управления.' : 'Загрузка…')];
+    const plugin = st.plugin || {};
+    const mods = plugin.modules || {};
+    const installed = mods.installed || [];
+    const unavailable = mods.unavailable || [];
+    const upd = plugin.update || {};
+    const access = st.access || {};
+    const bypass = access.bypass || {};
+    const settings = st.settings || {};
+    const avail = st.available || {};
+    const guardLog = st.guard || [];
+    const out = [];
+
+    // 1. Plugin version, modules & update check
+    out.push(h('div', { class: 'card' },
+      h('div', { class: 'row between wrap', style: 'margin-bottom:6px' },
+        h('h3', { style: 'margin:0' }, 'Плагин и обновления'),
+        h('div', { class: 'row', style: 'gap:6px' },
+          h('span', { class: 'badge accent' }, `v${plugin.version || '?'}`),
+          h('span', { class: 'badge muted' }, `${installed.length} модулей`))),
+      installed.length ? h('div', { class: 'small muted', style: 'margin-bottom:4px' },
+        `Установлены: ${installed.join(', ')}${unavailable.length ? ` · не выбраны/недоступны: ${unavailable.join(', ')}` : ''}`) : null,
+      upd.available
+        ? note('info', `Доступна версия ${upd.best} (сейчас ${upd.installed || plugin.version || '?'}). Скопируйте /update и отправьте в чат.`)
+        : h('div', { class: 'small muted' }, upd.checked ? `Обновлений нет (проверено ${fmtEpochAgo(upd.checked)}).` : 'Проверка обновлений ещё не выполнялась.'),
+      (upd.notes || []).length && upd.available
+        ? h('div', { class: 'small muted', style: 'margin-top:4px' }, upd.notes.slice(0, 3).map((n) => h('div', null, `• ${n}`))) : null,
+      upd.error ? h('div', { class: 'small', style: 'color:var(--ap-crit);margin-top:4px' }, upd.error) : null,
+      state.updateNote ? h('div', { class: 'small muted', style: 'margin-top:6px' }, state.updateNote) : null,
+      h('div', { class: 'row wrap', style: 'margin-top:8px' },
+        h('button', {
+          class: 'btn primary',
+          disabled: state.busyUpdate,
+          onclick: checkUpdates,
+        }, state.busyUpdate ? 'Проверка…' : 'Проверить обновления'),
+        h('button', {
+          class: 'btn',
+          onclick: (ev) => copyCmd(ev.currentTarget, '/update'),
+        }, 'Скопировать /update'))));
+
+    // 2. Read-only security status card
+    out.push(h('div', { class: 'card' },
+      h('h3', null, 'Безопасность и доступ ', h('span', { class: 'muted' }, '— только просмотр')),
+      h('div', { class: 'item' },
+        h('div', { class: 'row between wrap' },
+          h('div', { class: 'grow' },
+            h('div', { class: 'row', style: 'gap:6px' },
+              h('span', { style: 'font-weight:600' }, 'Bypass Mode'),
+              h('span', { class: `badge ${bypass.on ? 'warn' : 'muted'}` }, bypass.on ? 'Включён' : 'Выключен')),
+            h('div', { class: 'small muted' }, bypass.on
+              ? (bypass.since ? `Активен с ${bypass.since}; системные команды всё равно спрашивают.` : 'Активен для всех разговоров.')
+              : 'Опасные команды и системные правки запрашивают подтверждение.')),
+          h('button', {
+            class: 'btn',
+            onclick: (ev) => copyCmd(ev.currentTarget, bypass.on ? '/bypass off' : '/bypass'),
+          }, bypass.on ? 'Скопировать /bypass off' : 'Скопировать /bypass'))),
+      h('div', { class: 'item' },
+        h('div', { class: 'row between wrap' },
+          h('div', { class: 'grow' },
+            h('div', { class: 'row', style: 'gap:6px' },
+              h('span', { style: 'font-weight:600' }, 'Защита секретов (protectSecrets)'),
+              h('span', { class: `badge ${access.protect_secrets ? 'good' : 'crit'}` }, access.protect_secrets ? 'Включена' : 'Выключена')),
+            h('div', { class: 'small muted' }, 'Изменяется только командой /settings в чате, не из панели.'))))));
+
+    // 3. Coaching & checks toggles (strictly allowlisted)
+    out.push(h('div', { class: 'card' },
+      h('h3', null, 'Настройки и подсказки'),
+      state.toggleError ? h('div', { class: 'small', style: 'color:var(--ap-crit);margin-bottom:6px' }, state.toggleError) : null,
+      ...TOGGLE_GROUPS.map((grp) => [
+        h('div', { class: 'toggle-group-title' }, grp.title),
+        ...grp.items.map((item) => {
+          const val = Boolean(settings[item.key]);
+          const modMissing = Boolean(item.req && avail[item.req] === false);
+          const busy = Boolean(state.busyToggles[item.key]);
+          return h('div', { class: 'toggle-row' },
+            h('div', { class: 'grow' },
+              h('div', { style: 'font-weight:500' }, item.label),
+              h('div', { class: 'small muted' }, modMissing ? `${item.desc} (модуль «${item.req}» не установлен)` : item.desc)),
+            h('button', {
+              class: 'switch',
+              type: 'button',
+              role: 'switch',
+              'aria-checked': String(val),
+              'aria-label': item.label,
+              disabled: busy || modMissing,
+              onclick: () => toggleSetting(item.key, !val),
+            }));
+        }),
+      ])));
+
+    // 4. Recent guard.log feed (last 15, masked)
+    out.push(h('div', { class: 'card' },
+      h('div', { class: 'row between', style: 'margin-bottom:6px' },
+        h('h3', { style: 'margin:0' }, 'Журнал guard ', h('span', { class: 'muted' }, '— последние 15')),
+        h('span', { class: 'badge muted' }, String(guardLog.length))),
+      guardLog.length ? guardLog.map((g) => {
+        const cls = String(g.rule || '').startsWith('bypass:') ? 'warn' : 'crit';
+        return h('div', { class: 'item' },
+          h('div', { class: 'row between wrap' },
+            h('div', { class: 'row', style: 'gap:6px' },
+              h('span', { class: `badge ${cls}` }, g.rule || '?'),
+              h('span', { class: 'small muted' }, g.tool || '')),
+            h('span', { class: 'small muted num' }, g.ts || '')),
+          h('div', { class: 'mono muted', style: 'margin-top:3px' }, g.subject || '—'));
+      })
+        : h('div', { class: 'small muted' }, 'Срабатываний guard пока нет.')));
+
+    return out;
+  }
+
   function renderPicker() {
     const sel = document.getElementById('picker');
     const cur = state.selected;
@@ -627,11 +1023,15 @@
 
   function renderLive() {
     const dot = document.getElementById('dot'), txt = document.getElementById('live-text');
-    if (state.error) { dot.className = 'dot'; txt.textContent = 'ошибка'; return; }
+    const isStatusTab = state.tab === 'activity' || state.tab === 'control';
+    const err = isStatusTab ? state.statusError : state.error;
+    if (err) { dot.className = 'dot'; txt.textContent = 'ошибка'; return; }
     const last = state.tab === 'session' && state.session && state.session.last_ts;
     const active = last && Date.now() - new Date(last).getTime() < 90000;
-    dot.className = 'dot' + (active ? ' on' : '');
-    const ago = state.updatedAt ? Math.round((Date.now() - state.updatedAt) / 1000) : null;
+    const activeAgents = isStatusTab && state.status && ((state.status.agents || []).length > 0 || (state.status.bridge || []).some((b) => b.waiting || ['running', 'question', 'approval', 'timeout', 'background'].includes(b.status)));
+    dot.className = 'dot' + (active || activeAgents ? ' on' : '');
+    const stamp = isStatusTab ? state.statusUpdatedAt : state.updatedAt;
+    const ago = stamp ? Math.round((Date.now() - stamp) / 1000) : null;
     txt.textContent = active ? 'агент работает' : (ago === null ? 'загрузка…' : `обновлено ${ago < 5 ? 'сейчас' : ago + ' с назад'}`);
   }
 
@@ -640,17 +1040,37 @@
     hideTip();
     document.getElementById('tab-session').setAttribute('aria-selected', String(state.tab === 'session'));
     document.getElementById('tab-all').setAttribute('aria-selected', String(state.tab === 'all'));
+    document.getElementById('tab-activity').setAttribute('aria-selected', String(state.tab === 'activity'));
+    document.getElementById('tab-control').setAttribute('aria-selected', String(state.tab === 'control'));
     document.getElementById('picker-row').style.display = state.tab === 'session' ? '' : 'none';
     renderLimits();  // the "модель разговора" marker depends on the tab and the selected conversation
     const kids = [];
-    if (state.error) kids.push(h('div', { class: 'card err' }, h('div', { style: 'font-weight:600' }, 'Не удалось получить данные'),
-      h('div', { class: 'small muted' }, state.error), h('div', { class: 'small muted' }, 'Проверьте /doctor в Antigravity: нужен python3 и доступ к ~/.gemini/antigravity/brain.')));
+    const isStatusTab = state.tab === 'activity' || state.tab === 'control';
+    if (!isStatusTab && state.error) {
+      kids.push(h('div', { class: 'card err' }, h('div', { style: 'font-weight:600' }, 'Не удалось получить данные'),
+        h('div', { class: 'small muted' }, state.error), h('div', { class: 'small muted' }, 'Проверьте /doctor в Antigravity: нужен python3 и доступ к ~/.gemini/antigravity/brain.')));
+    }
+    if (isStatusTab && state.statusError) {
+      kids.push(h('div', { class: 'card err' }, h('div', { style: 'font-weight:600' }, 'Не удалось обновить статус'),
+        h('div', { class: 'small muted' }, state.statusError)));
+    }
     const up = state.recent && state.recent.update;
-    if (up && up.available) kids.push(h('div', { class: 'card' }, note('info', `Вышла Antigravity Plus ${up.latest} (у вас ${up.installed || '?'}) — напишите /update в чате: обновление в один шаг, с откатом.`)));
-    kids.push(...(state.tab === 'session' ? renderSession() : renderAll()));
+    if (!isStatusTab && up && up.available) {
+      kids.push(h('div', { class: 'card' }, note('info', `Вышла Antigravity Plus ${up.latest} (у вас ${up.installed || '?'}) — напишите /update в чате: обновление в один шаг, с откатом.`)));
+    }
+    if (state.tab === 'session') kids.push(...renderSession());
+    else if (state.tab === 'all') kids.push(...renderAll());
+    else if (state.tab === 'activity') kids.push(...renderActivity());
+    else kids.push(...renderControl());
+
     view.replaceChildren(...kids);
-    const pu = (state.session && state.session.pricing_updated) || (state.recent && state.recent.pricing_updated) || '?';
-    document.getElementById('foot').textContent = `Оценка по ценам API из pricing.json (обновлён ${pu}), а не ваш реальный счёт. Данные — из транскриптов Antigravity, те же, что у /usage; лимиты — от самого Antigravity.`;
+    const foot = document.getElementById('foot');
+    if (isStatusTab) {
+      foot.textContent = 'Состояние из ~/.gemini/antigravity-plus/ — управление правами доступа (Bypass Mode, protectSecrets, /update) остаётся только в чате.';
+    } else {
+      const pu = (state.session && state.session.pricing_updated) || (state.recent && state.recent.pricing_updated) || '?';
+      foot.textContent = `Оценка по ценам API из pricing.json (обновлён ${pu}), а не ваш реальный счёт. Данные — из транскриптов Antigravity, те же, что у /usage; лимиты — от самого Antigravity.`;
+    }
     renderLive();
   }
 
@@ -660,13 +1080,20 @@
     renderPicker(); render(); loadSession();
   }
   function setTab(tab) {
-    state.tab = tab; state.error = null; render();
+    state.tab = tab;
+    if (tab === 'session' || tab === 'all') state.error = null;
+    else state.statusError = null;
+    render();
     window.scrollTo(0, 0);
-    (tab === 'session' ? loadSession : loadRecent)();
+    if (tab === 'session') loadSession();
+    else if (tab === 'all') loadRecent();
+    else loadStatus();
   }
   document.getElementById('picker').addEventListener('change', (e) => select(e.target.value));
   document.getElementById('tab-session').addEventListener('click', () => setTab('session'));
   document.getElementById('tab-all').addEventListener('click', () => setTab('all'));
+  document.getElementById('tab-activity').addEventListener('click', () => setTab('activity'));
+  document.getElementById('tab-control').addEventListener('click', () => setTab('control'));
   let lastW = 0;
   new ResizeObserver(() => { const w = view.clientWidth; if (Math.abs(w - lastW) > 8) { lastW = w; resizers.forEach((f) => f()); } }).observe(view);
 
@@ -674,19 +1101,30 @@
   async function tick() {
     if (document.visibilityState !== 'visible' || state.loading) return;
     state.loading = true;
-    try { await (state.tab === 'session' ? loadSession() : loadRecent()); } finally { state.loading = false; }
+    try {
+      if (state.tab === 'session') await loadSession();
+      else if (state.tab === 'all') await loadRecent();
+      else await loadStatus();
+    } finally { state.loading = false; }
   }
   setInterval(tick, 3000);
   setInterval(() => { if (document.visibilityState === 'visible') loadRecent(); }, 20000);
+  setInterval(() => {
+    if (document.visibilityState === 'visible' && state.tab !== 'activity' && state.tab !== 'control') loadStatus();
+  }, 15000);
   setInterval(renderLive, 1000);
   setInterval(() => { if (document.visibilityState === 'visible') loadLimits(); }, 30000);  // also refreshes the countdowns
-  document.addEventListener('visibilitychange', () => { tick(); if (document.visibilityState === 'visible') loadLimits(); });
+  document.addEventListener('visibilitychange', () => {
+    tick();
+    if (document.visibilityState === 'visible') loadLimits();
+  });
 
   applyTheme();
   renderPicker();
   render();
   loadRecent();
   loadLimits();
+  loadStatus();
   tick();
 })();
 </script>

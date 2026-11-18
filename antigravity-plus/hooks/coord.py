@@ -21,6 +21,7 @@ Stdlib only, Python 3.8+.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import sys
 import time
 from typing import Dict, List, Optional, Tuple
 
+import checks
 import compat
 import conversation as conv
 
@@ -36,6 +38,11 @@ COORD_DIR = os.path.expanduser("~/.gemini/antigravity-plus/coord")
 INDEX_DB = os.path.expanduser("~/.gemini/antigravity/conversation_summaries.db")
 ACTIVE = 10 * 60          # an agent with activity in the last 10 minutes is working right now
 KEEP = 24 * 3600          # forget agents idle for a day
+SNAP_MAX_BYTES = 64_000   # max file size saved as text snapshot for stale-write diffs
+SNAP_KEEP = 30            # max cached snapshots per agent
+DIFF_READ_BYTES = 128_000 # max file size read when formatting stale-write diff
+DIFF_MAX_LINES = 24       # max unified-diff lines shown in stale-write refusal
+SNIPPET_LINES = 16        # max context lines when no prior snap exists
 
 
 def workspace(payload: dict) -> Optional[str]:
@@ -67,6 +74,7 @@ class Registry:
             self.data = {}
         self.data.setdefault("agents", {})
         self.data.setdefault("seen", {})
+        self.data.setdefault("snaps", {})
         return self.data
 
     def __exit__(self, *exc) -> None:
@@ -77,6 +85,8 @@ class Registry:
                 for a in old:
                     self.data["agents"].pop(a, None)
                     self.data["seen"].pop(a, None)
+                    self.data.get("snaps", {}).pop(a, None)
+                self.data.pop("stale_hits", None)  # an earlier build's retry counters: retries no longer unlock writes
                 tmp = f"{self.path}.{os.getpid()}.tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(self.data, f, ensure_ascii=False)
@@ -140,6 +150,84 @@ def heartbeat(payload: dict) -> None:
             _agent(data, cid)["last"] = time.time()
 
 
+def _read_text(path: str, limit: int) -> Optional[str]:
+    """Read UTF-8 text up to `limit` bytes; None for missing, oversized, or binary (NUL-byte) files."""
+    try:
+        if os.path.getsize(path) > limit:
+            return None
+        with open(path, "rb") as f:
+            raw = f.read(limit + 1)
+    except OSError:
+        return None
+    if len(raw) > limit or b"\0" in raw:
+        return None
+    return raw.decode("utf-8", errors="replace")
+
+
+def _save_snap(data: dict, cid: str, path: str, text: Optional[str]) -> None:
+    """Keep up to SNAP_KEEP newest text snapshots per agent."""
+    snaps = data.setdefault("snaps", {}).setdefault(cid, {})
+    if text is None or len(text.encode("utf-8", errors="replace")) > SNAP_MAX_BYTES:
+        snaps.pop(path, None)
+        return
+    snaps[path] = text
+    if len(snaps) > SNAP_KEEP:
+        seen = data.get("seen", {}).get(cid, {})
+        oldest = sorted(snaps, key=lambda p: seen.get(p, [0, 0, 0])[2])
+        for p in oldest[:-SNAP_KEEP]:
+            snaps.pop(p, None)
+
+
+def _stale_diff(snap_text: Optional[str], disk_text: Optional[str], target: Optional[str]) -> Tuple[str, str]:
+    """(text, kind): kind "full" — the whole diff since the agent's snapshot; "partial" — its first DIFF_MAX_LINES
+    lines; "same" — the text didn't change; "snippet" — no snapshot, so lines of the current file (around `target`),
+    not a diff; "none" — nothing can be shown (too big, binary or unreadable)."""
+    if disk_text is None:
+        return "", "none"
+    if snap_text is not None:
+        diff_lines = list(difflib.unified_diff(snap_text.splitlines(), disk_text.splitlines(),
+                                               fromfile="seen", tofile="disk", lineterm="", n=2))
+        if not diff_lines:
+            return "(текст на диске совпадает с вашей версией — обновилось только время изменения файла)", "same"
+        if len(diff_lines) <= DIFF_MAX_LINES:
+            return "\n".join(diff_lines), "full"
+        shown = diff_lines[:DIFF_MAX_LINES] + [f"… (+ ещё {len(diff_lines) - DIFF_MAX_LINES} строк diff не показано)"]
+        return "\n".join(shown), "partial"
+    lines = disk_text.splitlines()
+    if not lines:
+        return "(файл на диске пуст)", "snippet"
+    lo, hi = 0, min(len(lines), SNIPPET_LINES)
+    if target:
+        idx = disk_text.find(target)
+        if idx >= 0:
+            start_ln = disk_text.count("\n", 0, idx)
+            end_ln = start_ln + target.count("\n") + 1
+            lo = max(0, start_ln - 4)
+            hi = min(len(lines), max(lo + SNIPPET_LINES, end_ln + 4))
+            if hi - lo > SNIPPET_LINES:
+                hi = lo + SNIPPET_LINES
+    shown = [f"{n}: {lines[n - 1]}" for n in range(lo + 1, hi + 1)]
+    if hi < len(lines) or lo > 0:
+        shown.append(f"… (строки {lo + 1}-{hi} из {len(lines)})")
+    return "\n".join(shown), "snippet"
+
+
+def _lost_changes(snap_text: str, disk_text: str, content: str) -> List[str]:
+    """What a whole-file write of `content` would undo of the changes made on disk since the agent's snapshot: lines
+    added or changed there that `content` drops, and lines removed there that `content` brings back."""
+    old, new = snap_text.splitlines(), disk_text.splitlines()
+    keep = {ln.rstrip() for ln in content.splitlines()}
+    on_disk = {ln.rstrip() for ln in new}
+    lost: List[str] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag in ("replace", "insert"):
+            lost += [ln for ln in new[j1:j2] if ln.strip() and ln.rstrip() not in keep]
+        if tag in ("replace", "delete"):
+            lost += [f"{ln.strip()} (удалено на диске)" for ln in old[i1:i2]
+                     if len(ln.strip()) >= 3 and ln.rstrip() in keep and ln.rstrip() not in on_disk]
+    return lost
+
+
 def record(payload: dict, tool: str, path: str) -> None:
     """After read_file / write_file / edit_file: remember the version this agent saw (and that it changed the file)."""
     cid, ws = payload.get("conversationId"), workspace(payload)
@@ -147,17 +235,19 @@ def record(payload: dict, tool: str, path: str) -> None:
         return
     path = os.path.realpath(path)
     v = version(path)
+    text = None if (not v or checks.SECRET_FILE.search(compat.slashes(path))) else _read_text(path, SNAP_MAX_BYTES)
     with Registry(ws) as data:
         a = _agent(data, cid)
         now = time.time()
         a["last"] = now
         if v:
             data["seen"].setdefault(cid, {})[path] = v + [now]
+            _save_snap(data, cid, path, text)
         if tool in ("write_file", "edit_file"):
             a["files"][path] = now
 
 
-def check_write(payload: dict, path: str, content: Optional[str] = None) -> Optional[str]:
+def check_write(payload: dict, path: str, content: Optional[str] = None, target: Optional[str] = None) -> Optional[str]:
     """Refusal text when this agent is about to write over a version of `path` it hasn't seen, or to rewrite the whole
     file (write_file `content`) dropping lines another active agent changed recently; None if it's safe."""
     cid, ws = payload.get("conversationId"), workspace(payload)
@@ -181,7 +271,45 @@ def check_write(payload: dict, path: str, content: Optional[str] = None) -> Opti
             return refusal(path, ws, writer, writer_info, when, never_read=True)
         return None  # never seen and nobody else touched it recently: nothing to protect
     if seen[:2] != current:
-        return refusal(path, ws, writer if writer and when > seen[2] else None, writer_info, when, never_read=False)
+        if checks.SECRET_FILE.search(compat.slashes(path)):  # a secret's text never goes into the conversation
+            eff_writer = writer if writer and when > seen[2] else None
+            return refusal(path, ws, eff_writer, writer_info, when, never_read=False)
+        disk_text = _read_text(path, DIFF_READ_BYTES)
+        steady = version(path) == current  # the text read is the version checked (no write landed in between)
+        lost: List[str] = []
+        safe_edit = False
+        with Registry(ws, write=True) as data:
+            seen = data["seen"].get(cid, {}).get(path)
+            if seen is None or seen[:2] == current:
+                return None
+            writer, when = None, 0.0
+            fam = family(data, cid)
+            for other, a in data["agents"].items():
+                ts = a.get("files", {}).get(path, 0)
+                if other not in fam and ts > when:
+                    writer, when = other, ts
+            writer_info = data["agents"].get(writer, {}) if writer else {}
+            eff_writer = writer if writer and when > seen[2] else None
+            snap_text = data.get("snaps", {}).get(cid, {}).get(path)
+            if (steady and snap_text is not None and disk_text is not None and snap_text == disk_text
+                    and "�" not in disk_text):
+                data["seen"].setdefault(cid, {})[path] = current + [time.time()]
+                return None  # only the file's time changed: what the agent saw is what is on disk
+            diff_text, kind = _stale_diff(snap_text, disk_text, target)
+            if content is not None and steady and snap_text is not None and disk_text is not None:
+                lost = _lost_changes(snap_text, disk_text, content)
+                if not lost:
+                    return None  # the whole-file write keeps every line that changed on disk: nothing of theirs is lost
+            # An edit whose Target is still in the file word for word replaces only that text, so it can't undo what
+            # changed elsewhere: after this one refusal (with the diff) the same edit may go through. Nothing else
+            # is let through without a fresh read_file.
+            safe_edit = (content is None and steady and isinstance(target, str) and bool(target.strip())
+                         and disk_text is not None and target in disk_text)
+            if safe_edit:
+                data["seen"].setdefault(cid, {})[path] = current + [time.time()]
+                _save_snap(data, cid, path, disk_text)
+        return refusal(path, ws, eff_writer, writer_info, when, never_read=False, diff_text=diff_text,
+                       diff_kind=kind, refreshed=safe_edit, lost=lost)
     if content is not None and writer and time.time() - when < ACTIVE:
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
@@ -200,7 +328,17 @@ def check_write(payload: dict, path: str, content: Optional[str] = None) -> Opti
     return None
 
 
-def refusal(path: str, ws: str, writer: Optional[str], info: dict, when: float, never_read: bool) -> str:
+DIFF_INTRO = {
+    "full": "Что изменилось на диске с вашего последнего чтения (diff целиком):",
+    "partial": "Начало изменений с вашего последнего чтения (diff обрезан — показаны не все строки, остальное увидите "
+               "в read_file):",
+    "same": "",
+    "snippet": "Сохранённой версии этого файла нет, поэтому diff показать нельзя — ниже текущий текст файла:",
+}
+
+
+def refusal(path: str, ws: str, writer: Optional[str], info: dict, when: float, never_read: bool,
+            diff_text: str = "", diff_kind: str = "", refreshed: bool = False, lost: Optional[List[str]] = None) -> str:
     rel = os.path.relpath(path, ws) if path.startswith(ws + os.sep) else path
     if writer:
         ago = max(1, int((time.time() - when) // 60))
@@ -209,9 +347,24 @@ def refusal(path: str, ws: str, writer: Optional[str], info: dict, when: float, 
         who = "кто-то другой после вашего последнего чтения (другой агент, Claude Code, редактор или ваша же команда)"
     head = (f"файл {rel} изменил {who}, а вы его ещё не читали" if never_read
             else f"файл {rel} изменил {who}")
-    return (f"🛡️ Antigravity Plus: {head}. Чтобы не затереть чужую работу, перечитайте файл (read_file) и сделайте "
-            "правку поверх его текущей версии." + (f" Если вы работаете над одним и тем же, договоритесь с ним "
-                                                    f"через send_message (Recipient: {writer})." if writer else ""))
+    if lost:
+        action = ("Перезапись файла целиком отменила бы эти изменения с диска: "
+                  + "; ".join(f"«{ln.strip()[:60]}»" for ln in lost[:3]) + (" …" if len(lost) > 3 else "")
+                  + ". Включите их в новый текст (тогда запись пройдёт) или перечитайте файл (read_file) и сделайте "
+                    "правку поверх его текущей версии.")
+    elif refreshed:
+        action = ("Ваш Target по-прежнему есть в файле слово в слово, поэтому эта правка не заденет чужие изменения: "
+                  "посмотрите их ниже и повторите правку как есть (или перечитайте файл через read_file).")
+    else:
+        action = "Чтобы не затереть чужую работу, перечитайте файл (read_file) и сделайте правку поверх его текущей версии."
+    msg = (f"🛡️ Antigravity Plus: {head}. {action}"
+           + (f" Если вы работаете над одним и тем же, договоритесь с ним через send_message (Recipient: {writer})." if writer else ""))
+    if diff_text:
+        intro = DIFF_INTRO.get(diff_kind, "")
+        msg += f"\n{intro}\n{diff_text}" if intro else f"\n{diff_text}"
+    elif diff_kind == "none":
+        msg += "\n(Изменения показать нельзя: файл слишком большой, двоичный или не читается — только read_file.)"
+    return msg
 
 
 def others(payload: dict) -> List[dict]:

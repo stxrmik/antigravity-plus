@@ -105,7 +105,7 @@ class Conv:
         self.add("USER_INPUT", f"<USER_REQUEST>{text}</USER_REQUEST>")
         self.add("PLANNER_RESPONSE", "…")
 
-    def pre(self, model="Gemini 4 Carbon (High)", env=None):
+    def pre_steps(self, model="Gemini 4 Carbon (High)", env=None):
         p = {"conversationId": self.cid, "transcriptPath": self.tp, "artifactDirectoryPath": art, "workspacePaths": [WS]}
         if model:
             p["modelName"] = model
@@ -114,8 +114,12 @@ class Conv:
                              capture_output=True, text=True, encoding="utf-8", errors="replace",
                              env=dict(ENV, **(env or {})))
         self.took = time.time() - started
-        msgs = [st["ephemeralMessage"] for st in json.loads(out.stdout or "{}").get("injectSteps", [])]
         self.err = out.stderr.strip()
+        return json.loads(out.stdout or "{}").get("injectSteps", [])
+
+    def pre(self, model="Gemini 4 Carbon (High)", env=None):
+        msgs = [(st.get("systemMessage") or {}).get("systemMessage") or st.get("ephemeralMessage") or ""
+                for st in self.pre_steps(model=model, env=env)]
         return "\n".join(m for m in msgs if "<quota" in m)
 
     def state(self):
@@ -276,5 +280,61 @@ r = subprocess.run([sys.executable, os.path.join(HOOKS, "quota.py")], capture_ou
                    errors="replace", env=ENV)
 check("quota.py prints each group's status", r.returncode == 0 and "Gemini Models: tight" in r.stdout
       and "Claude and GPT models:" in r.stdout, r.stdout + r.stderr)
+
+# 10. UI user_markdown badges + zero-token <= 5% critical banner + quota.message backward compatibility
+PLAN["gemini"] = [0.12, 3 * 86400, 0.7]
+drop_cache()
+ui_c = Conv("ui-crit")
+steps_15 = ui_c.pre_steps()
+q_step = next((s["systemMessage"] for s in steps_15 if "<quota" in (s.get("systemMessage") or {}).get("systemMessage", "")), {})
+md_15 = (q_step.get("metadata") or {}).get("user_markdown", "")
+check("15% tight → user_markdown shows group, %, reset time and sidecar link",
+      all(w in md_15 for w in ("Gemini Models", "12%", "сброс", "[Расход токенов](sidecar://antigravity-plus/usage/)")), md_15)
+
+PLAN["gemini"] = [0.04, 3 * 86400, 0.7]
+drop_cache()
+ui_c.say("Продолжай до 4%")
+steps_05 = ui_c.pre_steps()
+zero_steps = [s["systemMessage"] for s in steps_05 if (s.get("systemMessage") or {}).get("systemMessage") == ""
+              and (s.get("systemMessage") or {}).get("metadata", {}).get("user_markdown")]
+check("<= 5% after 15% hint → zero-token UI-only banner once",
+      len(zero_steps) == 1 and "4.0%" in zero_steps[0]["metadata"]["user_markdown"]
+      and "sidecar://antigravity-plus/usage/" in zero_steps[0]["metadata"]["user_markdown"]
+      and bool(ui_c.state().get("quota_ui_crit")), steps_05)
+
+PLAN["gemini"] = [0.02, 3 * 86400, 0.7]
+drop_cache()
+ui_c.say("А на 2%?")
+steps_02 = ui_c.pre_steps()
+check("…still <= 5% same window → silent (no repeat UI banner)",
+      not any("Квота" in ((s.get("systemMessage") or {}).get("metadata") or {}).get("user_markdown", "") for s in steps_02), steps_02)
+
+# uiNotices: false disables metadata.user_markdown & zero-token banner
+settings_path = os.path.expanduser("~/.gemini/antigravity-plus/settings.json")
+with open(settings_path, "w", encoding="utf-8") as fh:
+    json.dump({"uiNotices": False}, fh)
+PLAN["gemini"] = [0.12, 3 * 86400, 0.7]
+drop_cache()
+off_c = Conv("ui-off")
+steps_off = off_c.pre_steps()
+check("uiNotices=false → model <quota> sent without metadata.user_markdown",
+      any("<quota" in (s.get("systemMessage") or {}).get("systemMessage", "") for s in steps_off)
+      and not any("metadata" in (s.get("systemMessage") or {}) for s in steps_off), steps_off)
+PLAN["gemini"] = [0.04, 3 * 86400, 0.7]
+drop_cache()
+off_c.say("До 4%")
+check("uiNotices=false → no <= 5% zero-token banner",
+      not any("Квота" in ((s.get("systemMessage") or {}).get("metadata") or {}).get("user_markdown", "") for s in off_c.pre_steps()), "")
+with open(settings_path, "w", encoding="utf-8") as fh:
+    json.dump({"uiNotices": True}, fh)
+
+# backward-compatible quota.message() still returns Optional[str]
+compat_st = {"users": [{"text": "hi", "step": 0, "ts": iso(0)}]}
+old_env = os.environ.copy()
+os.environ.update(ENV)
+drop_cache()
+compat_msg = quota.message({"conversationId": "compat-q", "modelName": "Gemini 4 Carbon (High)"}, compat_st)
+os.environ.clear(); os.environ.update(old_env)
+check("quota.message() stays backward-compatible returning str", isinstance(compat_msg, str) and "<quota" in compat_msg, compat_msg)
 
 sys.exit(0 if ok else 1)

@@ -348,6 +348,11 @@ def _is_historical_plugin_step(d: dict) -> bool:
     if typ == "SYSTEM_MESSAGE":
         if "Stop hook blocked termination:" in content or "<antigravity_plus_session_context>" in content:
             return True
+        body = re.sub(r"</?SYSTEM_MESSAGE>", "", content).strip()
+        if 'source="Antigravity Plus"' in body or BYPASS_NOTE_RE.search(body):
+            return True
+        if not body and isinstance(d.get("metadata"), dict) and "user_markdown" in d["metadata"]:
+            return True
     return False
 
 
@@ -608,8 +613,9 @@ def _replay_one(task: Tuple[str, Optional[str], List[str]]) -> dict:
         if isinstance(injects, list) and injects:
             stats["hooks"]["session_start"]["fired"] += 1
             for item in injects:
-                if isinstance(item, dict) and isinstance(item.get("systemMessage"), dict):
-                    msg = str(item["systemMessage"].get("systemMessage") or "")
+                raw_sm = item.get("systemMessage") if isinstance(item, dict) else None
+                if isinstance(raw_sm, dict):
+                    msg = str(raw_sm.get("systemMessage") or "")
                     if msg:
                         add_spot({"session_start", "hook:session_start"}, step_idx, "hook:session_start", msg)
                         append_step(
@@ -620,6 +626,11 @@ def _replay_one(task: Tuple[str, Optional[str], List[str]]) -> dict:
                                 "content": f"<SYSTEM_MESSAGE>\n{msg}\n</SYSTEM_MESSAGE>",
                             }
                         )
+                    raw_meta = raw_sm.get("metadata")
+                    meta = raw_meta if isinstance(raw_meta, dict) else {}
+                    um = meta.get("user_markdown")
+                    if isinstance(um, str) and um.strip():
+                        add_spot({"ui_notice", "user_markdown"}, step_idx, "ui:session_start", um)
 
     for idx, st in enumerate(steps):
         typ = st.get("type") or ""
@@ -667,7 +678,11 @@ def _replay_one(task: Tuple[str, Optional[str], List[str]]) -> dict:
             if isinstance(injects, list) and injects:
                 stats["hooks"]["instructions"]["fired"] += 1
                 for item in injects:
-                    msg = item.get("ephemeralMessage") if isinstance(item, dict) else None
+                    if not isinstance(item, dict):
+                        continue
+                    raw_sm = item.get("systemMessage")
+                    sm = raw_sm if isinstance(raw_sm, dict) else {}
+                    msg = sm.get("systemMessage") if sm else item.get("ephemeralMessage")
                     if isinstance(msg, str) and msg.strip():
                         for tag in _extract_hint_tags(msg):
                             stats["hints"][tag] = stats["hints"].get(tag, 0) + 1
@@ -677,6 +692,11 @@ def _replay_one(task: Tuple[str, Optional[str], List[str]]) -> dict:
                                 f"hint:{tag}",
                                 msg,
                             )
+                    raw_meta = sm.get("metadata")
+                    meta = raw_meta if isinstance(raw_meta, dict) else {}
+                    um = meta.get("user_markdown")
+                    if isinstance(um, str) and um.strip():
+                        add_spot({"ui_notice", "user_markdown"}, step_idx, "ui:instructions", um)
 
             append_step(st)
             raw_calls = st.get("tool_calls")

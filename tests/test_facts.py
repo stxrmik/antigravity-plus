@@ -93,7 +93,8 @@ def pre():
     p = {"conversationId": cid, "transcriptPath": tp, "artifactDirectoryPath": art, "workspacePaths": [WS]}
     out = subprocess.run([sys.executable, os.path.join(HOOKS, "instructions.py")], input=json.dumps(p),
                          capture_output=True, text=True, encoding="utf-8")
-    msgs = [s["ephemeralMessage"] for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
+    msgs = [(s.get("systemMessage") or {}).get("systemMessage") or s.get("ephemeralMessage") or ""
+            for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
     return "\n".join(m for m in msgs if "<grounding" in m)
 
 
@@ -181,6 +182,56 @@ config("auto-verify", "off")
 start("hedged")
 answer("Чтобы тесты прошли, нужно поправить фикстуру. Запустите тесты: они должны пройти. test-writer сообщил, что тесты проходят.")
 check("conditions, suggestions and someone else's report aren't claims", not stop()[0])
+
+# ── /perf performance claims ──
+for cname, claim_txt in [
+    ("ru-times", "Ускорил сортировку в 3 раза."),
+    ("ru-faster", "Стало быстрее на 40%."),
+    ("ru-mem", "Снизил потребление памяти на 25%."),
+    ("en-times", "Sorting is now 2.5x faster."),
+    ("en-pct", "Reduced latency by 35%."),
+]:
+    start(f"perf-unbacked-{cname}")
+    edit(os.path.join(WS, "app", "sort.py"))
+    answer(claim_txt)
+    reason = stop()[0]
+    check(f"unbacked perf claim caught ({cname})", "benchmark measurement" in reason, reason)
+
+for bname, bench_cmd, claim_txt in [
+    ("perf-py", "python3 perf.py --runs 10", "Ускорил сортировку в 3 раза."),
+    ("hyperfine", "hyperfine 'python3 app/sort.py'", "Sorting is now 2x faster."),
+    ("timeit", "python3 -m timeit -s 'from app import sort'", "Снизил задержку на 25% — стало быстрее на 25%."),
+]:
+    start(f"perf-backed-{bname}")
+    edit(os.path.join(WS, "app", "sort.py"))
+    cmd(bench_cmd, output="mean: 12.4 ms")
+    answer(claim_txt)
+    check(f"perf claim backed by {bname} allowed", not stop()[0])
+
+for vname, verdict, caught in [
+    ("inconclusive", "inconclusive (only 5 runs per side: a verdict needs at least 10)", True),
+    ("regression", "clear regression", True),
+    ("improvement", "clear improvement", False),
+]:
+    start(f"perf-verdict-{vname}")
+    edit(os.path.join(WS, "app", "sort.py"))
+    cmd("python3 skills/perf/scripts/perf.py compare --base-cmd 'python3 a.py' --new-cmd 'python3 b.py'",
+        output=f"Speedup: 1.40x faster\nIQR overlap: no -> Verdict: {verdict}")
+    answer("Ускорил сортировку в 1.4 раза.")
+    reason = stop()[0]
+    check(f"perf.py verdict «{vname}» {'refutes' if caught else 'backs'} a speed-up claim",
+          ("clear improvement" in reason) == caught, reason)
+
+start("perf-stale")
+cmd("hyperfine 'python3 app/sort.py'", output="mean: 10 ms")
+edit(os.path.join(WS, "app", "sort.py"))
+answer("Ускорил сортировку в 2 раза.")
+check("benchmark before last edit doesn't count", "after your last change" in stop()[0])
+
+start("perf-hedged")
+edit(os.path.join(WS, "app", "sort.py"))
+answer("Это должно ускорить сортировку в 2 раза; should be 2x faster; по отчёту researcher стало быстрее на 30%.")
+check("hedged / attributed perf claim allowed", not stop()[0])
 
 # ── references ──
 start("refs")

@@ -21,14 +21,15 @@ worth remembering (hooks/memory_hints.py), asks for facts it has to look up and 
 a straight answer — an objection, a guess at a cause, a request for an opinion (hooks/objective.py).
 
 Contract: JSON on stdin (conversationId, transcriptPath, lastUserInput, invocationNum, …) →
-{"injectSteps": [{"ephemeralMessage": "…"}]} or {}. Never fails loudly. Stdlib only, Python 3.8+.
+{"injectSteps": [{"systemMessage": {"systemMessage": "…"}}]} (optionally with
+"metadata": {"user_markdown": "…"}) or {}. Never fails loudly. Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
 
 import json
 import re
 import sys
-from typing import List, Optional
+from typing import Any, List, Optional, Tuple, Union
 
 import conversation as conv
 
@@ -63,9 +64,24 @@ BYPASS_ON = ("The user turned Bypass Mode ON (message {n}). From now on, in ever
 BYPASS_OFF = ("The user turned Bypass Mode OFF (message {n}): permission prompts are back as before, in every "
               "conversation. Confirm in one line, in the user's language.")
 BYPASS_ELSEWHERE = ("Bypass Mode was turned {state} in another conversation: {what}")
+BYPASS_UI_ON = ("🛡️ **Antigravity Plus · Bypass Mode включён** — запросы разрешений отключены во всех разговорах "
+                "(кроме системных действий и ваших запретов). Выключить: `/bypass off`")
+BYPASS_UI_OFF = "🔒 **Antigravity Plus · Bypass Mode выключен** — стандартные запросы разрешений возвращены."
 
 
-def bypass_work(payload: dict) -> Optional[str]:
+def make_step(model_text: str = "", user_md: str = "") -> dict:
+    """Build an Antigravity 2.32 injectSteps entry (systemMessage + optional UI-only metadata.user_markdown)."""
+    body: dict = {"systemMessage": model_text}
+    if user_md:
+        body["metadata"] = {"user_markdown": user_md}
+    return {"systemMessage": body}
+
+
+def ui_notices_enabled() -> bool:
+    return conv.ui_notices_enabled()
+
+
+def bypass_work(payload: dict) -> Optional[Union[str, Tuple[str, str]]]:
     """Bypass Mode (hooks/conversation.py): apply a switch the user just typed here, and tell the agent once when it
     changed — here or in another conversation. Subagents and Claude Code's delegated agents are never told."""
     st = conv.load(payload)
@@ -75,11 +91,12 @@ def bypass_work(payload: dict) -> Optional[str]:
     before = int(st.get("bypass_applied") or 0)
     now = "on" if conv.bypass_mode(payload, st, users) else "off"
     msg = None
+    user_md = ""
     if int(st.get("bypass_applied") or 0) > before:
         ev = next(e for e in reversed(conv.bypass_events(users)) if e["n"] == st["bypass_applied"])
-        msg = (BYPASS_ON if ev["on"] else BYPASS_OFF).format(n=ev["n"])
-        if (now == "on") != ev["on"]:  # a later switch from another conversation won
-            msg = None
+        if (now == "on") == ev["on"]:  # unless a later switch from another conversation won
+            msg = (BYPASS_ON if ev["on"] else BYPASS_OFF).format(n=ev["n"])
+            user_md = BYPASS_UI_ON if ev["on"] else BYPASS_UI_OFF
     if msg is None and st.get("bypass_seen") not in (None, now):
         msg = BYPASS_ELSEWHERE.format(state=now.upper(), what=(
             "Antigravity Plus approves your commands and edits itself and asks the user only before system-level "
@@ -87,6 +104,8 @@ def bypass_work(payload: dict) -> Optional[str]:
     if st.get("bypass_seen") != now:
         st["bypass_seen"] = now
         conv.store(payload["conversationId"], st)
+    if msg and user_md:
+        return msg, user_md
     return msg
 
 
@@ -208,6 +227,22 @@ def parallel_work(payload: dict) -> Optional[str]:
     return msg
 
 
+def orchestrator_work(payload: dict) -> Optional[Union[str, Tuple[str, str]]]:
+    """Orchestrator planner/executor handoff hints (hooks/orchestrator.py, when available)."""
+    try:
+        import orchestrator  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    st = conv.load(payload)
+    before = json.dumps(st, sort_keys=True, ensure_ascii=False) if st is not None else None
+    fn = getattr(orchestrator, "handoff_message", None)
+    msg: Any = fn(payload, st) if callable(fn) else None
+    if st is not None and isinstance(payload.get("conversationId"), str):
+        if json.dumps(st, sort_keys=True, ensure_ascii=False) != before:
+            conv.store(payload["conversationId"], st)
+    return msg
+
+
 def speed_work(payload: dict) -> Optional[str]:
     """Sandbox memory, the context budget and loops of failing commands (subagents included)."""
     import speed
@@ -218,11 +253,11 @@ def speed_work(payload: dict) -> Optional[str]:
     return msg
 
 
-def quota_work(payload: dict) -> Optional[str]:
+def quota_work(payload: dict) -> Optional[Tuple[str, str]]:
     """The plan's limits of the conversation's model when they get short (main agent only; hooks/quota.py)."""
     import quota
     st = conv.load(payload)
-    msg = quota.message(payload, st)
+    msg = quota.message_with_ui(payload, st)
     if st is not None and isinstance(payload.get("conversationId"), str):
         conv.store(payload["conversationId"], st)
     return msg
@@ -294,15 +329,24 @@ def main() -> None:
         payload = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         payload = None
-    for part in (bypass_work, decide, edit_checks, other_agents, parallel_work, speed_work, quota_work, lsp_work,
-                 memory_work, facts_work, objective_work) if isinstance(payload, dict) else ():
-        try:
-            msg = part(payload)
-        except Exception as e:  # a hook must never break the conversation
-            print(f"instructions: {part.__name__}: {e}", file=sys.stderr)
-            msg = None
-        if msg:
-            steps.append({"ephemeralMessage": msg})
+    show_ui = ui_notices_enabled()
+    if isinstance(payload, dict):
+        for part in (bypass_work, decide, edit_checks, other_agents, parallel_work, orchestrator_work, speed_work,
+                     quota_work, lsp_work, memory_work, facts_work, objective_work):
+            try:
+                res = part(payload)
+            except Exception as e:  # a hook must never break the conversation
+                print(f"instructions: {part.__name__}: {e}", file=sys.stderr)
+                res = None
+            if isinstance(res, tuple):
+                model_text = str(res[0] or "")
+                user_md = str(res[1] or "") if show_ui else ""
+            elif isinstance(res, str):
+                model_text, user_md = res, ""
+            else:
+                model_text, user_md = "", ""
+            if model_text or user_md:
+                steps.append(make_step(model_text, user_md))
     sys.stdout.write(json.dumps({"injectSteps": steps} if steps else {}, ensure_ascii=False))
 
 

@@ -21,9 +21,9 @@ holds `hooks.json`.
 |---|---|---|
 | `PreToolUse` (with `matcher`: tool name regex, e.g. `run_command`, `write_file\|edit_file`) | before a tool runs; payload has `toolCall {name, args}` (`args.Path`, `args.CommandLine`) | `{"decision": "allow"}` = no objection; `"deny"` + `"reason"` blocks (the agent sees the reason); `"ask"` / `"force_ask"` asks the user |
 | `PostToolUse` (with `matcher`) | after a tool ran; payload adds `error` | `{}` |
-| `PreInvocation` | before every model call | `{"injectSteps": [{"ephemeralMessage": "…"}]}` or `{}` |
+| `PreInvocation` | before every model call | `{"injectSteps": [{"systemMessage": {"systemMessage": "…"}}]}` (or with `"metadata": {"user_markdown": "…"}`; empty `"systemMessage": ""` shows a UI-only banner at 0 model tokens) or `{}` |
 | `Stop` | the agent ends its turn; payload has `terminationReason` (`NO_TOOL_CALL` = normal), `fullyIdle`, `executionNum` | `{"decision": "continue", "reason": "…"}` sends it back to work; `{}` lets it stop |
-| `SessionStart` | a conversation starts | `{"injectSteps": [{"systemMessage": {"systemMessage": "…"}}]}` |
+| `SessionStart` | a conversation starts | `{"injectSteps": [{"systemMessage": {"systemMessage": "…"}}]}` (also supports `"metadata": {"user_markdown": "…"}`) |
 
 Every payload also has `conversationId`, `workspacePaths`, `transcriptPath`, `lastUserInput`.
 **Pitfall:** for `PreToolUse`, an empty `{}` means **deny**. A hook that should only watch must print
@@ -61,5 +61,6 @@ Every payload also has `conversationId`, `workspacePaths`, `transcriptPath`, `la
   `/tmp` keyed by `conversationId` and give up after 2, so the agent can't loop forever.
 - **Protect files** (PreToolUse on `write_file|edit_file`): for paths matching `migrations/` or `*.lock`, print
   `{"decision": "deny", "reason": "<why and what to do instead>"}`; otherwise `{"decision": "allow"}`.
-- **A reminder before each step** (PreInvocation): print an `ephemeralMessage`. Keep it short: it costs tokens on
-  every call.
+- **A reminder before each step** (PreInvocation): print `{"injectSteps": [{"systemMessage": {"systemMessage": "…"}}]}`
+  (replaces deprecated `ephemeralMessage`). Keep `systemMessage` short because the model reads it on every call; to
+  show a user-only UI badge at 0 model tokens, set `"systemMessage": ""` and `"metadata": {"user_markdown": "…"}`.

@@ -77,7 +77,8 @@ def pre():
          "workspacePaths": [SP]}
     out = subprocess.run([sys.executable, os.path.join(HOOKS, "instructions.py")], input=json.dumps(p),
                          capture_output=True, text=True, encoding="utf-8")
-    msgs = [s["ephemeralMessage"] for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
+    msgs = [(s.get("systemMessage") or {}).get("systemMessage") or s.get("ephemeralMessage") or ""
+            for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
     return "\n".join(m for m in msgs if "background_work" in m or "parallel_" in m), out.stderr.strip()
 
 
@@ -230,7 +231,28 @@ check("«жду вашего ответа» → quiet", stop(), empty=True)
 start("stop4")
 open(task, "w").write(OPEN)
 add("PLANNER_RESPONSE", content="Сборка идёт.")
-check("fullyIdle false, nothing tracked → background tasks", stop({"fullyIdle": False}), ["background tasks you started"])
+check("fullyIdle false, nothing tracked → quiet", stop({"fullyIdle": False}), empty=True)
+
+start("stop4b")
+invoke(("researcher", "INCY format", "sub-hhhh-0006"))
+open(task, "w").write(OPEN)
+add("PLANNER_RESPONSE", content="Жду ответа researcher.")
+check("background running, first stop → continue", stop({"fullyIdle": False}), ["Добавить карточку"])
+open(task, "w").write(OPEN.replace("Добавить карточку", "Сделать карточку"))
+add("PLANNER_RESPONSE", content="Продолжаю ждать.")
+check("continuationActive=True same turn even with reworded task → quiet",
+      stop({"fullyIdle": False, "continuationActive": True}), empty=True)
+add("USER_INPUT", content="<USER_REQUEST>Что дальше?</USER_REQUEST>")
+open(task, "w").write(OPEN.replace("Добавить карточку", "Проверить карточку"))
+add("PLANNER_RESPONSE", content="Жду.")
+check("new user turn resets continuation block → continue once",
+      stop({"fullyIdle": False, "continuationActive": True}), ["Проверить карточку"])
+
+start("stop4c")
+invoke(("worker", "Build card", "sub-hhhh-0007"))
+open(task, "w").write("## INCY\n- [/] Карточка: worker\n- [ ] Тесты (в фоне)\n- [ ] Сборка — swarm\n- [ ] Бенч (background)\n- [x] План\n")
+add("PLANNER_RESPONSE", content="Жду фоновые задачи.")
+check("broadened DELEGATED patterns skip delegated items", stop({"fullyIdle": False}), empty=True)
 start("stop5")
 invoke(("code-reviewer", "Review", "sub-hhhh-0005"))
 for f in ("a.py", "b.py", "c.py"):
@@ -310,6 +332,9 @@ add("PLANNER_RESPONSE", calls=[("manage_subagents", {"Action": "kill", "Conversa
 check("ConversationIds (plural) stops sub-kill-0001, keeps sub-kill-0002", pre(), ["worker «Area 2»"], ["Area 1"])
 add("SYSTEM_MESSAGE", content='[Message] timestamp=2026-11-17T10:00:00Z sender=system content=The subagent Area 2 (worker) with id "sub-kill-0002" encountered an error and stopped: RESOURCE_EXHAUSTED')
 check("subagent error SYSTEM_MESSAGE clears it from background_work", pre(), empty=True)
+add("GENERIC", content="Command running as a background task with task id: bd98/task-esc-1\nTask Description: pytest -q")
+add("SYSTEM_MESSAGE", content='[Message] sender=system content=Task id "bd98/task-esc-1" finished with result:\n0 passed')
+check("background task notification with JSON-escaped quotes clears it cleanly", pre(), empty=True)
 
 # 15. parallel-hints off: no hints, and the Stop hook is silent while background tasks run (as before)
 subprocess.run([sys.executable, MEMORY, "config", "parallel-hints", "off"], capture_output=True)

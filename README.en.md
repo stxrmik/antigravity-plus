@@ -21,7 +21,7 @@ every edit checked · an agent that finishes the job
 
 ---
 
-One plugin: 30 commands, 7 subagents, 6 hooks, a bundled MCP server and working rules — plus a two-way bridge with
+One plugin: 36 commands, 7 subagents, 6 hooks, a 19-tool bundled MCP server and working rules — plus a two-way bridge with
 Claude Code (Claude Code ↔ Antigravity). One command installs it — whole, or the modules you pick at install time;
 on Antigravity's plugin page it is turned on and off as a whole. Python standard library only, no dependencies.
 
@@ -79,18 +79,18 @@ and the hook features of that module stay silent. The choice is saved, and updat
 
 | Module | What it gives | Context | Needs |
 |---|---|---|---|
-| Core | the guard, project context, instructions after compaction, rules, bundled MCP (`lsp_*`, `memory_search`, `git_state`, `quota`), `/init`, `/remember`, `/settings`, `/doctor`, `/hooks`, `/update` | ≈5,400 | required |
-| Quality | every edit checked, the agent doesn't stop halfway, `/review`, `/security-review`, `/simplify`, `/deps`, 4 subagents | ≈950 | — |
-| Facts and honest answers | the report is held to what happened; an objection means checking | ≈1,500 | — |
+| Core | the guard (`overwrite` auto-fixes, AST SSH checks), project context, instructions after compaction & Orchestrator handoffs, zero-token `user_markdown` banners, rules, bundled MCP (19 tools: `lsp_*`, `ci_*`, `deps_audit`, `ui_check`, `mobile_*`, `memory_search`, `git_state`, `quota`), `/init`, `/remember`, `/settings`, `/doctor`, `/hooks`, `/update` | ≈5,400 | required |
+| Quality | every edit checked, the agent doesn't stop halfway, Orchestrator plan checks, `/review`, `/security-review`, `/simplify`, `/deps`, `/diff-cover`, `/perf`, 4 subagents | ≈1,050 | — |
+| Facts and honest answers | the report is held to what happened (`perf` claims included); an objection means checking | ≈1,500 | — |
 | Memory | auto-memory (shared with Claude Code), `/memory`, `/handoff`, recent conversations | ≈1,500 | — |
 | Parallel work | subagents `explorer`, `researcher`, `worker`, native Swarm, `/parallel` | ≈1,350 | — |
-| Speed, context and quota | the sandbox, context budget, loops of errors, plan-limit hints | hints only | — |
-| Git and GitHub | `/git`, `/commit`, `/pr`, `/fix-issue`, `/ci`, `/release`, `/git-init` | ≈1,400 | git; gh for GitHub |
+| Speed, context and quota | the sandbox (auto-`BypassSandbox` via `overwrite`), context budget, loops of errors, plan-limit hints | hints only | — |
+| Git and GitHub | `/git`, `/commit`, `/pr`, `/pr-comments`, `/fix-issue`, `/ci`, `/release`, `/git-init` | ≈1,500 | git; gh for GitHub |
 | Code navigation (LSP) | `/lsp`: definitions, every use, callers, types, type errors after an edit | ≈600 | a language server: pyright, sourcekit-lsp, kotlin-lsp… |
-| Deploy | `/deploy` | ≈200 | — |
+| Deploy, DB and env | `/deploy`, `/db` (safe schema/`EXPLAIN` & migration checks), `/env` (`.env` parity & 2 s Docker probe) | ≈350 | — |
 | Web UI checks | `/ui-check` | ≈150 | Chrome, Chromium, Edge or Brave |
 | Mobile apps | `/mobile` | ≈250 | Xcode and/or the Android SDK |
-| Token usage and reports | `/usage`, the side panel, `/context`, `/insights`, `/standup`, `/export` | ≈450 | — |
+| Token usage, Control Center and reports | `/usage`, Control Center 2.0 sidecar, `/context`, `/insights`, `/standup`, `/export`, `/schedule-task` | ≈550 | — |
 | Claude Code ↔ Antigravity bridge | the `antigravity` skill for Claude Code and `/claude` in Antigravity | ≈50 | Claude Code |
 
 "Context" is roughly how many tokens the module adds to every request of the agent (command descriptions and
@@ -168,9 +168,10 @@ they install the saved choice.
   work before `kill`).
 
 ### 🔌 Bundled MCP server (`antigravity-plus_tools`)
-- The plugin runs its own stdio MCP server (`mcp/server.py`) with typed arguments so even lighter models never break
-  shell quoting on paths with spaces: `lsp_def`, `lsp_refs`, `lsp_calls`, `lsp_hover`, `lsp_symbols`, `lsp_find`,
-  `lsp_check`, `memory_search`, `git_state`, `quota`.
+- The plugin runs its own stdio MCP server (`mcp/server.py`) with **19 typed tools** so even lighter models never break
+  shell quoting on paths with spaces: `lsp_def`, `lsp_refs`, `lsp_calls`, `lsp_hover`, `lsp_impl`, `lsp_type`,
+  `lsp_symbols`, `lsp_find`, `lsp_check`, `lsp_rename` (preview by default), `ci_status`, `ci_failure_logs`,
+  `deps_audit`, `ui_check`, `mobile_ui`, `mobile_act`, `memory_search`, `git_state`, `quota`.
 - Calls run against the same underlying scripts (and warm LSP daemon) without shell-line composition.
 
 ### 🔀 Claude Code hands tasks to Antigravity
@@ -349,10 +350,12 @@ they install the saved choice.
   agent tells you once what's new. `/update` installs a release in one command (with a rollback); auto-update is
   opt-in.
 
-### 📊 Token usage
+### 📊 Control Center 2.0 and token usage
 - `/usage`: tokens, cache, context fill, API-equivalent cost, per-turn and per-subagent breakdown, HTML report.
-- A live side panel refreshes every 3 seconds: cost, Antigravity's 5-hour and weekly limits, context fill, the most
-  expensive calls, and all conversations for today and the last 7 days (its UI is in Russian for now).
+- **Control Center 2.0 side panel** (4 tabs, UI currently in Russian):
+  1. **Session** & **Summary**: cost, context fill, Orchestrator planner vs executor split, Antigravity's 5-hour and weekly limits, 7-day charts.
+  2. **Activity**: active workspace agents & edited files (`coord`), Claude Code ↔ Antigravity tasks, running LSP servers with RAM usage and a Stop button.
+  3. **Control**: update checks, read-only Bypass Mode badge (with copyable `/bypass` / `/bypass off`), safe coaching toggles, and recent `guard.log` entries.
 
 ## Commands
 
@@ -365,9 +368,14 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 | `/review` | review of the change by two subagents, findings double-checked | ✅ after substantial changes |
 | `/security-review` | audit of the branch with exploitability checks | ✅ when a change touches auth, secrets, payments |
 | `/deps` | vulnerability and outdated dependency audit (`pip-audit`, `npm`/`pnpm`/`yarn`/`bun`, `cargo`, `osv-scanner`…) | ✅ before `/deploy` or when touching manifests |
+| `/db` | safe DB schema, `EXPLAIN` inside `BEGIN READ ONLY` and migration lock/drop analysis (without printing `.env`) | ✅ before `/deploy` or when working with DBs |
+| `/env` | `.env` ↔ `.env.example` parity (no secrets printed), 2 s non-hanging Docker socket check, ports | ✅ diagnosing environment issues |
+| `/diff-cover` | test coverage of git-changed lines (`coverage.xml`, `lcov.info`, `coverage.out`, `.xcresult`) | ✅ after running tests |
+| `/perf` | statistical A/B & `git worktree` benchmarks for runtime, memory and gzip bundle size | ✅ when optimizing or verifying speed claims |
 | `/ui-check` | screenshots at phone and laptop width, console errors, heavy effects | ✅ after UI changes |
 | `/mobile` | the app in the iOS simulator or the Android emulator: launch, screenshots, taps, typing, logs | ✅ after changes to an app's screens |
 | `/git` | the repository's state in one command, branches and syncing, conflicts, history, safe undo, GitHub: issues, PRs, review threads, releases | ✅ for any git or GitHub work |
+| `/pr-comments` | unresolved PR review threads with diff hunks, reply and `resolveReviewThread` | `list` ✅, `reply`/`resolve` 🔑 |
 | `/ci` | GitHub Actions and GitLab CI: wait for runs in the background, check status, clean failure logs | ✅ after `git push` and `/pr`, before `/deploy` |
 | `/lsp` | where it is defined, every use, who calls it and what it calls, its type, a file's outline, type errors, rename — from the language server | ✅ before changing a signature, renaming or deleting, for any question about a symbol |
 | `/git-init` | a git repository with a safe first commit | ✅ before the first change in a project without git |
@@ -380,10 +388,11 @@ same: "commit this" is `/commit`, "check the code" is `/review`.
 | `/context` | what fills the current context window (categories, top-10 items, tips) | ✅ when context is large or on request |
 | `/insights` | hook and guard statistics, repeats and false-positive candidates | ✅ when tuning the plugin or on request |
 | `/doctor` | the plugin's self-check | ✅ when something misbehaves |
-| `/deploy` | what would ship and how risky it is; deploy with backup, health check and rollback | the check ✅, the deploy 🔑 |
+| `/deploy` | what would ship and how risky it is (including `/db` migration risks); deploy with backup, health check and rollback | the check ✅, the deploy 🔑 |
 | `/commit` | logical commits in the repo's style, without secrets or junk | 🔑 |
 | `/pr` | a PR with all the branch's commits and a description | 🔑 |
 | `/release` | release plan, version bump, changelog, local tag and GitHub release | 🔑 |
+| `/schedule-task` | quota-aware Antigravity cron automations (skip when quota drops below threshold); you enable them in the Automations dashboard | `list`/`gate` ✅, `create`/`remove` 🔑 |
 | `/claude` | hand a sub-task from Antigravity to `claude -p`, wait, take the diff and report | 🔑 |
 | `/fix-issue` | issue → branch → reproduce → fix with a test → commit → PR | 🔑 |
 | `/simplify` | reuse and simplification in the changed code | 🔑 |
@@ -770,6 +779,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 | Reminder to track CI after push | "don't remind me about CI" | `auto-ci` |
 | Git checks: commands that would hang, a rebase or merge left half done | "don't check git commands" | `git-checks` |
 | Type errors from the language server after an edit, the `/lsp` hint | "don't check types after edits" | `lsp-checks` |
+| Inline UI banners (`user_markdown`: Bypass, quota, updates) | "turn UI banners off" | `ui-notices` |
 
 ## Platforms and compatibility
 
@@ -806,20 +816,21 @@ same JSON Antigravity sends. CI runs them on macOS, Linux and Windows.
 ```
 antigravity-plus/
 ├── plugin.json, hooks.json, mcp_config.json, assets/logo.svg
-├── mcp/server.py                   # stdio MCP server (lsp_*, memory_search, git_state, quota)
+├── mcp/server.py                   # stdio MCP server (19 tools: lsp_*, ci_*, deps_audit, ui_check, mobile_*, …)
 ├── hooks/       session_start  instructions  guard  check_edit  memory_sync  stop
 │                conversation (the user's messages, full access)  checks (edit checks, secrets)
-│                coord (several agents)  parallel (background work, Swarm)  speed (sandbox, context, error loops)
-│                quota (plan-limit hints)  gitcheck (hanging git/gh commands, unfinished rebases, conflict markers)
-│                facts (facts in reports)  objective (objective answers)  memory_hints (auto-memory)
+│                coord (several agents, diff)  parallel (background work, Swarm)  speed (sandbox, context, error loops)
+│                quota (plan-limit hints)  gitcheck (git auto-fix via overwrite, unfinished rebases, conflict markers)
+│                orchestrator (exit_plan_mode & Orchestrator phase checks)
+│                facts (facts and perf claims in reports)  objective (objective answers)  memory_hints (auto-memory)
 │                compat (macOS / Linux / Windows)
 ├── rules/AGENTS.md                 # always-on working rules (core)
 ├── rules/MEMORY.md, PARALLEL.md, GIT.md, LSP.md  # rules of the memory, parallel-work, git and code-navigation modules
 ├── rules/FACTS.md                  # facts and sources: don't invent, check, cite
 ├── rules/OBJECTIVE.md              # objective answers: check before you agree
 ├── agents/      explorer  researcher  worker  code-reviewer  security-auditor  debugger  test-writer
-├── sidecars/usage/                 # the usage side panel
-└── skills/      30 commands: init remember memory handoff parallel review deps release context insights claude …
+├── sidecars/usage/                 # Control Center 2.0 side panel (usage + status.py)
+└── skills/      36 commands: db env diff-cover perf pr-comments schedule-task deps release context insights claude …
 claude-code/skills/antigravity/     # Claude Code's skill: SKILL.md + scripts/delegate.py (tasks → Antigravity)
 install.py, install.sh, install.cmd # installer for every OS
 modules.py                          # the modules: what each holds, detailed descriptions, what is off without it

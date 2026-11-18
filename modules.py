@@ -24,27 +24,33 @@ MODULES: List[Dict] = [
         "details": {
             "ru": "Guard останавливает необратимое и опасное (rm -rf, git reset --hard, force-push, sudo, curl | sh, "
                   "DROP TABLE…), не выводит секреты в разговор (cat .env) и не даёт агенту менять собственные "
-                  "разрешения. Bypass Mode: один раз «/bypass» в чате — и агенты во всех разговорах работают без "
+                  "разрешения; при запрете на пуш различает read-only SSH-проверки на Python (AST-разбор). "
+                  "Bypass Mode: один раз «/bypass» в чате — и агенты во всех разговорах работают без "
                   "запросов разрешения, пока вы не напишете «/bypass off»; спрашивают только о системном (sudo, "
                   "системные папки, диски, автозапуск, ключи, права агента). В начале разговора агент получает снимок git и правила проекта — AGENTS.md, а также "
                   "CLAUDE.md с @импортами и .claude/rules, — а ваши указания («ничего не пушь») снова видит после "
-                  "каждого сжатия контекста, так что они не тонут в длинных разговорах. Правила работы: понять запрос, "
-                  "спланировать, сделать, проверить; несколько агентов в одном проекте не затирают правки друг друга. "
-                  "Встроенный MCP-сервер (`antigravity-plus_tools`) отдаёт инструменты со строгими аргументами: "
-                  "`lsp_*`, `memory_search`, `git_state`, `quota`. "
+                  "каждого сжатия контекста и при передаче плана в Orchestrator. Правила работы: понять запрос, "
+                  "спланировать, сделать, проверить; несколько агентов в одном проекте не затирают правки друг друга "
+                  "(при конфликте версий агент сразу получает компактный diff). Уведомления о Bypass, лимитах и "
+                  "обновлениях выводятся плашками в UI без лишнего расхода токенов (`user_markdown`). "
+                  "Встроенный MCP-сервер (`antigravity-plus_tools`) отдаёт 19 типизированных инструментов (`lsp_*`, "
+                  "`ci_*`, `deps_audit`, `ui_check`, `mobile_*`, `memory_search`, `git_state`, `quota`). "
                   "Команды: /init (правила проекта в AGENTS.md), /remember, /settings, /doctor, /hooks, /update (новая версия "
                   "одной командой: раз в сутки агент сам скажет, что она вышла; откат одной командой). "
                   "Обязательна: остальные модули работают поверх неё.",
             "en": "The guard stops what is irreversible or dangerous (rm -rf, git reset --hard, force-push, sudo, "
-                  "curl | sh, DROP TABLE…), keeps secrets out of the conversation (cat .env) and never lets the agent "
-                  "change its own permissions. Bypass Mode: type «/bypass» once and agents in every conversation work "
+                  "curl | sh, DROP TABLE…), keeps secrets out of the conversation (cat .env), never lets the agent "
+                  "change its own permissions, and uses AST inspection to tell read-only SSH Python probes apart under a push ban. "
+                  "Bypass Mode: type «/bypass» once and agents in every conversation work "
                   "without permission prompts until «/bypass off»; only system-level actions still ask (sudo, system "
                   "folders, disks, autostart, keys, the agent's permissions). At the start of a conversation the agent gets a git snapshot and the "
                   "project's rules — AGENTS.md, plus CLAUDE.md with its @imports and .claude/rules — and sees your "
-                  "instructions («don't push anything») again after every context compaction, so they don't get lost "
-                  "in long conversations. Working rules: understand the request, plan, do, verify; several agents on "
-                  "one project don't overwrite each other's edits. A bundled MCP server (`antigravity-plus_tools`) "
-                  "exposes typed tools (`lsp_*`, `memory_search`, `git_state`, `quota`). Commands: /init (project rules in AGENTS.md), "
+                  "instructions («don't push anything») again after context compaction and Orchestrator plan handoffs. "
+                  "Working rules: understand the request, plan, do, verify; several agents on "
+                  "one project don't overwrite each other's edits (returning compact diffs on stale-write conflicts). "
+                  "Status banners for Bypass, limits, and updates render inline via `user_markdown` with zero extra model tokens. "
+                  "A bundled MCP server (`antigravity-plus_tools`) exposes 19 typed tools (`lsp_*`, `ci_*`, `deps_audit`, "
+                  "`ui_check`, `mobile_*`, `memory_search`, `git_state`, `quota`). Commands: /init (project rules in AGENTS.md), "
                   "/remember, /settings, /doctor, /hooks, /update (a new release in one command: once a day the agent tells you "
                   "one is out; rolls back in one command). Required: every other module builds on it.",
         },
@@ -60,19 +66,23 @@ MODULES: List[Dict] = [
             "ru": "Каждая правка проверяется сразу: синтаксис Python, JS/TS, Swift, shell, JSON, YAML, plist и линтеры "
                   "проекта (ruff, eslint, swiftlint, shellcheck) — ошибка доходит до агента следующим шагом, а не через "
                   "три. Агент не закончит ход, пока в task.md остались пункты, изменённый код не проверен тестами или "
-                  "сборкой, а после крупной правки сам запускает ревью. Команды: /review (два ревьюера с "
-                  "перепроверкой находок), /security-review (аудит с проверкой эксплуатируемости), /simplify, /deps "
-                  "(аудит уязвимостей и устаревших зависимостей); субагенты code-reviewer, security-auditor, debugger, "
+                  "сборкой, проверяет планы Orchestrator (`exit_plan_mode`) на наличие шага верификации, а после крупной "
+                  "правки сам запускает ревью. Команды: /review (два ревьюера с перепроверкой находок), "
+                  "/security-review (аудит с проверкой эксплуатируемости), /simplify, /deps (аудит уязвимостей и "
+                  "устаревших зависимостей), /diff-cover (покрытие тестами именно изменённых строк), /perf (честные "
+                  "A/B-замеры скорости и размера бандла); субагенты code-reviewer, security-auditor, debugger, "
                   "test-writer. Без модуля правки не проверяются, и агент может остановиться на полпути.",
             "en": "Every edit is checked at once: Python, JS/TS, Swift, shell, JSON, YAML and plist syntax plus the "
                   "project's linters (ruff, eslint, swiftlint, shellcheck) — an error reaches the agent at the next "
                   "step, not three steps later. The agent can't end its turn while task.md has open items or changed "
-                  "code hasn't been run through tests or a build, and it reviews big changes on its own. Commands: "
-                  "/review (two reviewers, findings re-checked), /security-review (an audit that checks "
-                  "exploitability), /simplify, /deps (vulnerability and outdated dependency audit); subagents "
-                  "code-reviewer, security-auditor, debugger, test-writer. Without it edits aren't checked and the agent may stop halfway.",
+                  "code hasn't been run through tests or a build, Orchestrator plans (`exit_plan_mode`) are checked for "
+                  "verification steps, and it reviews big changes on its own. Commands: /review (two reviewers, "
+                  "findings re-checked), /security-review (an audit that checks exploitability), /simplify, /deps "
+                  "(vulnerability and outdated dependency audit), /diff-cover (test coverage of git-changed lines), "
+                  "/perf (statistical A/B and worktree benchmarks); subagents code-reviewer, security-auditor, "
+                  "debugger, test-writer. Without it edits aren't checked and the agent may stop halfway.",
         },
-        "skills": ["review", "security-review", "simplify", "deps"],
+        "skills": ["review", "security-review", "simplify", "deps", "diff-cover", "perf"],
         "agents": ["code-reviewer", "security-auditor", "debugger", "test-writer"],
         "off": {"checkEdits": False, "finishTasks": False, "autoReview": False, "autoVerify": False},
     },
@@ -83,13 +93,13 @@ MODULES: List[Dict] = [
                     "en": "the report is held to what happened; an objection means checking, not agreeing"},
         "details": {
             "ru": "Финальный отчёт агента сверяется с разговором: «тесты проходят», «N passed», «CI зелёный», "
-                  "«задеплоил», пути, номера строк, ссылки, версии и цены должны чем-то подтверждаться — иначе агент "
+                  "«задеплоил», «ускорил в N раз», пути, номера строк, ссылки, версии и цены должны чем-то подтверждаться — иначе агент "
                   "возвращается проверить. Команда, которая только печатает «ok», проверкой не считается. На вопрос "
                   "о фактах агент ищет источник и ссылается на него. На возражение он сначала перепроверяет, а не "
                   "отвечает «Вы абсолютно правы»; ваша догадка о причине — гипотеза, а не диагноз. Правила FACTS.md и "
                   "OBJECTIVE.md.",
             "en": "The agent's final report is held to the conversation: «tests pass», «N passed», «CI is green», "
-                  "«deployed», paths, line numbers, links, versions and prices need something behind them — otherwise "
+                  "«deployed», «N× faster», paths, line numbers, links, versions and prices need something behind them — otherwise "
                   "the agent goes back to check. A command that only prints «ok» isn't a check. Questions about facts "
                   "get looked up and cited. An objection makes the agent check again instead of answering «You're "
                   "absolutely right»; your guess at a cause is a hypothesis, not the diagnosis. Rules FACTS.md and "
@@ -152,16 +162,16 @@ MODULES: List[Dict] = [
         "summary": {"ru": "меньше лишних шагов: песочница, бюджет контекста, циклы ошибок, лимиты плана",
                     "en": "fewer wasted steps: the sandbox, context budget, loops of errors, plan limits"},
         "details": {
-            "ru": "Команды, которые падали в песочнице терминала, запоминаются по проекту и дальше сразу запускаются "
-                  "вне её. Агент видит, сколько контекста уже занято, и читает большие файлы по частям; после трёх "
-                  "неудачных команд подряд меняет подход, а не повторяет одно и то же; а когда квота текущей группы "
-                  "моделей подходит к концу, получает подсказку с остатком и советами сэкономить. Только подсказки "
-                  "агенту, своих команд нет.",
-            "en": "Commands that failed inside the terminal sandbox are remembered per project and run outside it "
-                  "from then on. The agent sees how full its context is and reads big files in parts; after three "
-                  "failing commands in a row it changes its approach instead of repeating itself; and when the current "
-                  "model group's quota gets short, it hears the remaining numbers and ways to stretch them. Hints to "
-                  "the agent only, no commands of its own.",
+            "ru": "Команды, которые падали в песочнице терминала, запоминаются по проекту и дальше сразу подставляют "
+                  "`BypassSandbox: true` на лету (`PreToolUse` overwrite). Агент видит, сколько контекста уже занято, "
+                  "и читает большие файлы по частям; после трёх неудачных команд подряд меняет подход, а не повторяет "
+                  "одно и то же; а когда квота текущей группы моделей подходит к концу, получает подсказку с остатком "
+                  "и советами сэкономить. Только подсказки агенту, своих команд нет.",
+            "en": "Commands that failed inside the terminal sandbox are remembered per project and automatically get "
+                  "`BypassSandbox: true` injected on the fly via `PreToolUse` overwrite. The agent sees how full its "
+                  "context is and reads big files in parts; after three failing commands in a row it changes its approach "
+                  "instead of repeating itself; and when the current model group's quota gets short, it hears the "
+                  "remaining numbers and ways to stretch them. Hints to the agent only, no commands of its own.",
         },
         "off": {"speedHints": False, "quotaHints": False},
     },
@@ -175,22 +185,24 @@ MODULES: List[Dict] = [
                   "синхронизируется с удалённым репозиторием, разрешает конфликты слияния, ищет по истории (log -S, "
                   "blame, bisect), безопасно откатывает изменения и работает с GitHub через gh — issues, PR, ревью "
                   "и комментарии, релизы, Actions. Команды, которые подвесили бы агента (редактор, пейджер, запрос "
-                  "пароля), заменяются неинтерактивными, а незаконченный rebase или merge и маркеры конфликтов не "
-                  "остаются после хода. Команды: /git (справочник и снимок состояния), /commit, /pr, /fix-issue, "
-                  "/ci (ждёт CI после пуша без опроса и достаёт логи падений), /release (поднятие версии, заметки, тег "
-                  "и GitHub-релиз), /git-init (репозиторий с безопасным первым коммитом). Нужен git; для GitHub — gh "
-                  "с выполненным gh auth login.",
+                  "пароля), автоматически исправляются через `PreToolUse` overwrite (`GIT_EDITOR=true`, `--no-edit`, "
+                  "`GIT_TERMINAL_PROMPT=0`) или останавливаются с рабочей формой, а незаконченный rebase или merge и "
+                  "маркеры конфликтов не остаются после хода. Команды: /git (справочник и снимок состояния), /commit, "
+                  "/pr, /pr-comments (замечания ревью в PR с диффом, ответ и resolve), /fix-issue, /ci (ждёт CI после "
+                  "пуша без опроса и достаёт логи падений), /release (поднятие версии, заметки, тег и GitHub-релиз), "
+                  "/git-init (репозиторий с безопасным первым коммитом). Нужен git; для GitHub — gh с выполненным gh auth login.",
             "en": "The agent handles git and GitHub with confidence: one command shows the repository's state; it "
                   "manages branches, syncs with the remote, resolves merge conflicts, searches history (log -S, "
                   "blame, bisect), undoes changes safely and works with GitHub through gh — issues, PRs, reviews and "
-                  "comments, releases, Actions. Commands that would hang the agent (an editor, a pager, a password "
-                  "prompt) are replaced with non-interactive ones, and an unfinished rebase or merge or leftover "
-                  "conflict markers don't survive its turn. Commands: /git (playbook and state snapshot), /commit, "
-                  "/pr, /fix-issue, /ci (waits for CI after a push without polling and pulls failure logs), /release "
-                  "(version bump, release notes, tag and GitHub release), /git-init (a repository with a safe first "
-                  "commit). Needs git; for GitHub, gh after gh auth login.",
+                  "comments, releases, Actions. Commands that would fail or hang on Antigravity's terminal are "
+                  "auto-fixed via `PreToolUse` overwrite (`GIT_EDITOR=true`, `--no-edit`, `GIT_TERMINAL_PROMPT=0`) or "
+                  "stopped with the working form, and an unfinished rebase or merge or leftover conflict markers don't "
+                  "survive its turn. Commands: /git (playbook and state snapshot), /commit, /pr, /pr-comments (PR review "
+                  "threads with diff hunks, reply and resolve), /fix-issue, /ci (waits for CI after a push without polling "
+                  "and pulls failure logs), /release (version bump, release notes, tag and GitHub release), /git-init "
+                  "(a repository with a safe first commit). Needs git; for GitHub, gh after gh auth login.",
         },
-        "skills": ["git", "git-init", "commit", "pr", "fix-issue", "ci", "release"],
+        "skills": ["git", "git-init", "commit", "pr", "pr-comments", "fix-issue", "ci", "release"],
         "rules": ["GIT.md"],
         "off": {"autoCi": False, "gitChecks": False},
         "needs": ["git", "gh?"],
@@ -231,20 +243,24 @@ MODULES: List[Dict] = [
     },
     {
         "id": "deploy",
-        "title": {"ru": "Деплой", "en": "Deploy"},
-        "summary": {"ru": "что уйдёт на сервер и чем рискованно; бэкап, проверка, откат",
-                    "en": "what goes to the server and the risks; backup, checks, rollback"},
+        "title": {"ru": "Деплой, БД и окружение", "en": "Deploy, DB and environment"},
+        "summary": {"ru": "риски деплоя, миграций и БД (/deploy, /db); .env и диагностика Docker (/env)",
+                    "en": "deploy, migration & DB checks (/deploy, /db); .env parity & Docker diagnostics (/env)"},
         "details": {
             "ru": "/deploy показывает, что именно уйдёт на сервер и чем это рискованно (миграции, конфиги, "
-                  "зависимости), делает бэкап, деплоит, проверяет, что сервис жив, и откатывает при ошибке. Держит "
-                  "замок, чтобы два агента не деплоили один проект одновременно, и не выкатывает коммит с красным CI. "
-                  "Проверку агент запускает сам, сам деплой — только по вашей просьбе.",
+                  "зависимости), делает бэкап, деплоит, проверяет, что сервис жив, и откатывает при ошибке (держа "
+                  "замок от двух одновременных деплоев и проверяя CI). /db — безопасный read-only инспектор схем "
+                  "PostgreSQL/SQLite/Redis, EXPLAIN в BEGIN READ ONLY и статический анализ миграций (DROP, блокировки "
+                  "таблиц, индексы без CONCURRENTLY) без утечки паролей из .env. /env — сверка .env ↔ .env.example "
+                  "без печати секретов и неблокирующий 2-секундный сокет-пинг Docker и портов.",
             "en": "/deploy shows what exactly goes to the server and what is risky about it (migrations, configs, "
-                  "dependencies), takes a backup, deploys, checks the service is alive and rolls back on failure. It "
-                  "holds a lock so two agents never deploy one project at once, and won't ship a commit with red CI. "
-                  "The agent runs the check on its own; the deploy itself only on your request.",
+                  "dependencies), takes a backup, deploys, checks the service is alive and rolls back on failure (holding "
+                  "a deploy lock and checking CI). /db inspects PostgreSQL/SQLite/Redis schemas read-only, runs EXPLAIN "
+                  "inside BEGIN READ ONLY, and scans migrations for dangerous locks/drops without printing .env secrets. "
+                  "/env checks .env ↔ .env.example parity without leaking values and runs a 2s non-hanging Docker socket "
+                  "and port health probe.",
         },
-        "skills": ["deploy"],
+        "skills": ["deploy", "db", "env"],
     },
     {
         "id": "web",
@@ -282,22 +298,23 @@ MODULES: List[Dict] = [
     },
     {
         "id": "usage",
-        "title": {"ru": "Расход токенов и отчёты", "en": "Token usage and reports"},
-        "summary": {"ru": "токены и стоимость, панель с лимитами, /context, /insights, /standup, /export",
-                    "en": "tokens and cost, a live panel with limits, /context, /insights, /standup, /export"},
+        "title": {"ru": "Расход токенов, панель и отчёты", "en": "Token usage, Control Center and reports"},
+        "summary": {"ru": "токены и стоимость, панель «Центр управления», /context, /insights, /standup, /export, /schedule-task",
+                    "en": "tokens and cost, Control Center sidecar, /context, /insights, /standup, /export, /schedule-task"},
         "details": {
             "ru": "/usage: токены, кэш, заполнение контекста и стоимость по ценам API, разбивка по ходам и "
-                  "субагентам, HTML-отчёт. Боковая панель «Расход токенов» обновляется каждые 3 секунды и показывает "
-                  "5-часовой и недельный лимиты Antigravity. /context — что именно занимает окно контекста; /insights "
-                  "— статистика срабатываний хуков и guard (ложные сигналы и повторы); /standup — что сделано за день "
-                  "или неделю по всем проектам; /export — разговор в Markdown со скрытыми секретами.",
+                  "субагентам, HTML-отчёт. Боковая панель 2.0 «Центр управления» показывает расходы, 5-часовой и "
+                  "недельный лимиты Antigravity, активных агентов в проектах, задачи моста Claude ↔ Antigravity, "
+                  "запущенные LSP-серверы (с RAM и остановкой), переключатели настроек и журнал guard. /context — что "
+                  "занимает окно контекста; /insights — статистика хуков и guard; /standup — сводка за день/неделю; "
+                  "/export — разговор в Markdown со скрытыми секретами; /schedule-task — квото-зависимые расписания Antigravity (включаются в панели Automations).",
             "en": "/usage: tokens, cache, context fill and the API-price cost, broken down by turn and subagent, with "
-                  "an HTML report. The side panel «Расход токенов» refreshes every 3 seconds and shows Antigravity's "
-                  "5-hour and weekly limits. /context shows what fills the context window; /insights reports hook and "
-                  "guard statistics (repeats and false-positive candidates); /standup — what got done today or this "
-                  "week across projects; /export — a conversation as Markdown with secrets hidden.",
+                  "an HTML report. The Control Center 2.0 side panel shows usage, Antigravity's 5-hour and weekly limits, "
+                  "active workspace agents, Claude ↔ Antigravity tasks, running LSP daemons (RAM + Stop), coaching "
+                  "toggles, and the guard feed. /context shows what fills context; /insights reports hook/guard stats; "
+                  "/standup — work across projects; /export — redacted Markdown export; /schedule-task — quota-gated Antigravity automations (enabled in the Automations dashboard).",
         },
-        "skills": ["usage", "standup", "export", "context", "insights"],
+        "skills": ["usage", "standup", "export", "context", "insights", "schedule-task"],
         "sidecars": ["usage"],
     },
     {

@@ -27,6 +27,9 @@ from typing import Dict, List, Optional, Tuple
 import compat
 
 EDITOR_SET = re.compile(r"(^|[\s;&|(])(\$env:)?GIT_EDITOR\s*=", re.I)
+PROMPT_SET = re.compile(r"(^|[\s;&|(])(\$env:)?GIT_TERMINAL_PROMPT\s*=", re.I)
+ENV_EXPORT_EDITOR = re.compile(r"(^|[\s;&|(])(?:export\s+|\$env:)GIT_EDITOR\s*=", re.I)
+ENV_EXPORT_PROMPT = re.compile(r"(^|[\s;&|(])(?:export\s+|\$env:)GIT_TERMINAL_PROMPT\s*=", re.I)
 SEQUENCE_SET = re.compile(r"(^|[\s;&|(])(\$env:)?GIT_SEQUENCE_EDITOR\s*=|sequence\.editor=", re.I)
 GIT_GLOBAL_WITH_VALUE = {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"}
 PATCH = {"-p", "--patch"}
@@ -38,7 +41,7 @@ END = re.compile(r"^>{7}(?: |$)")
 
 
 def _segments(cmd: str) -> List[str]:
-    cmd = re.sub(r"<<-?\s*['\"]?(\w+)['\"]?.*?\n\1\s*$", "", cmd, flags=re.S | re.M)  # heredoc bodies
+    cmd = re.sub(r"<<-?\s*['\"]?(\w+)['\"]?([^\n]*)\n.*?\n[ \t]*\1[ \t]*(?=\n|$)", r"\2\n", cmd, flags=re.S)  # heredoc bodies
     return [p.strip() for p in re.split(r"\|\||&&|;|\||\r?\n", cmd) if p.strip()]
 
 
@@ -142,6 +145,195 @@ def interactive(cmd: str) -> Optional[Tuple[str, str]]:
                 return ("gh-prompt", "`gh repo fork` asks whether to clone the fork. Add `--clone=false` (or "
                         "`--remote` inside a clone).")
     return None
+
+
+def _split_spans(cmd: str) -> Optional[List[Tuple[int, int, str]]]:
+    """(start, end, separator after it) of the segments separated by unquoted ;, &&, ||, | and & — a single & only in a
+    POSIX shell (a background job): in PowerShell it is the call operator (`& git push`), not a separator. None on
+    unclosed quotes."""
+    spans: List[Tuple[int, int, str]] = []
+    q, start, i, n = "", 0, 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if q:
+            if not compat.WINDOWS and c == "\\" and q == '"' and i + 1 < n:
+                i += 2
+                continue
+            if c == q:
+                q = ""
+        elif c in "'\"":
+            q = c
+        elif not compat.WINDOWS and c == "\\" and i + 1 < n:
+            i += 2
+            continue
+        elif c in "|&" and i + 1 < n and cmd[i + 1] == c:
+            spans.append((start, i, c * 2))
+            i += 2
+            start = i
+            continue
+        elif c in ";|" or (not compat.WINDOWS and c == "&" and (i == 0 or cmd[i - 1] not in "<>")
+                           and (i + 1 == n or cmd[i + 1] != ">")):
+            spans.append((start, i, c))
+            i += 1
+            start = i
+            continue
+        i += 1
+    if q:
+        return None
+    spans.append((start, n, ""))
+    return spans
+
+
+def _scan_tokens(s: str) -> Optional[List[Tuple[str, int, int]]]:
+    """Tokenize a single shell segment keeping (unquoted_text, start, end) offsets; None on complex syntax."""
+    toks: List[Tuple[str, int, int]] = []
+    i, n = 0, len(s)
+    while i < n:
+        while i < n and s[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        start = i
+        buf: List[str] = []
+        q = ""
+        while i < n:
+            c = s[i]
+            if q:
+                if not compat.WINDOWS and c == "\\" and q == '"' and i + 1 < n:
+                    buf.append(s[i + 1])
+                    i += 2
+                    continue
+                if c == q:
+                    q = ""
+                else:
+                    buf.append(c)
+            elif c in " \t":
+                break
+            elif c in "(){}`" or (c == "$" and i + 1 < n and s[i + 1] == "("):
+                return None
+            elif c in "'\"":
+                q = c
+            elif not compat.WINDOWS and c == "\\" and i + 1 < n:
+                buf.append(s[i + 1])
+                i += 2
+                continue
+            else:
+                buf.append(c)
+            i += 1
+        if q:
+            return None
+        toks.append(("".join(buf), start, i))
+    return toks
+
+
+def _prefix_env(core: str, env_assign: str, ps_assign: str, git_start: int, has_cmd_prefix: bool,
+                ps_ok: bool) -> Optional[str]:
+    """`VAR=value git …` (POSIX: for that one command). PowerShell has no such prefix: `$env:VAR='value'; git …` is two
+    statements, which keeps the meaning only where `;` or nothing surrounds the segment (`ps_ok`) — next to && / || / |
+    it would change what runs when, and wrapping it in `& { … }` would hide git's exit status — so None there."""
+    if compat.WINDOWS:
+        return ps_assign + core if ps_ok else None
+    if not has_cmd_prefix:
+        return env_assign + core
+    return core[:git_start] + "env " + env_assign + core[git_start:]
+
+
+def _rewrite_segment(core: str, prior_editor: bool, prior_prompt: bool, ps_ok: bool = True) -> Optional[Tuple[str, str]]:
+    if compat.WINDOWS and core[:1] in ("&", "'", '"'):
+        return None  # PowerShell: `& git …` / `& "C:\…\git.exe" …` — a command named by the call operator, left alone
+    toks = _scan_tokens(core)
+    if not toks or (compat.WINDOWS and any(t[0] == "&" for t in toks)):
+        return None
+    git_idx = 0
+    has_cmd_prefix = False
+    while git_idx < len(toks):
+        w = toks[git_idx][0]
+        if re.match(r"^\w+=", w) or w == "env":
+            git_idx += 1
+        elif w in ("command", "exec", "time", "nohup", "noglob"):
+            has_cmd_prefix = True
+            git_idx += 1
+        else:
+            break
+    if git_idx >= len(toks):
+        return None
+    prog = os.path.basename(toks[git_idx][0].replace("\\", "/")).lower()
+    if prog not in ("git", "git.exe"):
+        return None
+    i = git_idx + 1
+    while i < len(toks) and toks[i][0].startswith("-") and toks[i][0] != "--":
+        i += 2 if toks[i][0] in GIT_GLOBAL_WITH_VALUE else 1
+    if i >= len(toks):
+        return None
+    sub, _sub_start, sub_end = toks[i]
+    args = [t[0] for t in toks[i + 1:]]
+    git_start = toks[git_idx][1]
+
+    has_editor = prior_editor or bool(EDITOR_SET.search(core))
+    if sub in ("rebase", "cherry-pick", "revert", "merge") and "--continue" in args and not has_editor:
+        fixed = _prefix_env(core, "GIT_EDITOR=true ", "$env:GIT_EDITOR='true'; ", git_start, has_cmd_prefix, ps_ok)
+        return ("overwrite:git-continue-editor", fixed) if fixed else None
+
+    if sub == "merge" and not _has(
+        args, "--no-edit", "--edit", "-e", "-m", "--message", "-F", "--file", "--abort", "--quit", "--continue",
+        "--squash", "--help", "-h"
+    ) and not any(a.startswith(("-m", "-F")) and not a.startswith("--") for a in args):
+        return ("overwrite:git-no-edit", core[:sub_end] + " --no-edit" + core[sub_end:])
+    if sub == "revert" and not _has(
+        args, "--no-edit", "--edit", "-e", "--abort", "--quit", "--continue", "--skip", "--help", "-h"
+    ):
+        return ("overwrite:git-no-edit", core[:sub_end] + " --no-edit" + core[sub_end:])
+
+    has_prompt = prior_prompt or bool(PROMPT_SET.search(core))
+    if sub in ("fetch", "pull", "push", "ls-remote", "clone") and not has_prompt and not _has(args, "--help", "-h"):
+        fixed = _prefix_env(core, "GIT_TERMINAL_PROMPT=0 ", "$env:GIT_TERMINAL_PROMPT='0'; ", git_start,
+                            has_cmd_prefix, ps_ok)
+        return ("overwrite:git-no-prompt", fixed) if fixed else None
+    return None
+
+
+def rewrite(cmd: str) -> Optional[Tuple[str, str]]:
+    """Auto-fix non-interactive git flags/env on single-line commands; returns (rule, rewritten_cmd) or None."""
+    if not cmd or not cmd.strip() or "<<" in cmd or "\n" in cmd or "\r" in cmd:
+        return None
+    if compat.WINDOWS and "`" in cmd:
+        return None  # PowerShell escapes quotes with a backtick: where a string ends can't be followed safely
+    spans = _split_spans(cmd)
+    if spans is None:
+        return None
+    out: List[str] = []
+    cursor = 0
+    rules: List[str] = []
+    prior_editor = False
+    prior_prompt = False
+    for k, (s, e, sep) in enumerate(spans):
+        out.append(cmd[cursor:s])
+        seg = cmd[s:e]
+        stripped = seg.strip()
+        if stripped:
+            lead_len = len(seg) - len(seg.lstrip())
+            trail_len = len(seg) - len(seg.rstrip())
+            lead = seg[:lead_len]
+            trail = seg[len(seg) - trail_len:] if trail_len else ""
+            ps_ok = (spans[k - 1][2] if k else "") in ("", ";") and sep in ("", ";")
+            res = _rewrite_segment(stripped, prior_editor, prior_prompt, ps_ok)
+            if res:
+                rules.append(res[0])
+                out.append(lead + res[1] + trail)
+            else:
+                out.append(seg)
+            if ENV_EXPORT_EDITOR.search(stripped):
+                prior_editor = True
+            if ENV_EXPORT_PROMPT.search(stripped):
+                prior_prompt = True
+        else:
+            out.append(seg)
+        cursor = e
+    out.append(cmd[cursor:])
+    rewritten = "".join(out)
+    if not rules or rewritten == cmd:
+        return None
+    return rules[0], rewritten
 
 
 def git(args: List[str], cwd: str, timeout: float = 5.0) -> Optional[str]:

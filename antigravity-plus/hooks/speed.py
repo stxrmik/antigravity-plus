@@ -123,6 +123,51 @@ def known(ws: str) -> Dict[str, dict]:
         return dict(data["projects"].get(ws) or {})
 
 
+def _allow_auto_bypass(cmd: str, key: str) -> bool:
+    """Whether the guard may set BypassSandbox on `cmd` by itself: not for an inline -c/-e script (its key names no
+    program) nor a chain, pipe, redirection or substitution — there it would cover more than the command learned."""
+    if not key or key.endswith((" -c", " -e")):
+        return False
+    s = re.sub(r"^\s*(?:cd\s+(?:\"[^\"]*\"|'[^']*'|\S+)\s*(?:&&|;)\s*)+", "", str(cmd or ""))
+    if compat.WINDOWS:
+        s = re.sub(r"^(?:\$env:\w+\s*=\s*'[^']*'\s*;\s*)+", "", s)
+    q, i, n = "", 0, len(s)
+    while i < n:
+        c = s[i]
+        if q == "'":
+            if c == "'":
+                q = ""
+        elif c == "\\" and i + 1 < n and not (compat.WINDOWS and q == ""):
+            i += 1
+        elif q == '"':
+            if c == '"':
+                q = ""
+            elif c == "`" or s[i:i + 2] == "$(":
+                return False
+        elif c in "'\"":
+            q = c
+        elif c in ";|\r\n&<>`":
+            return False
+        elif s[i:i + 2] in ("$(", "<(", ">("):
+            return False
+        i += 1
+    return True
+
+
+def needs_bypass_sandbox(payload: dict, cmd: str, args: Optional[dict] = None) -> bool:
+    """True when `cmd` is remembered to fail in the sandbox for this workspace and BypassSandbox isn't set yet."""
+    if not cmd or not setting() or sandbox_on() is False or (args or {}).get("BypassSandbox"):
+        return False
+    ws = workspace(payload)
+    if not ws:
+        return False
+    clean = re.sub(r"^(?:\$env:\w+\s*=\s*'[^']*'\s*;\s*)+", "", cmd) if compat.WINDOWS else cmd
+    key = conv.command_key(clean, ws)
+    if not _allow_auto_bypass(clean, key):
+        return False
+    return bool(key and key in known(ws))
+
+
 def sandbox_lines(ws: str) -> List[str]:
     """For the session context: the commands this project needed BypassSandbox for (only while the sandbox is on)."""
     if sandbox_on() is False or not setting():
@@ -152,6 +197,9 @@ def update_store(ws: str, calls: dict) -> List[str]:
                 if project[key]["ok"] >= FORGET_AFTER:
                     project.pop(key)
         for it in new:
+            if str(it["key"]).endswith((" -c", " -e")):
+                continue  # `python3 -c …`: the key says nothing about what ran (chains and pipes are learned by their
+                # program — `./deploy/ssh.sh '…' | tail` — and only the overwrite leaves them alone)
             entry = project.setdefault(it["key"], {"n": 0})
             if entry["n"] == 0 and it["key"] not in fresh:
                 fresh.append(it["key"])

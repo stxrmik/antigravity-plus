@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -111,6 +112,44 @@ def risk_of(path: str) -> str:
     return next((name for name, rx in RISK if rx.search(path)), "code")
 
 
+def _migration_risk_lines(ws: str, items: List[str]) -> List[str]:
+    db_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "db", "scripts", "db.py")
+    if not os.path.isfile(db_script):
+        return []
+    changed_data_files: List[str] = []
+    for item in items:
+        if item.endswith(" (deleted)"):
+            continue
+        p = re.sub(r" \((?:added|changed)\)$", "", item)
+        if " -> " in p:
+            p = p.split(" -> ", 1)[1]
+        if p.startswith('"') and p.endswith('"') and len(p) >= 2:
+            p = p[1:-1]
+        changed_data_files.append(p)
+    if not changed_data_files:
+        return []
+    try:
+        spec = importlib.util.spec_from_file_location("agp_db_skill", db_script)
+        if not spec or not spec.loader:
+            return []
+        db_mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = db_mod
+        spec.loader.exec_module(db_mod)
+        risks = db_mod.analyze_migrations(ws, changed_data_files)
+    except Exception:
+        return []
+    if not risks:
+        return []
+    lines = ["", "Migration risks:"]
+    for r in risks[:20]:
+        lines.append(f"- [{r.get('severity', 'high')}] {r.get('file')}:{r.get('line')} — {r.get('operation')}: {r.get('message')}")
+        if r.get("alternative"):
+            lines.append(f"  Safer: {r['alternative']}")
+    if len(risks) > 20:
+        lines.append(f"- … +{len(risks) - 20} more (run db.py migrations)")
+    return lines
+
+
 def title_of(cid: str) -> str:
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "hooks"))
@@ -168,6 +207,8 @@ def plan(ws: str, cid: Optional[str]) -> str:
             items = changed[kind]
             out.append(f"\n## {labels[kind]} ({len(items)})")
             out += [f"- {x}" for x in items[:30]] + ([f"- … +{len(items) - 30} more"] if len(items) > 30 else [])
+            if kind == "data":
+                out += _migration_risk_lines(ws, items)
 
     hints = []
     for dp, dns, fns in os.walk(ws):

@@ -97,17 +97,23 @@ The plugin's commands are skills; your skills list shows each one's SKILL.md pat
 | `/git` | any git or GitHub work beyond a quick read: syncing, a rejected push, conflicts, history (who changed what), undo, issues, PRs and review threads, releases |
 | `/lsp` | you need where a symbol is defined, who calls it or every place it's used — before changing a signature, renaming, moving or deleting it — its type, or a big file's outline: ask the language server instead of rg |
 | `/deploy` check (`deploy.py plan`, read-only) | the user asks whether deploying is safe, and before every deploy |
+| `/db` | before `/deploy` when migrations changed, or to inspect DB schema / `EXPLAIN` safely without reading `.env` |
+| `/env` | diagnosing missing env vars, port conflicts, or Docker health (2 s non-hanging socket check) |
+| `/diff-cover` | checking which lines of your diff still lack test coverage |
+| `/perf` | measuring runtime, memory or bundle size before/after an optimization |
 | `/standup` | the user asks what got done or where things stand across projects |
 | `/git-init` | before your first change in a project folder without git |
 | `/init` | you start changing files in a project without `AGENTS.md` (in a new project: after the first working version) |
 | `/remember` | the user states a lasting rule for the repo, or corrects you in a way that should last |
 | `/settings` (`show`) | before you tell the user anything about their setup; changes only on the user's words |
 
-Only when the user asks, or under full access (you may offer them in one line): `/commit`, `/pr`, `/release`, `/claude`, `/deploy`, `/fix-issue`, `/simplify`, `/export`, `/hooks`, and forgetting or cleaning up memory. Settings (`/settings`, `/memory`) change only on the user's words. `/update` (a new Antigravity Plus release, or a rollback) runs only on the user's words, even under full access: when the session context announces a release, tell the user once in one line at the end of your reply and offer it.
+Only when the user asks, or under full access (you may offer them in one line): `/commit`, `/pr`, `/pr-comments`, `/release`, `/claude`, `/deploy`, `/fix-issue`, `/simplify`, `/export`, `/hooks`, `/schedule-task`, and forgetting or cleaning up memory. Settings (`/settings`, `/memory`) change only on the user's words. `/update` (a new Antigravity Plus release, or a rollback) runs only on the user's words, even under full access: when the session context announces a release, tell the user once in one line at the end of your reply and offer it.
+- `/pr-comments`: `list` is read-only (run on your own when inspecting PR feedback); `reply` and `resolve` need the user's request or full access. <!-- needs:pr-comments -->
+- `/schedule-task`: `list` and `gate` are read-only; creating or removing an automation needs the user's request, and only the user enables it (Automations dashboard). <!-- needs:schedule-task -->
 
 Subagents use only read-only commands that help their task (a memory search, `/usage`, `/context`, `/doctor`); `debugger` and `test-writer` may also run `/review` on their own change. Never `/commit`, `/pr`, `/release`, `/claude`, `/remember`, `/handoff`, `/init`, `/git-init`, `/simplify` or a settings change from a subagent: report to the main agent instead.
 
-When the `antigravity-plus_tools` MCP server is active, call its typed tools (`lsp_*`, `memory_search`, `git_state`, `quota`) directly instead of shell-quoting those scripts.
+When the `antigravity-plus_tools` MCP server is active, call its typed tools (`lsp_*`, `memory_search`, `git_state`, `quota`, `ci_*`, `deps_audit`, `ui_check`, `mobile_*`) directly instead of shell-quoting those scripts.
 When the user asks how many tokens, how full the context is or how much the session costs, also offer the live side panel: [Расход токенов](sidecar://antigravity-plus/usage/).
 
 ## Full access

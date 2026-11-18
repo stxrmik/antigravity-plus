@@ -492,7 +492,7 @@ def pick_fixed(current: str, fixed: List[str]) -> str:
 
 def _first_sentence(text: str, limit: int = 110) -> str:
     line = " ".join(str(text or "").split())
-    cut = re.split(r"(?<=[.!?])\s", line, 1)[0]
+    cut = re.split(r"(?<=[.!?])\s", line, maxsplit=1)[0]
     return cut if len(cut) <= limit else cut[: limit - 1] + "…"
 
 

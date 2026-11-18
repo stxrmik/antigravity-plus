@@ -19,7 +19,9 @@ def hook(name, extra):
 def post(path): return hook("check_edit.py", {"toolCall": {"name": "write_file", "args": {"Path": path}}, "error": ""})
 def pre():
     out = hook("instructions.py", {"lastUserInput": "Почини api"})
-    return [s["ephemeralMessage"] for s in out.get("injectSteps", []) if "edit_check" in s["ephemeralMessage"]]
+    return [m for s in out.get("injectSteps", [])
+            for m in [(s.get("systemMessage") or {}).get("systemMessage") or s.get("ephemeralMessage") or ""]
+            if "edit_check" in m]
 def stop(n=0): return hook("stop.py", {"terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": n})
 ok = True
 def check(name, cond, got=""):

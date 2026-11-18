@@ -115,13 +115,27 @@ CLAIMS: List[Tuple[str, "re.Pattern", Optional["re.Pattern"], bool, bool]] = [
     ("install", re.compile(r"\bустановил\w*\s+(?:зависимост\w*|пакет\w*|библиотек\w*|модул\w*)|\binstalled\s+(?:the\s+)?(?:dependencies|packages?)\b", re.I),
      re.compile(r"\b(?:pip3?|npm|pnpm|yarn|bun|brew|apt(?:-get)?|uv|poetry|gem|cargo|go|composer|pod)\s+(?:install|add|i|sync|get)\b", re.I),
      False, True),
+    ("perf",
+     re.compile(
+         r"\bускорил\w*\s+(?:[\w.-]+\s+){0,3}(?:в\s+|на\s+)?\d+(?:[.,]\d+)?\s*(?:раз\w*|x|х|%)"
+         r"|\bстал\w*\s+быстрее\s+(?:в\s+|на\s+)\d+(?:[.,]\d+)?\s*(?:раз\w*|x|х|%)"
+         r"|\bснизил\w*\s+(?:потребление\s+|расход\s+)?(?:памят\w*|размер\w*|время|задержк\w*)\s+на\s+\d+(?:[.,]\d+)?%"
+         r"|\b\d+(?:[.,]\d+)?\s*[xх]\s+faster\b"
+         r"|\b(?:sped\s+up|faster|reduced\s+(?:latency|memory|bundle\s+size|runtime))\s+by\s+\d+(?:[.,]\d+)?%",
+         re.I,
+     ),
+     re.compile(r"perf\.py|hyperfine|pytest-benchmark|--benchmark|\btimeit\b|cProfile|perf_counter|(?<![-\w])time\s+\S|wrk\b|"
+                r"\bab\s+-n|\bk6\b|lighthouse|\bdu\s+-|\bwc\s+-c|\bstat\s+", re.I),
+     True, True),
 ]
+# perf.py's verdict line (`… -> Verdict: clear improvement`) or its --json `"verdict": "…"`.
+PERF_VERDICT = re.compile(r"""(?:\bVerdict:[ \t]*|"verdict"\s*:\s*")([^\n"]+)""")
 WHAT = {"tests": "test run", "tests_ran": "test command", "build": "build", "build_ran": "build command",
         "lint": "linter run", "works": "check (tests, a build, running it)",
         "ui": "look at the page (ui_check.py screenshots or the browser)",
         "mobile": "run on a simulator or an emulator (mobile.py run / shot)", "deploy": "deploy command",
         "push": "`git push`", "commit": "`git commit`", "ci": "CI check (`ci.py watch` / `gh run`)",
-        "install": "install command"}
+        "install": "install command", "perf": "benchmark measurement (perf.py / hyperfine / timeit)"}
 # A claim the sentence hedges, attributes, asks about or quotes isn't the agent's own statement of fact.
 HEDGE_BEFORE = re.compile(r"(?:чтобы|если|когда|пока|пусть|должн\w*|может|могут|можно|стоит|нужно|надо|осталось|ожида\w*|"
                           r"предполага\w*|предлагаю|рекомендую|запустите|проверьте|выполните|попробуйте|прогоните|не|to\s+make|"
@@ -376,6 +390,11 @@ def unbacked(answer: str, ev: dict, ws: str, verify: "re.Pattern", code_ext: Tup
                 problem = f"the latest {WHAT[kind]} output shows CI is still running (`{last['cmd'][:80]}`); wait with `ci.py watch`."
             elif CI_NONE_OUT.search(out_txt) or (out_txt.strip() in ("", "[]") and re.search(r"\b(?:list|status|checks)\b", last["cmd"], re.I)):
                 problem = f"the latest {WHAT[kind]} found no CI run (`{last['cmd'][:80]}`); wait with `ci.py watch` or verify CI triggered."
+        elif kind == "perf":  # perf.py exits 0 for any verdict: a speed-up claim needs a «clear improvement» one
+            verdicts = [v.strip() for v in PERF_VERDICT.findall(last.get("out") or "")]
+            if verdicts and not any(v.lower().startswith("clear improvement") for v in verdicts):
+                problem = (f"the latest perf.py measurement doesn't show a clear improvement "
+                           f"(«Verdict: {verdicts[-1][:100]}», `{last['cmd'][:60]}`).")
         elif kind == "tests":
             m = NUM_PASSED.search(sentence)
             n = next((g for g in m.groups() if g), None) if m else None

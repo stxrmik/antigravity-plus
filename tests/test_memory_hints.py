@@ -81,7 +81,8 @@ def payload(**extra):
 def pre():
     out = subprocess.run([sys.executable, os.path.join(HOOKS, "instructions.py")], input=json.dumps(payload()),
                          capture_output=True, text=True, encoding="utf-8")
-    msgs = [s["ephemeralMessage"] for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
+    msgs = [(s.get("systemMessage") or {}).get("systemMessage") or s.get("ephemeralMessage") or ""
+            for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
     return "\n".join(m for m in msgs if "<memory_hint" in m), out.stderr.strip()
 
 
@@ -303,7 +304,8 @@ def memo(folder, name, desc, body, mtype="feedback"):
 def recall_block():
     out = subprocess.run([sys.executable, os.path.join(HOOKS, "instructions.py")], input=json.dumps(payload()),
                          capture_output=True, text=True, encoding="utf-8")
-    msgs = [s["ephemeralMessage"] for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
+    msgs = [(s.get("systemMessage") or {}).get("systemMessage") or s.get("ephemeralMessage") or ""
+            for s in json.loads(out.stdout or "{}").get("injectSteps", [])]
     return "\n".join(m for m in msgs if "<memory_recall" in m), out.stderr.strip()
 
 
@@ -344,7 +346,9 @@ start("ctx")
 add("PLANNER_RESPONSE", content="…", input_tokens=200_000, cache_read_tokens=30_000, output_tokens=100)
 out = subprocess.run([sys.executable, os.path.join(HOOKS, "instructions.py")], input=json.dumps(payload()),
                      capture_output=True, text=True, encoding="utf-8")
-budget = "\n".join(s["ephemeralMessage"] for s in json.loads(out.stdout or "{}").get("injectSteps", []) if "<context_budget" in s["ephemeralMessage"])
+budget = "\n".join(m for s in json.loads(out.stdout or "{}").get("injectSteps", [])
+                   for m in [(s.get("systemMessage") or {}).get("systemMessage") or s.get("ephemeralMessage") or ""]
+                   if "<context_budget" in m)
 check("near compaction the context hint says to save to memory", "save to memory" in budget, budget[:300])
 
 # ── the session context says how ──

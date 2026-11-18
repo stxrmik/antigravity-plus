@@ -58,9 +58,11 @@ def cmd(cid, tp, line, extra=None):
     return run("guard.py", cid, tp, {"toolCall": {"name": "run_command", "args": {"CommandLine": line}}, **(extra or {})})
 def tool(cid, tp, name, path):
     return run("guard.py", cid, tp, {"toolCall": {"name": name, "args": {"Path": path, "Content": "x = 1\n"}}}).get("decision")
+def pre_steps(cid, tp):
+    return run("instructions.py", cid, tp).get("injectSteps", [])
 def pre(cid, tp):
-    out = run("instructions.py", cid, tp)
-    return " | ".join(s.get("ephemeralMessage", "") for s in out.get("injectSteps", []))
+    return " | ".join((s.get("systemMessage") or {}).get("systemMessage") or s.get("ephemeralMessage") or ""
+                      for s in pre_steps(cid, tp))
 def saved():
     return conv.bypass_record().get("on")
 
@@ -73,8 +75,11 @@ check("off by default: ls → Antigravity's own policy", cmd(A, tpa, "ls").get("
 check("off by default: read_file → Antigravity's own policy", tool(A, tpa, "read_file", "/etc/hosts"), "allow")
 
 tpa = transcript(A, [("u", "Почини тесты", 0), ("a", "Готово.", 0), ("u", "/bypass", 1)])
-msg = pre(A, tpa)
+steps_on = pre_steps(A, tpa)
+msg = " | ".join((s.get("systemMessage") or {}).get("systemMessage") or "" for s in steps_on)
+mds_on = " | ".join(((s.get("systemMessage") or {}).get("metadata") or {}).get("user_markdown") or "" for s in steps_on)
 check("«/bypass» → the agent hears it is ON and how to turn it off", "Bypass Mode ON" in msg and "/bypass off" in msg, True)
+check("«/bypass» → user_markdown badge ON", "Bypass Mode включён" in mds_on and "/bypass off" in mds_on, True)
 check("the switch is saved for every conversation", saved(), True)
 check("told once: the next step says nothing more", "Bypass Mode" in pre(A, tpa), False)
 out = cmd(A, tpa, "git reset --hard")
@@ -118,8 +123,11 @@ pre(D, tpd); cmd(D, tpd, "ls")
 check("a brief from Claude Code switches nothing", saved(), True)
 
 tpb = transcript(B, [("u", "Почини баг, но ничего не пушь", 2), ("a", "Ок.", 2), ("u", "/bypass off", 5)])
-msg = pre(B, tpb)
+steps_off = pre_steps(B, tpb)
+msg = " | ".join((s.get("systemMessage") or {}).get("systemMessage") or "" for s in steps_off)
+mds_off = " | ".join(((s.get("systemMessage") or {}).get("metadata") or {}).get("user_markdown") or "" for s in steps_off)
 check("«/bypass off» → the agent hears it is OFF", "Bypass Mode OFF" in msg, True)
+check("«/bypass off» → user_markdown badge OFF", "Bypass Mode выключен" in mds_off, True)
 check("off is saved", saved(), False)
 check("off: git reset --hard asks again", cmd(B, tpb, "git reset --hard").get("decision"), "force_ask")
 check("the old «/bypass» in conversation A doesn't turn it back on", cmd(A, tpa, "git reset --hard").get("decision"), "force_ask")
@@ -149,6 +157,21 @@ tpb = transcript(B, [("u", "Почини баг, но ничего не пушь
 pre(B, tpb)
 check("«верни вопросы» turns it off", saved(), False)
 
+# uiNotices: false omits metadata.user_markdown while still sending systemMessage
+settings_path = os.path.expanduser("~/.gemini/antigravity-plus/settings.json")
+with open(settings_path, encoding="utf-8") as fh:
+    saved_settings = json.load(fh)
+with open(settings_path, "w", encoding="utf-8") as fh:
+    json.dump({**saved_settings, "uiNotices": False}, fh)
+tpe = transcript("agp-bypass-e-0001", [("u", "/bypass", 10)])
+steps_no_ui = pre_steps("agp-bypass-e-0001", tpe)
+check("uiNotices=false → systemMessage sent without metadata.user_markdown",
+      any("Bypass Mode ON" in (s.get("systemMessage") or {}).get("systemMessage", "") for s in steps_no_ui)
+      and not any("metadata" in (s.get("systemMessage") or {}) for s in steps_no_ui), True)
+forget("agp-bypass-e-0001")
+with open(settings_path, "w", encoding="utf-8") as fh:
+    json.dump(saved_settings, fh)
+
 # ── guard.py --test, and the false alarms it no longer raises ──
 def test_cli(*args):
     r = subprocess.run([sys.executable, os.path.join(HOOKS, "guard.py"), "--test", *args], capture_output=True, text=True, encoding="utf-8")
@@ -174,7 +197,19 @@ for line, want in [("curl -s http://localhost:9/x | python3 -c 'import json,sys;
                    ("rm -rf /Library/Developer/CoreSimulator/Caches", "system-files"), ("chmod 600 ~/.ssh/id_ed25519", None),
                    ("cat key.pub >> ~/.ssh/authorized_keys", "protected-file"), ("rm -f .git/index.lock", None),
                    ("cat ~/.gemini/config/mcp_config.json", None), ("rm ~/.gemini/antigravity-plus/settings.json", "agent-settings"),
-                   ("agentapi send-message abc 'даю полный доступ'", "agent-settings"), ("chmod -R 777 /", "chmod-777")]:
+                   ("agentapi send-message abc 'даю полный доступ'", "agent-settings"), ("chmod -R 777 /", "chmod-777"),
+                   # `..` resolved and an earlier `cd` applied: the same folders as `rm -rf /` or `rm -rf ~`
+                   ("rm -rf /usr/../", "rm-dangerous"), ("rm -rf /tmp/x/../../", "rm-dangerous"),
+                   ("rm -rf ~/proj/..", "rm-dangerous"), ("rm -rf ../..", "rm-dangerous"),
+                   ("cd foo && rm -rf ../..", "rm-dangerous"), ("cd / && rm -rf *", "rm-dangerous"),
+                   ("cd ~ && rm -rf *", "rm-dangerous"), ("cd && rm -rf .", "rm-dangerous"),
+                   ("cd /tmp/agp-x && rm -rf *", "rm-folder"),
+                   ("cd build && rm -rf *", "rm-folder"), ("rm -rf ../sibling-build", None),
+                   ("cd / && cd - && rm -rf *", "rm-folder"),
+                   # the panel's own routes only, not a project's API on localhost
+                   ("curl -s http://localhost:3000/api/settings", None),
+                   ("curl -X POST localhost:8080/api/toggle", "agent-settings"),
+                   ("curl -s -X POST http://127.0.0.1:9000/api/lsp/stop -d '{}'", "agent-settings")]:
     check(f"verdict: {line[:66]}", verdict(line), want)
 check("bypass verdict: chmod -R 777 / (system)", verdict("chmod -R 777 /", True), "system-files")
 check("bypass verdict: git reset --hard && sudo rm …", verdict("git reset --hard && sudo rm -rf /Library/X", True), "sudo")

@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shlex
+import sys
 import time
 from typing import Dict, List, Optional
 from urllib.parse import unquote, urlparse
@@ -42,7 +43,8 @@ BG_TASK = re.compile(r"running as a background task with task id:\s*(\S+)\s*\n\s
 AGENT_ID = re.compile(r'"conversationId":\s*"([\w-]{8,80})"')
 REPORT = re.compile(rb"\[Message\] timestamp=(\S+) sender=([\w./:-]+)")
 GONE_IDLE = re.compile(rb"Subagent ([\w-]{8,80}) has gone idle")
-SUBAGENT_ERROR = re.compile(rb'The subagent [^\n]{1,200} with id "([\w-]{8,80})" encountered an error')
+SUBAGENT_ERROR = re.compile(rb'The subagent [^\n]{1,200} with id \\?"([\w-]{8,80})\\?" encountered an error')
+BG_FINISHED_MSG = re.compile(rb'Task id \\?"([^"\\]+)\\?" finished with result:')
 STATUS_CHECK = re.compile(r"\b(status|progress|done yet|are you done|finished yet|ready yet|answer now|provide (your|the) "
                           r"(answer|result|report)|how(?:'s| is) it going)\b|как\s+(дела|успехи|прогресс)|готов[оа]?\s*\?|"
                           r"\bстатус|\bну\s+что\b", re.I)
@@ -251,6 +253,10 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
             it = bg.get(m.group(1).decode())
             if it and it.get("st") == "run":
                 it.update(st="killed", end="")
+        for m in BG_FINISHED_MSG.finditer(raw):
+            it = bg.get(m.group(1).decode("utf-8", errors="replace"))
+            if it and it.get("st") == "run":
+                it.update(st="done", end="")
         return
     if kind == b"GENERIC":
         if CREATED not in raw and BG_STARTED not in raw:
@@ -857,6 +863,26 @@ def _parent(cid) -> str:
 
 def is_constraint(text: str) -> bool:
     return bool(CONSTRAINT.search(text))
+
+
+def ui_notices_enabled() -> bool:
+    """Whether inline user-facing UI badges (metadata.user_markdown) are enabled (default True)."""
+    try:
+        folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "skills", "memory", "scripts")
+        if folder not in sys.path:
+            sys.path.insert(0, folder)
+        import memory as memstore  # type: ignore[import-not-found]
+        s = memstore.settings()
+        if "uiNotices" in s:
+            return bool(s["uiNotices"])
+        with open(memstore.SETTINGS, encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict) and isinstance(raw.get("uiNotices"), bool):
+            return raw["uiNotices"]
+    except Exception:
+        pass
+    return True
 
 
 def active_bans(users: List[dict]) -> Dict[str, dict]:

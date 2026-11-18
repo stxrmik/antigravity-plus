@@ -105,6 +105,14 @@ t2_steps = [
      "content": f"<antigravity_plus_session_context>\n## Workspace: {ws2}\n</antigravity_plus_session_context>"},
     {"step_index": 2, "type": "EPHEMERAL_MESSAGE", "created_at": ts(-98),
      "content": '<objectivity source="Antigravity Plus">check</objectivity>'},
+    {"step_index": 3, "type": "SYSTEM_MESSAGE", "created_at": ts(-97),
+     "content": '<SYSTEM_MESSAGE>\n<orchestrator_handoff source="Antigravity Plus">hand off</orchestrator_handoff>\n</SYSTEM_MESSAGE>'},
+    {"step_index": 4, "type": "SYSTEM_MESSAGE", "created_at": ts(-96),
+     "content": '<orchestrator_review source="Antigravity Plus">review plan</orchestrator_review>'},
+    {"step_index": 5, "type": "SYSTEM_MESSAGE", "created_at": ts(-95),
+     "content": '<SYSTEM_MESSAGE>\nThe user turned Bypass Mode OFF (message 2).\n</SYSTEM_MESSAGE>'},
+    {"step_index": 6, "type": "SYSTEM_MESSAGE", "created_at": ts(-94),
+     "content": "", "metadata": {"user_markdown": "🔴 **Квота «Gemini Models» на исходе** — неделя 4.0%."}},
 ]
 
 sub_steps = [
@@ -140,6 +148,12 @@ guard_rows = [
     {"ts": local_ts(-175), "conversation": cid1, "tool": "run_command", "rule": "bypass:rm-dangerous",
      "subject": f'curl -H "Authorization: {SECRET_BEARER}" --password "{SECRET_PASS}" -d token={SECRET_SK} -d gh={SECRET_GH} -d aws={SECRET_AWS} -d jwt={SECRET_JWT} {HOME}/run.sh'},
     {"ts": local_ts(-50), "conversation": cid2, "tool": "run_command", "rule": "sudo", "subject": "sudo beta"},
+    {"ts": local_ts(-45), "conversation": cid2, "tool": "edit_file", "rule": "orchestrator-ban-in-plan", "subject": "a.py"},
+    {"ts": local_ts(-44), "conversation": cid2, "tool": "run_command", "rule": "orchestrator-unverified-plan", "subject": "exit_plan_mode"},
+    # commands the guard fixed on the fly (PreToolUse overwrite): neither asks nor denials
+    {"ts": local_ts(-43), "conversation": cid2, "tool": "run_command", "rule": "overwrite:git-no-prompt", "subject": "git push"},
+    {"ts": local_ts(-42), "conversation": cid2, "tool": "run_command", "rule": "overwrite:git-no-prompt", "subject": "git pull"},
+    {"ts": local_ts(-41), "conversation": cid2, "tool": "run_command", "rule": "overwrite:bypass-sandbox", "subject": "docker ps"},
 ]
 with open(os.path.join(AGP, "guard.log"), "w", encoding="utf-8") as f:
     for row in guard_rows:
@@ -157,15 +171,22 @@ check("insights.py --days 7 --json exits 0", r.returncode == 0, r.stderr)
 data = json.loads(r.stdout)
 
 check("scanned counts all 3 conversations and filters out 30-day-old guard entry",
-      data["scanned"]["conversations"] == 3 and data["guard"]["entries"] == 6,
+      data["scanned"]["conversations"] == 3 and data["guard"]["entries"] == 11,
       (data["scanned"], data["guard"]["entries"]))
 
 hints = data["hints"]
-check("hints include user_instructions, edit_check, quota (with hook label), bypass_notice, objectivity, context_budget",
-      all(k in hints for k in ("user_instructions", "edit_check", "quota", "bypass_notice", "objectivity", "context_budget"))
+check("hints include legacy EPHEMERAL_MESSAGE + new SYSTEM_MESSAGE hints & orchestrator kinds",
+      all(k in hints for k in ("user_instructions", "edit_check", "quota", "bypass_notice", "objectivity",
+                                "context_budget", "orchestrator_handoff", "orchestrator_review"))
+      and hints["bypass_notice"]["fired"] == 2
       and "quota.py" in hints["quota"]["hook"]
       and hints["context_budget"]["models"].get("gemini-3.8-flash") == 1,
       hints)
+
+ui_n = data.get("ui_notices") or {}
+check("ui_notices tracks zero-token user_markdown banners cleanly",
+      ui_n.get("total") == 1 and ui_n.get("zero_token") == 1 and ui_n.get("by_kind") == {"quota": 1},
+      ui_n)
 
 stop_cats = data["stop"]["by_category"]
 check("Stop categories track acted vs re-ended + repeated/identical",
@@ -180,11 +201,18 @@ check("guard decisions classify ask, deny, logged (bypass) and match transcript 
       and guard["by_rule"]["curl-pipe-shell"]["outcomes"].get("ran") == 1
       and guard["by_rule"]["secret-read"]["decision"] == "deny"
       and guard["by_rule"]["secret-read"]["outcomes"].get("denied") == 2
+      and guard["by_rule"]["orchestrator-ban-in-plan"]["decision"] == "ask"
+      and guard["by_rule"]["orchestrator-unverified-plan"]["decision"] == "deny"
       and guard["by_rule"]["bypass:rm-dangerous"]["decision"] == "logged (bypass)"
       and guard["transcripts"]["denied_by_hook"] == 2
       and guard["transcripts"]["asks_then_ran"] == 1
       and guard["transcripts"]["prompts_timed_out"] == 1,
       guard)
+check("guard overwrites are classified «rewritten» — not asks, not denials",
+      guard["by_rule"]["overwrite:git-no-prompt"]["decision"] == "rewritten"
+      and guard["by_rule"]["overwrite:git-no-prompt"]["fired"] == 2
+      and guard["by_rule"]["overwrite:bypass-sandbox"]["decision"] == "rewritten",
+      guard["by_rule"])
 
 ec = data["edit_checks"]
 check("edit_checks parses errors_by_checker, old_lint_reports, fixed, and still_failing_by_checker",
@@ -199,6 +227,8 @@ check("candidates rank identical Stop repeat (score 5), repeated guard deny (sco
       and any(c["score"] == 3 and c["kind"] == "guard:secret-read" for c in cands)
       and any(c["score"] == 2 and c["kind"] == "guard:curl-pipe-shell" for c in cands),
       cands)
+check("guard overwrites never become false-positive candidates",
+      not any(str(c["kind"]).startswith("guard:overwrite:") for c in cands), cands)
 
 blob = r.stdout
 for secret in (SECRET_SK, SECRET_GH, SECRET_AWS, SECRET_JWT, SECRET_PASS, SECRET_URL_PASS,
@@ -230,6 +260,10 @@ check("insights.py Markdown renders all sections cleanly without secrets",
 
 sys.path.insert(0, os.path.dirname(SCRIPT))
 import insights as _insights_mod  # noqa: E402
+check("HINT_KINDS & DENY_RULES cover orchestrator entries (a banned plan step asks the user, so it is no denial)",
+      all(k in _insights_mod.HINT_KINDS for k in ("orchestrator_handoff", "orchestrator_review"))
+      and "orchestrator-unverified-plan" in _insights_mod.DENY_RULES
+      and "orchestrator-ban-in-plan" not in _insights_mod.DENY_RULES)
 check("_uri_to_path decodes percent-encoded file URIs and Windows drive paths",
       _insights_mod._uri_to_path("file:///Users/demo/My%20Repo") == "/Users/demo/My Repo"
       and _insights_mod._uri_to_path("file://localhost/Users/demo/Repo") == "/Users/demo/Repo"

@@ -7,7 +7,8 @@ PLUGIN, SP = sys.argv[1], sys.argv[2]
 HOOKS = os.path.join(PLUGIN, "hooks")
 STATE = os.path.join(PLUGIN, "skills", "git", "scripts", "git_state.py")
 sys.path.insert(0, HOOKS)
-import gitcheck, checks, conversation as conv
+import gitcheck, checks, compat, conversation as conv
+import guard as guard_mod
 ok = True
 def check(name, cond, got=""):
     global ok; ok &= bool(cond)
@@ -145,20 +146,188 @@ cases = {
 }
 wrong = [(c, w) for c, w in cases.items() if bool(gitcheck.interactive(c)) != w]
 check(f"{len(cases)} git/gh commands: the hanging ones caught, the rest left alone", not wrong, wrong)
-def guard(cmd):
-    p = {"toolCall": {"name": "run_command", "args": {"CommandLine": cmd}}, "workspacePaths": [repo]}
+def guard(cmd, extra=None):
+    p = {"toolCall": {"name": "run_command", "args": {"CommandLine": cmd}}, "workspacePaths": [repo], **(extra or {})}
     r = subprocess.run([sys.executable, os.path.join(HOOKS, "guard.py")], input=json.dumps(p), capture_output=True, text=True,
-                       encoding="utf-8", cwd=PLUGIN)
+                       encoding="utf-8", errors="replace", cwd=PLUGIN)
     return json.loads(r.stdout or "{}")
+ed_pfx = "$env:GIT_EDITOR='true'; " if compat.WINDOWS else "GIT_EDITOR=true "
+pr_pfx = "$env:GIT_TERMINAL_PROMPT='0'; " if compat.WINDOWS else "GIT_TERMINAL_PROMPT=0 "
 d = guard("git rebase --continue")
-check("guard: `git rebase --continue` refused with the form that works", d.get("decision") == "deny"
-      and "GIT_EDITOR=true git rebase --continue" in d.get("reason", ""), d)
+check("guard: `git rebase --continue` auto-fixed via overwrite", d.get("decision") == "allow"
+      and d.get("overwrite", {}).get("CommandLine") == ed_pfx + "git rebase --continue", d)
+dm = guard("git merge feat")
+check("guard: `git merge feat` auto-fixed with --no-edit", dm.get("decision") == "allow"
+      and dm.get("overwrite", {}).get("CommandLine") == "git merge --no-edit feat", dm)
+df = guard("git fetch origin")
+check("guard: `git fetch origin` auto-fixed with GIT_TERMINAL_PROMPT=0", df.get("decision") == "allow"
+      and df.get("overwrite", {}).get("CommandLine") == pr_pfx + "git fetch origin", df)
+dchain = guard("cd x && git fetch origin && git merge foo")
+want_chain = (  # PowerShell: `$env:X=…;` can't sit between && links without changing them — only --no-edit goes in
+    "cd x && git fetch origin && git merge --no-edit foo"
+    if compat.WINDOWS else "cd x && GIT_TERMINAL_PROMPT=0 git fetch origin && git merge --no-edit foo"
+)
+check("guard: multi-segment chain rewrites both fetch and merge", dchain.get("decision") == "allow"
+      and dchain.get("overwrite", {}).get("CommandLine") == want_chain, dchain)
+# PowerShell (Windows): a single & is the call operator, a backtick escapes quotes, and an env assignment is a statement
+# of its own — so rewrite only where `;` (or nothing) surrounds git, never wrap it in `& { … }`, else leave it alone
+was_windows = compat.WINDOWS
+compat.WINDOWS = True
+try:
+    ps_cases = {
+        "& git push": None,
+        '& "C:\\Program Files\\Git\\cmd\\git.exe" push origin main': None,
+        '"C:\\Git\\cmd\\git.exe" push': None,
+        "& git merge feature": None,
+        "git push &": None,
+        "git pull && npm test": None,
+        "git pull || git rebase --abort": None,
+        "git push 2>&1 | Select-String error": None,
+        "cd C:\\repo && git rebase --continue": None,
+        'git merge feature -m "a`"b"': None,
+        'git commit -m "x`"; git merge y"': None,
+        "git push": "$env:GIT_TERMINAL_PROMPT='0'; git push",
+        "cd C:\\repo; git pull": "cd C:\\repo; $env:GIT_TERMINAL_PROMPT='0'; git pull",
+        "git fetch --all; git status": "$env:GIT_TERMINAL_PROMPT='0'; git fetch --all; git status",
+        "git merge feature; git push": "git merge --no-edit feature; $env:GIT_TERMINAL_PROMPT='0'; git push",
+        "git rebase --continue": "$env:GIT_EDITOR='true'; git rebase --continue",
+        "git status && git merge feat": "git status && git merge --no-edit feat",
+    }
+    ps_got = {c: (gitcheck.rewrite(c) or (None, None))[1] for c in ps_cases}
+finally:
+    compat.WINDOWS = was_windows
+ps_wrong = {c: g for c, g in ps_got.items() if g != ps_cases[c]}
+check(f"rewrite (PowerShell): {len(ps_cases)} command lines — no `& {{ … }}` wrap, call operator and backticks left alone",
+      not ps_wrong, ps_wrong)
+drev_m = guard("git revert -m 1 abc123")
+check("guard: `git revert -m 1` still auto-fixes with --no-edit", drev_m.get("decision") == "allow"
+      and drev_m.get("overwrite", {}).get("CommandLine") == "git revert --no-edit -m 1 abc123", drev_m)
+check("guard: `git merge --no-edit feat` needs no overwrite", "overwrite" not in guard("git merge --no-edit feat"))
+check("guard: `git merge -m msg feat` needs no overwrite", "overwrite" not in guard("git merge -m msg feat"))
+check("guard: `git merge --abort` needs no overwrite", "overwrite" not in guard("git merge --abort"))
+check("guard: `git merge --squash feat` needs no overwrite", "overwrite" not in guard("git merge --squash feat"))
+check("guard: `git commit -F - <<'EOF'...` not rewritten", gitcheck.rewrite("git commit -F - <<'EOF'\nmerge foo\nEOF") is None)
+dforce = guard("git push --force origin main")
+check("guard: `git push --force` asks without overwrite", dforce.get("decision") == "force_ask" and "overwrite" not in dforce, dforce)
+turn(["git status"], "Ок.")
+dban_push = guard("git push origin main", {"conversationId": cid, "transcriptPath": tp, "lastUserInput": "ничего не пушь"})
+check("guard: banned `git push` asks without overwrite", dban_push.get("decision") == "force_ask" and "overwrite" not in dban_push, dban_push)
+check("guard: `git add -p` still denied", guard("git add -p").get("decision") == "deny")
 check("guard: `gh pr merge 7` gets the missing flag explained before anyone is asked", guard("gh pr merge 7").get("decision") == "deny")
-check("guard: `git status` passes", guard("git status").get("decision") == "allow", guard("git status"))
+check("guard: `git status` passes without overwrite", guard("git status") == {"decision": "allow"}, guard("git status"))
 settings = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-plus", "settings.json")
 with open(settings, "w", encoding="utf-8") as f:
     json.dump({"gitChecks": False}, f)
-check("guard: git-checks off → not refused", guard("git add -p").get("decision") != "deny", guard("git add -p"))
+check("guard: git-checks off → not refused and no overwrite",
+      guard("git add -p").get("decision") != "deny" and "overwrite" not in guard("git rebase --continue"),
+      guard("git rebase --continue"))
 os.remove(settings)
+
+# sidecar control-plane & scheduled-sidecar guards
+check("guard: curl to sidecar /api/toggle asks (agent-settings)",
+      guard('curl -s -X POST "http://localhost:8123/api/toggle"').get("decision") == "force_ask")
+check("guard: curl to sidecar /api/lsp/stop asks (agent-settings)",
+      guard("curl -s -X POST http://127.0.0.1:9000/api/lsp/stop").get("decision") == "force_ask")
+check("guard: a project's own localhost /api/settings is not the panel",
+      guard("curl -s http://localhost:3000/api/settings").get("decision") == "allow")
+check("guard: commit message mentioning sidecar URL is allowed",
+      guard("git commit -m 'fix localhost:8080/api/settings'").get("decision") == "allow")
+sidecar_p = os.path.expanduser("~/.gemini/jetski/sidecars/job.json")
+r_sc = subprocess.run([sys.executable, os.path.join(HOOKS, "guard.py")],
+                      input=json.dumps({"toolCall": {"name": "write_file", "args": {"Path": sidecar_p, "Content": "{}"}},
+                                        "workspacePaths": [repo]}),
+                      capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=PLUGIN)
+check("guard: write_file into ~/.gemini/jetski/sidecars asks (scheduled-sidecar)",
+      json.loads(r_sc.stdout or "{}").get("decision") == "force_ask", r_sc.stdout)
+check("guard: rm into ~/.gemini/jetski/sidecars asks",
+      guard("rm -f ~/.gemini/jetski/sidecars/job.json").get("decision") == "force_ask")
+check("guard: scheduled-sidecar is in SYSTEM_RULES", "scheduled-sidecar" in guard_mod.SYSTEM_RULES)
+check("guard: write into ~/.gemini/config/sidecars asks (Antigravity loads sidecars from there)",
+      guard_mod.analyze_path(os.path.expanduser("~/.gemini/config/sidecars/agp-nightly/sidecar.json"))[0] == "scheduled-sidecar")
+check("guard: tee into ~/.gemini/config/sidecars asks",
+      guard("tee ~/.gemini/config/sidecars/job/sidecar.json < x.json").get("decision") == "force_ask")
+check("guard: schedule_task.py create asks, quoted path too, even in Bypass Mode",
+      guard('python3 "/opt/agp x/skills/schedule-task/scripts/schedule_task.py" create --slug n --schedule "0 3 * * *"').get("decision") == "force_ask"
+      and guard_mod.analyze_command("python3 schedule_task.py remove agp-n", system_only=True)[0] == "scheduled-sidecar")
+check("guard: schedule_task.py list / gate pass",
+      guard("python3 skills/schedule-task/scripts/schedule_task.py list").get("decision") == "allow"
+      and guard_mod.analyze_command("python3 schedule_task.py gate --min 20") is None)
+check("guard: a commit message naming schedule_task.py create passes",
+      guard_mod.analyze_command('git commit -m "schedule_task.py create: fix args"') is None)
+check("guard: heredoc header trailing sudo rm caught",
+      guard("cat <<EOF && sudo rm -rf /\nok\nEOF").get("decision") == "force_ask")
+check("guard: heredoc header trailing git add -p denied",
+      guard("cat <<EOF && git add -p\nok\nEOF").get("decision") == "deny")
+check("guard: env -i rm -rf / caught", guard("env -i rm -rf /").get("decision") == "force_ask")
+check("guard: write_file .. traversal into agent-settings asks",
+      json.loads(subprocess.run(
+          [sys.executable, os.path.join(HOOKS, "guard.py")],
+          input=json.dumps({"toolCall": {"name": "write_file", "args": {"Path": os.path.expanduser("~/.gemini/x/../antigravity-plus/settings.json"), "Content": "{}"}}, "workspacePaths": [repo]}),
+          capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=PLUGIN,
+      ).stdout or "{}").get("decision") == "force_ask")
+check("guard: command substitution inside echo caught", guard("echo $(sudo rm -rf /)").get("decision") == "force_ask")
+check("guard: alternate loopback sidecar API caught", guard("curl -s http://0.0.0.0:8123/api//toggle").get("decision") == "force_ask")
+
+# AST-based read-only `ssh ... python3` inspection under push ban
+py_safe = [
+    "import json, os\nprint(json.dumps(os.listdir('/etc')))",
+    "import sqlite3\nc = sqlite3.connect('app.db')\nprint(c.execute('SELECT count(*) FROM users').fetchall())",
+    "from pathlib import Path\np = Path('/etc/hosts')\nwith p.open('r') as f:\n    print(len(f.read()))",
+    "with open('/etc/hostname', 'rb') as f:\n    print(f.read(32))",
+    "from urllib.request import Request, urlopen\nreq = Request('http://127.0.0.1:8080/health', method='GET')\nprint(len(set([1, 2])))",
+    "class Row:\n    name = 'ok'\nprint(getattr(Row(), 'name', None))",
+]
+py_unsafe = [
+    "",
+    "x = '" + ("a" * 20001) + "'",
+    "def broken(:",
+    "exec('print(1)')",
+    "eval('1+1')",
+    "import subprocess\nsubprocess.run(['ls'])",
+    "import shutil\nshutil.rmtree('/tmp/x')",
+    "import os\nos.remove('/tmp/x')",
+    "from os import unlink\nunlink('/tmp/x')",
+    "from pathlib import Path\nPath('/tmp/x').write_text('hi')",
+    "open('/tmp/x', 'w').write('hi')",
+    "m = 'r'\nopen('/tmp/x', m)",
+    "from pathlib import Path\nPath('/tmp/x').open('a')",
+    "import sqlite3\nc = sqlite3.connect('a.db')\nc.execute('DELETE FROM users')\nc.commit()",
+    "tbl = 'users'\nsql = f'UPDATE {tbl} SET role = 1'",
+    "import redis\nr = redis.Redis()\nr.set('k', 'v')",
+    "from urllib.request import Request\nRequest('http://x', data=b'1')",
+    "from urllib.request import Request\nRequest('http://x', method='POST')",
+    "from urllib.request import urlopen\nurlopen('http://x', b'1')",
+    "import os\ngetattr(os, 'system')('id')",
+    "fn = open\nfn('/tmp/x', 'w')",
+    "setattr(object, 'x', 1)",
+    "import os\nvars(os)['system']('id')",
+    "from io import open as o\no('/tmp/x', 'w')",
+    "import sqlite3\nc = sqlite3.connect('a.db')\nc.execute(f\"{'DROP'} TABLE users\")",
+    "import os\nos.open('/tmp/x', os.O_WRONLY)",
+    "import socket\nf = socket.socket().makefile('w')\nprint('hi', file=f)",
+]
+bad_safe = [s[:50] for s in py_safe if not guard_mod.readonly_python_code(s)]
+bad_unsafe = [s[:50] for s in py_unsafe if guard_mod.readonly_python_code(s)]
+check("readonly_python_code accepts safe inspection scripts", not bad_safe, str(bad_safe))
+check("readonly_python_code rejects mutations, dangerous imports, writes, SQL/HTTP mutations", not bad_unsafe, str(bad_unsafe))
+
+turn(["git status"], "Ок.")
+ssh_ro_heredoc = "ssh web1 'python3 -' <<'EOF'\nimport json, os\nprint(json.dumps(os.listdir('/app')))\nEOF"
+ssh_ro_cd = "ssh web1 'cd /app && python3.12 -' <<'EOF'\nimport sqlite3\nc=sqlite3.connect('db.sqlite')\nprint(c.execute('SELECT 1').fetchone())\nEOF"
+ssh_ro_inline = r'''ssh web1 "python3 -c 'import os; print(len(os.listdir(\"/app\")))'"'''
+ssh_ro_inline2 = "ssh web1 'python3 -c \"import json, os; print(json.dumps(os.listdir()))\"'"
+ssh_rw_heredoc = "ssh web1 'python3 -' <<'EOF'\nimport os\nos.remove('/tmp/x')\nEOF"
+ssh_rw_shell = "ssh web1 'rm -rf /tmp/x && python3 -' <<'EOF'\nprint(1)\nEOF"
+ssh_rw_inline = r'''ssh web1 "python3 -c 'import subprocess; subprocess.run([\"ls\"])'"'''
+ssh_rw_sql = "ssh web1 'python3 -' <<'EOF'\nimport sqlite3\nc=sqlite3.connect('db.sqlite')\nc.execute('DROP TABLE users')\nEOF"
+ban_extra = {"conversationId": cid, "transcriptPath": tp, "lastUserInput": "ничего не пушь"}
+check("push ban: read-only ssh python3 heredoc allowed", guard(ssh_ro_heredoc, ban_extra).get("decision") == "allow", str(guard(ssh_ro_heredoc, ban_extra)))
+check("push ban: cd + read-only ssh python3.12 heredoc allowed", guard(ssh_ro_cd, ban_extra).get("decision") == "allow", str(guard(ssh_ro_cd, ban_extra)))
+check("push ban: read-only ssh python3 -c (double-quoted) allowed", guard(ssh_ro_inline, ban_extra).get("decision") == "allow", str(guard(ssh_ro_inline, ban_extra)))
+check("push ban: read-only ssh python3 -c (single-quoted) allowed", guard(ssh_ro_inline2, ban_extra).get("decision") == "allow", str(guard(ssh_ro_inline2, ban_extra)))
+check("push ban: ssh python3 writing file triggers user-said-no-push", guard(ssh_rw_heredoc, ban_extra).get("decision") == "force_ask")
+check("push ban: ssh rm + python3 triggers user-said-no-push", guard(ssh_rw_shell, ban_extra).get("decision") == "force_ask")
+check("push ban: ssh python3 -c subprocess triggers user-said-no-push", guard(ssh_rw_inline, ban_extra).get("decision") == "force_ask")
+check("push ban: ssh python3 DROP TABLE triggers user-said-no-push", guard(ssh_rw_sql, ban_extra).get("decision") == "force_ask")
 print("ALL OK" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

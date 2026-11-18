@@ -245,5 +245,31 @@ if hasattr(os, "symlink"):
     except OSError:
         pass
 
+# 5. New SYSTEM_MESSAGE PreInvocation hints & zero-token user_markdown steps
+sys_dir = os.path.join(SP, "sys_logs")
+os.makedirs(sys_dir, exist_ok=True)
+tf_sys = os.path.join(sys_dir, "transcript_full.jsonl")
+with open(tf_sys, "w", encoding="utf-8") as f:
+    for st in [
+        {"step_index": 0, "type": "USER_INPUT", "content": "Hello"},
+        {"step_index": 1, "type": "SYSTEM_MESSAGE", "content": "",
+         "metadata": {"user_markdown": "📦 **Доступно обновление Antigravity Plus** — `/update`"}},
+        {"step_index": 2, "type": "SYSTEM_MESSAGE", "content": "<SYSTEM_MESSAGE>\n</SYSTEM_MESSAGE>",
+         "metadata": {"user_markdown": "🔴 **Квота на исходе**"}},
+        {"step_index": 3, "type": "SYSTEM_MESSAGE",
+         "content": '<SYSTEM_MESSAGE>\n<user_instructions source="Antigravity Plus">Remember rule X.</user_instructions>\n</SYSTEM_MESSAGE>'},
+        {"step_index": 4, "type": "SYSTEM_MESSAGE",
+         "content": "The user turned Bypass Mode ON (message 1)."},
+    ]:
+        f.write(json.dumps(st, ensure_ascii=False) + "\n")
+r_sys = subprocess.run([sys.executable, script, "--transcript", tf_sys, "--json"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+d_sys = json.loads(r_sys.stdout)
+sys_cats = {c["key"]: c["tokens"] for c in d_sys["categories"]}
+check("SYSTEM_MESSAGE PreInvocation hints counted under hooks & zero-token user_markdown skipped",
+      "hooks:<user_instructions>" in sys_cats and "hooks:bypass_notice" in sys_cats
+      and "system_msg" not in sys_cats,
+      sys_cats)
+
 print("ALL OK" if ok else "FAILURES")
 sys.exit(0 if ok else 1)
