@@ -9,7 +9,7 @@ description: >-
 
 # /usage — token & cost report
 
-> **On your own:** in a long conversation, check the context fill (`usage.py --conversation <id>`, read only the summary). Say nothing unless it's above ~70% (or ~170k+ on Gemini, where Antigravity's limit is ~300k and compaction triggers around ~250k); then tell the user in one line and suggest /handoff.
+> **On your own:** in a long conversation, check the context fill (`usage.py --conversation <id>`, read only the summary). Say nothing unless it's above ~70% (on the Gemini 4 family Antigravity's limit is ~560k and compaction triggers around ~505k; on older Gemini ~300k / ~250k); then tell the user in one line and suggest /handoff.
 
 The script [usage.py](scripts/usage.py) reads Antigravity transcripts (each model call records
 `input_tokens`, `cache_read_tokens`, `output_tokens`) and prices them with [pricing.json](pricing.json).

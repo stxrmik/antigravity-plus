@@ -8,6 +8,8 @@ Stops and asks the user (decision "force_ask", which ignores cached "always allo
     git clean -f, force-push, --no-verify, DROP/TRUNCATE via a DB client, mkfs/dd to a device,
     curl | sh, sudo, terraform destroy, kubectl delete, npm publish, gh pr merge, keychain/SSH-key reads,
     changes to system folders (/System, /usr, /etc, /Library, C:\Windows…) by rm/mv/cp/chmod/tee/sed -i/redirection…
+    — what runs on a server or in a container (`ssh host "sudo cp -a /etc/nginx /root/backup/"`, `docker exec …`)
+    is checked without the stops that only protect this computer (LOCAL_RULES: its system folders, admin rights…);
   * write_file / edit_file: writes into .git/ internals, shell startup files, SSH keys, LaunchAgents, /etc and other
     system folders, and into what decides what the agent may do: Antigravity's settings and projects, MCP servers,
     installed plugins (this guard among them), Antigravity Plus's own settings — by file tools or by commands; also
@@ -237,6 +239,14 @@ SYSTEM_RULES = {"disk-format", "disk-format-win", "system-power", "system-power-
                 "sudo", "run-as-admin", "autostart", "kill-all", "fork-bomb", "secrets-read", "agent-tools",
                 "protection-off", "claude-permissions", "rm-dangerous", "system-files", "protected-file",
                 "agent-settings", "scheduled-sidecar"}
+# The stops that protect only this computer — its system folders and startup files, admin rights, OS settings, the
+# agent's own permissions. Text that runs on another machine or inside a container (runs_elsewhere: `ssh host "sudo
+# mkdir -p /root/backup"`, `docker exec app sh -c '…'`) is checked without them; wiping / or ~, disks, power,
+# kill -9 -1, fork bombs, reading private keys and every project-level rule still apply to it. Of check_writes' stops
+# only the recursive chmod/chown of / or a top-level folder stays there.
+LOCAL_RULES = {"system-files", "protected-file", "sudo", "run-as-admin", "autostart", "security-off",
+               "security-off-win", "agent-settings", "agent-tools", "protection-off", "claude-permissions",
+               "scheduled-sidecar"}
 
 # Programs whose arguments are just text (a commit message or a search pattern can mention `rm -rf /`).
 TEXT_PROGRAMS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "git-grep", ":", "true", "test", "["}
@@ -841,12 +851,15 @@ def changed_paths(segment: str, known: Optional[Dict[str, str]] = None) -> Tuple
     return ([expand_path(p, known) for p in paths if p and p != "-"], [expand_path(p, known) for p in deep])
 
 
-def check_writes(segment: str, known: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str]]:
+def check_writes(segment: str, known: Optional[Dict[str, str]] = None,
+                 remote: bool = False) -> Optional[Tuple[str, str]]:
     """A command that changes the agent's own permissions ("agent-settings"), files that start programs or hold keys —
-    shell startup files, SSH keys, LaunchAgents ("protected-file") — or the system's own folders ("system-files")."""
+    shell startup files, SSH keys, LaunchAgents ("protected-file") — or the system's own folders ("system-files").
+    remote (run on another machine or in a container): those are not this computer's files, so only a recursive
+    chmod/chown of / or a top-level folder stops — it breaks any machine."""
     paths, deep = changed_paths(segment, known)
     perms_only = program(segment).lower() in RECURSIVE_OWNERS | {"chattr"}  # chmod 600 ~/.ssh/id_x is a fix, not a risk
-    for p in paths:
+    for p in [] if remote else paths:
         if AGENT_CONTROL.search(p) or AGENT_CONTROL_DIR.search(p):
             return "agent-settings", (f"команда меняет `{p}`: эти файлы решают, что агенту разрешено (разрешения "
                                       "Antigravity, MCP-серверы, плагины, настройки Antigravity Plus).")
@@ -856,8 +869,8 @@ def check_writes(segment: str, known: Optional[Dict[str, str]] = None) -> Option
             return "protected-file", f"команда меняет служебный файл `{p}` (автозапуск, SSH-ключи, профиль оболочки, /etc)."
         if SYSTEM_DIR.search(p):
             return "system-files", f"команда меняет системные файлы: `{p}`."
-    for p in deep:
-        if p in ("/", "/*") or TOP_LEVEL.match(p) or p.rstrip("/*") == HOME.rstrip("/"):
+    for p in deep:  # ~ became this computer's home folder (expand_path): remote, it is the server's, not this one
+        if p in ("/", "/*") or TOP_LEVEL.match(p) or not remote and p.rstrip("/*") == HOME.rstrip("/"):
             return "system-files", f"команда рекурсивно меняет права или владельца всего `{p}`."
     return None
 
@@ -958,18 +971,55 @@ def command_strings(seg: str) -> List[str]:
     return [s for s in dict.fromkeys(found) if s.strip()]
 
 
+# Programs with "ssh" in the name that run what they are given here, not on a server.
+SSH_LOCAL_TOOLS = {"ssh-agent", "ssh-add", "ssh-keygen", "ssh-keyscan", "ssh-copy-id", "sshd", "sshfs"}
+CONTAINER_CLIS = {"docker", "podman", "kubectl", "docker-compose"}
+# Their options before the subcommand that take a value (`kubectl -n prod exec …`, `docker compose -f x.yml exec`).
+CONTAINER_VALUE_OPTS = {"-c", "--context", "-H", "--host", "-l", "--log-level", "--config", "--connection", "--url",
+                        "--identity", "-n", "--namespace", "--kubeconfig", "--cluster", "--user", "-s", "--server",
+                        "--token", "--as", "-v", "-f", "--file", "-p", "--project-name", "--project-directory",
+                        "--env-file", "--profile"}
+
+
+def runs_elsewhere(seg: str) -> bool:
+    """Does this command run its command text on another machine — ssh, sshpass, a wrapper script named after ssh
+    (`./deploy/ssh.sh "…"`), also under `timeout 30 …` — or inside a container (`docker exec`, `docker compose
+    exec`, `podman exec`, `kubectl exec`)? Not `docker run`: its volumes can reach this computer."""
+    tokens = strip_prefixes(tokenize(seg))
+    if tokens and os.path.basename(tokens[0]) in ("timeout", "gtimeout"):  # timeout [-s SIG] [-k T] 30 ssh …
+        i = 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            i += 2 if tokens[i] in ("-s", "--signal", "-k", "--kill-after") else 1
+        tokens = tokens[i + 1:]  # `timeout 30 sudo ssh …` stays local: its sudo runs here
+    prog = re.sub(r"\.exe$", "", os.path.basename(tokens[0]).lower()) if tokens else ""
+    if "ssh" in prog:
+        return prog not in SSH_LOCAL_TOOLS
+    if prog not in CONTAINER_CLIS:
+        return False
+    words, i = [], 1  # the subcommand, past the options before it
+    while i < len(tokens) and len(words) < 2:
+        t = tokens[i]
+        i += 2 if t in CONTAINER_VALUE_OPTS else 1
+        if not t.startswith("-"):
+            words.append(t)
+    return words[:1] == ["exec"] or prog in ("docker", "podman") and words in (["compose", "exec"],
+                                                                              ["container", "exec"])
+
+
 def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
-                    known: Optional[Dict[str, str]] = None) -> Optional[Tuple[str, str]]:
+                    known: Optional[Dict[str, str]] = None, remote: bool = False) -> Optional[Tuple[str, str]]:
     """The command's first stop as (rule id, reason), or None. system_only (Bypass Mode): only the stops that hold
     there (SYSTEM_RULES), looked for in the whole command — past any project-level match. known: what the command
-    around this one set (its variables and current folder: `cd / && bash -c 'rm -rf *'`, `x=$(rm -rf $S/y)`)."""
+    around this one set (its variables and current folder: `cd / && bash -c 'rm -rf *'`, `x=$(rm -rf $S/y)`).
+    remote: the text runs on another machine or in a container (runs_elsewhere) — without the stops that only protect
+    this computer (LOCAL_RULES), down into its own quoted strings, $(…) and heredocs."""
     if not cmd or not cmd.strip() or depth > 2:
         return None
-    keep = (lambda rid: rid in SYSTEM_RULES) if system_only else (lambda rid: True)  # noqa: E731
+    keep = lambda rid: (not system_only or rid in SYSTEM_RULES) and not (remote and rid in LOCAL_RULES)  # noqa: E731
     if compat.WINDOWS:  # PowerShell/cmd: backslashes are path separators, also inside quotes
         cmd = cmd.replace("\\", "/")
     cmd = re.sub(r"\\\r?\n", " ", cmd)
-    if SELF_SWITCH.search(cmd):
+    if keep("agent-settings") and SELF_SWITCH.search(cmd):
         return "agent-settings", SELF_SWITCH_REASON
     cmd, heredocs = split_heredocs(cmd)
     # Quoted text is data (commit messages, search patterns) unless it is handed to an interpreter.
@@ -983,13 +1033,13 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
     deeper = depth < 2  # what a segment runs inside — $(…), a quoted command string — is analysed on its own
     for seg in split_unquoted(cmd):
         for sub in _substitutions(seg):  # a subshell of this shell: the same variables and folder
-            hit = analyze_command(sub, depth + 1, system_only, known)
+            hit = analyze_command(sub, depth + 1, system_only, known, remote)
             if hit:
                 return hit
         note_assignments(seg, known)
         prog = program(seg)
         if prog in TEXT_PROGRAMS:  # its arguments are text, but `echo … >> ~/.zshrc` still writes a file
-            w = check_writes(seg, known)
+            w = check_writes(seg, known, remote)
             if w:
                 return w
             continue
@@ -1011,21 +1061,22 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
             return "agent-settings", SIDECAR_API_REASON
         if keep("scheduled-sidecar") and schedule_change(seg):
             return "scheduled-sidecar", SCHEDULE_REASON
-        w = check_writes(seg, known)
+        w = check_writes(seg, known, remote)
         if w:
             return w
         if code and deeper:  # the quoted text is a command, run from this folder (its variables are not passed on)
             cwd = {"__cwd__": known["__cwd__"]} if "__cwd__" in known else None
+            elsewhere = remote or runs_elsewhere(seg)  # `ssh host "…"`, `docker exec app sh -c '…'`
             for line in command_strings(seg):
-                hit = analyze_command(line, depth + 1, system_only, cwd)
+                hit = analyze_command(line, depth + 1, system_only, cwd, elsewhere)
                 if hit:
                     return hit
     for owner, body in heredocs:  # bodies fed to a shell or a DB client are code
         prog = program(owner)
         if keep("sql-destructive") and prog in SQL_PROGRAMS and SQL_DESTRUCTIVE.search(body):
             return "sql-destructive", SQL_REASON
-        if prog in SHELLS:
-            hit = analyze_command(body, depth + 1, system_only)
+        if prog in SHELLS:  # `ssh host <<'EOF'` runs its body on the server
+            hit = analyze_command(body, depth + 1, system_only, remote=remote or runs_elsewhere(owner))
             if hit:
                 return hit
     return None
@@ -1601,16 +1652,77 @@ SECRET_HINT = ("Чтобы секрет не попал в разговор (е�
                "файл у себя.")
 
 
+ENV_DUMPS = (["env"], ["printenv"], ["set"], ["export"], ["export", "-p"], ["declare", "-x"])
+# `${VAR:+word}` and `${VAR+word}` print word only when VAR is set (word may name a variable of its own: `${A:+$B}`),
+# `${#VAR}` prints its length: none of them prints VAR's value.
+VALUE_FREE = re.compile(r"\$\{(?:#\w+|\w+:?\+([^{}]*(?:\{[^{}]*\}[^{}]*)*))\}")
+
+
+def _value_free(seg: str) -> str:
+    """The segment with the expansions that never print a variable's value taken out (VALUE_FREE), innermost first."""
+    while True:
+        out = VALUE_FREE.sub(lambda m: m.group(1) or "", seg)
+        if out == seg:
+            return out
+        seg = out
+
+
+def names_only(stage: str) -> bool:
+    """Does this pipeline stage keep only the names of the `NAME=value` lines it reads: `cut -d= -f1`, `awk -F=
+    '{print $1}'`, `sed 's/=.*//'` (or `s/=.*/=***/`)? Any other option, field or file — it may print values."""
+    tokens = tokenize(stage)
+    prog, args = (os.path.basename(tokens[0]).lower(), tokens[1:]) if tokens else ("", [])
+    opts: Dict[str, str] = {}
+    script: List[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if prog in ("cut", "gcut") and a in ("-s", "--only-delimited"):
+            i += 1
+            continue
+        if prog in ("cut", "gcut") and a in ("-d", "-f", "--delimiter", "--fields") and i + 1 < len(args):
+            opts[a.lstrip("-")[0]], i = args[i + 1], i + 2
+        elif prog in ("cut", "gcut") and a.startswith(("--delimiter=", "--fields=")):
+            opts[a[2]], i = a.split("=", 1)[1], i + 1
+        elif prog in ("cut", "gcut") and a.startswith(("-d", "-f")):  # -d= -f1: the value right after the letter
+            opts[a[1]], i = a[2:], i + 1
+        elif prog in ("awk", "gawk", "mawk", "nawk") and a == "-F" and i + 1 < len(args):
+            opts["d"], i = args[i + 1], i + 2
+        elif prog in ("awk", "gawk", "mawk", "nawk") and a.startswith("-F"):
+            opts["d"], i = a[2:], i + 1
+        elif prog in ("sed", "gsed") and a in ("-E", "-r", "--regexp-extended"):
+            i += 1
+        elif prog in ("sed", "gsed") and a in ("-e", "--expression") and i + 1 < len(args):
+            script, i = script + [args[i + 1]], i + 2
+        elif prog in ("awk", "gawk", "mawk", "nawk", "sed", "gsed") and not a.startswith("-") and not script:
+            script, i = [a], i + 1
+        else:
+            return False
+    if prog in ("cut", "gcut"):
+        return opts.get("d") == "=" and opts.get("f") == "1"
+    if prog in ("awk", "gawk", "mawk", "nawk"):
+        return opts.get("d") == "=" and bool(re.fullmatch(r"\{\s*print\s+\$1\s*;?\s*\}", "".join(script)))
+    return prog in ("sed", "gsed") and len(script) == 1 \
+        and bool(re.fullmatch(r"s(.)=\.\*\$?\1(?:(?!\1)[^&\\])*\1g?", script[0]))  # no & or \1: no value comes back
+
+
 def secret_print(cmd: str) -> Optional[Tuple[str, str]]:
-    """A command that would print secrets: cat .env, a private key, the whole environment, echo $TOKEN."""
-    for seg in split_unquoted(re.sub(r"\\\r?\n", " ", cmd.replace("\\", "/") if compat.WINDOWS else cmd)):
+    """A command that would print secrets: cat .env, a private key, the whole environment (not when piped straight
+    into a filter that keeps only the names: names_only), echo $TOKEN (not `${TOKEN:+set}`: _value_free)."""
+    text = re.sub(r"\\\r?\n", " ", cmd.replace("\\", "/") if compat.WINDOWS else cmd)
+    parts = [(s.strip(), op) for s, op in _split(text)]  # each simple command with the operator after it
+    for k, (seg, op) in enumerate(parts):
+        if not seg:
+            continue
         raw = [t for t in tokenize(seg) if t not in ("sudo", "command", "builtin")]
         low = [t.lower() for t in raw]
-        if raw in (["env"], ["printenv"], ["set"], ["export"], ["export", "-p"], ["declare", "-x"]) \
+        names = op in ("|", "|&") and k + 1 < len(parts) and names_only(parts[k + 1][0])  # printenv | cut -d= -f1
+        if raw in ENV_DUMPS and not names \
                 or (len(low) == 2 and low[0] in ENV_LISTERS and low[1].rstrip("/*") in ("env:", "env:\\")) \
                 or "[environment]::getenvironmentvariables" in seg.lower():
             return "secret-print", ("команда выведет все переменные окружения, а среди них бывают токены и пароли. "
-                                    "Нужна одна переменная — `printenv NAME`; проверить, что она задана — `test -n \"$NAME\"`.")
+                                    "Нужна одна переменная — `printenv NAME`; проверить, что она задана — "
+                                    "`test -n \"$NAME\"`; только имена — `printenv | cut -d= -f1`.")
         tokens = strip_prefixes(tokenize(seg))
         if not tokens:
             continue
@@ -1618,10 +1730,10 @@ def secret_print(cmd: str) -> Optional[Tuple[str, str]]:
         files = [t for t in tokens[1:] if not t.startswith("-") and SECRET_FILE.search(t)]
         if prog in PRINTERS and files:
             return "secret-print", f"команда выведет секреты из {files[0]}. " + SECRET_HINT.format(f=files[0])
-        if (prog in ("echo", "printf", "write-output", "write-host") and SECRET_VAR.search(seg)) \
+        if (prog in ("echo", "printf", "write-output", "write-host") and SECRET_VAR.search(_value_free(seg))) \
                 or re.fullmatch(r"\s*\$env:\w*(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|ACCESS_?KEY)\w*\s*", seg, I):
             return "secret-print", ("команда выведет значение секретной переменной. Проверить, что оно задано: "
-                                    "`test -n \"$NAME\" && echo задано`.")
+                                    "`test -n \"$NAME\" && echo задано` (или `${NAME:+задано}`).")
     return None
 
 

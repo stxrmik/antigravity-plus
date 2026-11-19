@@ -214,6 +214,9 @@ def _drop_registry(hooks: str, ws: str) -> None:
         for p in (reg, reg + ".lock"):
             if os.path.exists(p):
                 os.remove(p)
+        snaps = getattr(coord, "SNAP_DIR", "")  # the file snapshots the self-test's reads left (coord.py, 0.26.0+)
+        if snaps:
+            shutil.rmtree(os.path.join(snaps, coord.slug(os.path.realpath(ws))), ignore_errors=True)
         shutil.rmtree(ws, ignore_errors=True)
     except Exception:
         pass

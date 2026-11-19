@@ -62,5 +62,7 @@ Every payload also has `conversationId`, `workspacePaths`, `transcriptPath`, `la
 - **Protect files** (PreToolUse on `write_file|edit_file`): for paths matching `migrations/` or `*.lock`, print
   `{"decision": "deny", "reason": "<why and what to do instead>"}`; otherwise `{"decision": "allow"}`.
 - **A reminder before each step** (PreInvocation): print `{"injectSteps": [{"systemMessage": {"systemMessage": "…"}}]}`
-  (replaces deprecated `ephemeralMessage`). Keep `systemMessage` short because the model reads it on every call; to
+  (replaces deprecated `ephemeralMessage`, which Antigravity now converts into one). A `systemMessage` stays in the
+  conversation for good (until compaction) and the model re-reads it on every later call, so inject only when
+  something changed and keep it short; to
   show a user-only UI badge at 0 model tokens, set `"systemMessage": ""` and `"metadata": {"user_markdown": "…"}`.

@@ -12,7 +12,7 @@ description: >-
 
 > **On your own:** read-only — run it when `<context_budget>` warns (around ~150k or ~220k tokens) so you act on what actually fills the context instead of guessing.
 
-The script [context.py](scripts/context.py) reads the conversation's transcript since the last compaction (`CHECKPOINT`), counts only live hook hints (ephemeral messages last one step), calibrates estimates against the last `PLANNER_RESPONSE` token count (`input_tokens + cache_read_tokens`), and breaks everything down by category.
+The script [context.py](scripts/context.py) reads the conversation's transcript since the last compaction (`CHECKPOINT`), counts hook hints the way Antigravity keeps them (since 2.32 every injected systemMessage stays until the next compaction; old ephemeral messages lasted one step), calibrates estimates against the last `PLANNER_RESPONSE` token count (`input_tokens + cache_read_tokens`), and breaks everything down by category.
 
 ## Steps
 

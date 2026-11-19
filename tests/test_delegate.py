@@ -5,9 +5,11 @@ from the statusLine, unknown), measured speed, a new Antigravity project for an 
 files, commands, cost, the agent's words), an approval the task waits for, a timeout, a follow-up, diff, cancel,
 list, errors — talking while it works (the agent's ask / tell, in a command's output or in the message of a command
 that went to the background; wait → exit 4 on a question; watch for the Monitor tool; reply; send to a running
-task) — how the plugin's hooks treat a delegated conversation (no nudges while it waits for Claude Code's answer,
-the guard lets the talk commands through and nothing else), and the usage panel naming its model and task."""
-import http.server, json, os, pathlib, shutil, subprocess, sys, threading, time
+task) — a task that ended its turn while a build it started still runs in the background (result, list, watch and
+wait don't call it finished; the record follows), Gemini 4 Neon and Orchestrator (Neon) in the tiers, quota groups
+and reports — how the plugin's hooks treat a delegated conversation (no nudges while it waits for Claude Code's
+answer, the guard lets the talk commands through and nothing else), and the usage panel naming its model and task."""
+import http.server, json, os, pathlib, re, shutil, subprocess, sys, threading, time
 PLUGIN, SP = sys.argv[1], sys.argv[2]
 ROOT = os.path.dirname(PLUGIN)
 DELEGATE = os.path.join(ROOT, "claude-code", "skills", "antigravity", "scripts", "delegate.py")
@@ -29,6 +31,7 @@ subprocess.run(["git", "commit", "-qm", "init"], cwd=ws)
 uri = lambda p: pathlib.Path(p).as_uri()
 EMPTY = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
 C1, C2, C3, C4, C5, C6, C7, C8, C9 = (c * 8 + "-aaaa-4bbb-8ccc-" + c * 12 for c in "abcdef789")
+CB, CN, CX = (c * 8 + "-aaaa-4bbb-8ccc-" + c * 12 for c in "123")  # a background build, Orchestrator (Neon), Neon
 SENT = os.path.join(SP, "agentapi-calls.jsonl")
 
 def step(kind, **kw):
@@ -85,6 +88,17 @@ BASE[C8] = BASE[C4][:]  # like C4: a record that once stepped over the question 
 BASE[C9] = [step("USER_INPUT"), step("PLANNER_RESPONSE", plannerResponse={"response": ""}), step("SYSTEM_MESSAGE"),
             step("PLANNER_RESPONSE", plannerResponse={"response": ""}),
             step("PLANNER_RESPONSE", plannerResponse={"response": "STATUS: done\nCHANGED: src.py — d = 5\nCHECKS: none\nNOTES: none"})]
+BASE[CN] = BASE[C9][:-1] + [step("PLANNER_RESPONSE", plannerResponse={"response": "STATUS: done\nCHANGED: src.py — e = 6\nCHECKS: none\nNOTES: none"})]
+# seen live: a long build went to the background and the agent ended its turn to wait for it — the summary says IDLE,
+# but WaitForConversationFullyIdle blocks while the build runs; when it is over, the agent goes on and reports
+BUILD, WAITING = "xcodebuild -scheme Demo build", "Waiting for the background build (task-219) to finish."
+BASE[CB] = [step("USER_INPUT"), step("PLANNER_RESPONSE", plannerResponse={"response": ""}),
+            step("RUN_COMMAND", runCommand={"commandLine": BUILD, "combinedOutput": {"full": "Running in the background as task-219."}}),
+            step("PLANNER_RESPONSE", plannerResponse={"response": WAITING})]
+BUILT = [step("SYSTEM_MESSAGE", systemMessage={"agentMessage": {"sender": CB + "/task-219", "content":
+             f'Task id "{CB}/task-219" finished with result:\nCommand exited with code 0.\n\nCommand output:\n** BUILD SUCCEEDED **\n'}}),
+         step("PLANNER_RESPONSE", plannerResponse={"response": f"STATUS: done\nCHANGED: nothing\nCHECKS: {BUILD} → BUILD SUCCEEDED\nNOTES: none"})]
+background = {CB}  # conversations whose background work still runs
 cancelled = set()
 
 def messaged(cid):
@@ -96,30 +110,37 @@ def messaged(cid):
 def steps_of(cid):
     if cid == C7:
         return c7_steps()
+    if cid == CB:
+        return BASE[CB] + ([] if CB in background else BUILT)
     return BASE.get(cid, []) + (FOLLOW if cid == C1 and messaged(C1) else ANSWERED if cid == C4 and messaged(C4) else [])
 def status_of(cid):
     if cid == C7:
         return "CASCADE_RUN_STATUS_IDLE" if len(c7_steps()) == 5 else "CASCADE_RUN_STATUS_RUNNING"
-    return "CASCADE_RUN_STATUS_IDLE" if cid in (C1, C4, C8, C9) or cid in cancelled else "CASCADE_RUN_STATUS_RUNNING"
+    return "CASCADE_RUN_STATUS_IDLE" if cid in (C1, C4, C8, C9, CB, CN) or cid in cancelled else "CASCADE_RUN_STATUS_RUNNING"
 
 iso = lambda secs: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + secs))
 # what the fake plan has left: weekly fraction (None = used up) and seconds until the week resets, per group
 QUOTA = {"gemini": [0.9, 6 * 86400], "claude": [None, 22 * 3600]}
-MODELS = [("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)", "M437"), ("gemini-4-carbon-high", "Gemini 4 Carbon (High)", "M427"),
+MODEL_LEFT = {}  # model id → its own fraction left instead of its group's (None = used up)
+# in Antigravity's order (2.32, 2026-11-19): Gemini 4 Neon first — Neon (High) is the default — and Orchestrator (Neon)
+# before Orchestrator (Carbon)
+MODELS = [("gemini-4-neon-high", "Gemini 4 Neon (High)", "M532"), ("gemini-4-neon-xhigh", "Gemini 4 Neon (XHigh)", "M535"),
+          ("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)", "M437"), ("gemini-4-carbon-high", "Gemini 4 Carbon (High)", "M427"),
           ("gemini-4-hydrogen-low", "Gemini 4 Hydrogen (Low)", "M527"), ("gemini-4-hydrogen-medium", "Gemini 4 Hydrogen (Medium)", "M526"),
           ("gemini-4-hydrogen-high", "Gemini 4 Hydrogen (High)", "M525"), ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)", "M319"),
           ("claude-sonnet-5-5-medium", "Claude Sonnet 5.5 (Medium)", "M404"), ("claude-sonnet-5-5-high", "Claude Sonnet 5.5 (High)", "M405"),
-          ("gemini-pro-orchestrator", "Orchestrator (Carbon)", "M667")]
+          ("gemini-pro-orchestrator-neon", "Orchestrator (Neon)", "M537"), ("gemini-pro-orchestrator", "Orchestrator (Carbon)", "M667")]
 
 def answer(method, body):
     if method == "GetCascadeModelConfigData":
         def cfg(mid, label, enum):
             left, secs = QUOTA["claude" if mid.startswith("claude") else "gemini"]
+            left = MODEL_LEFT.get(mid, left)
             q = {"resetTime": iso(secs)}
             if left:  # proto3 JSON leaves a 0 out: no remainingFraction means used up
                 q["remainingFraction"] = left
             return {"modelId": mid, "label": label, "modelOrAlias": {"model": enum}, "quotaInfo": q}
-        return {"clientModelConfigs": [cfg(*m) for m in MODELS], "defaultOverrideModelConfig": {"modelOrAlias": {"model": "M437"}}}
+        return {"clientModelConfigs": [cfg(*m) for m in MODELS], "defaultOverrideModelConfig": {"modelOrAlias": {"model": "M532"}}}
     if method == "RetrieveUserQuotaSummary":
         def bucket(key):
             left, secs = QUOTA[key]
@@ -131,8 +152,9 @@ def answer(method, body):
                 five["disabled"] = True
             return [weekly, five]
         return {"response": {"groups": [
-            {"displayName": "Gemini Models", "description": "Models within this group: Gemini 4 Carbon, Gemini 4 Hydrogen, "
-                                                            "Orchestrator (Carbon), Gemini 3.8 Flash",
+            {"displayName": "Gemini Models", "description": "Models within this group: Gemini 4 Neon, Gemini 4 Carbon, "
+                                                            "Gemini 4 Argon, Gemini 4 Hydrogen, Orchestrator (Neon), "
+                                                            "Orchestrator (Carbon), Orchestrator (Argon), Gemini 3.8 Flash",
              "buckets": bucket("gemini")},
             {"displayName": "Claude and GPT models", "description": "Models within this group: Claude Sonnet 5.5, Claude Opus 5.5",
              "buckets": bucket("claude")}]}}
@@ -144,7 +166,9 @@ def answer(method, body):
                                             "createdTime": "2026-11-14T10:00:00Z", "lastModifiedTime": "2026-11-14T10:02:05Z",
                                             "latestExecutorTerminationReason": "EXECUTOR_TERMINATION_REASON_NO_TOOL_CALL"} for c in BASE}}
     if method == "WaitForConversationFullyIdle":
-        if status_of(body.get("conversationId")) != "CASCADE_RUN_STATUS_IDLE":
+        if body.get("conversationId") in background:
+            time.sleep(3)  # idle, but its background work goes on: longer than any client waits (IDLE_PROBE, POLL)
+        elif status_of(body.get("conversationId")) != "CASCADE_RUN_STATUS_IDLE":
             time.sleep(2)  # longer than the client waits
         return {}
     if method == "GetCascadeTrajectorySteps":
@@ -161,9 +185,12 @@ def answer(method, body):
         if body.get("cascadeId") == C6:  # a conversation some other tool started through agentapi
             return {"generatorMetadata": [{"stepIndices": [1], "chatModel": {"modelDisplayName": "Gemini 4 Argon (High)",
                                                                               "responseModel": "gemini-4-argon"}}]}
-        if body.get("cascadeId") == C9:  # Orchestrator, as Antigravity 2.32 records it: the planner, then Hydrogen
-            plan = {"modelDisplayName": "Orchestrator (Carbon)", "responseModel": "gemini-pro-orchestrator",
-                    "timeToFirstToken": "8s", "streamingDuration": "2s"}
+        # Orchestrator, as Antigravity 2.32 records it: the planner, then Hydrogen (assumed the same for Orchestrator
+        # (Neon) — not seen live yet)
+        planner = {C9: ("Orchestrator (Carbon)", "gemini-pro-orchestrator"),
+                   CN: ("Orchestrator (Neon)", "gemini-pro-orchestrator-neon")}.get(body.get("cascadeId"))
+        if planner:
+            plan = {"modelDisplayName": planner[0], "responseModel": planner[1], "timeToFirstToken": "8s", "streamingDuration": "2s"}
             work = {"modelDisplayName": "Gemini 4 Hydrogen (Orchestrator)", "responseModel": "gemini-flash-worker-agy",
                     "timeToFirstToken": "2s", "streamingDuration": "1s"}
             return {"generatorMetadata": [
@@ -224,7 +251,8 @@ open(fake, "w", encoding="utf-8").write(
     "    print(json.dumps({'response': {'sendMessage': {'recipientId': sys.argv[2]}}}))\n")
 ENV = dict(os.environ, ANTIGRAVITY_LS_ADDRESS=f"127.0.0.1:{server.server_address[1]}", ANTIGRAVITY_CSRF_TOKEN="tok",
            AGP_DELEGATE_AGENTAPI=json.dumps([sys.executable, fake]), AGP_DELEGATE_POLL="0.3",
-           AGP_DELEGATE_IDLE_GRACE="1", AGP_DELEGATE_NO_LAUNCH="1", AGP_DELEGATE_WATCH_POLL="0.3")
+           AGP_DELEGATE_IDLE_GRACE="1", AGP_DELEGATE_NO_LAUNCH="1", AGP_DELEGATE_WATCH_POLL="0.3",
+           AGP_DELEGATE_IDLE_PROBE="1")
 def run(*args, cwd=ws, env=None, stdin=None):
     r = subprocess.run([sys.executable, DELEGATE, *args], cwd=cwd, env=dict(ENV, **(env or {})), input=stdin,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
@@ -234,24 +262,53 @@ def agentapi_calls():
         return [json.loads(l) for l in open(SENT, encoding="utf-8")]
     except OSError:
         return []
+def record_of(cid):
+    return json.load(open(os.path.join(HOME, ".gemini", "antigravity-plus", "delegate", cid + ".json"), encoding="utf-8"))
+def line_of(out, start):  # the first line of `out` that starts (after its indent) with `start`
+    return next((ln for ln in out.splitlines() if ln.lstrip().startswith(start)), "")
+def list_state(out, cid):  # a task's state in `delegate.py list`
+    words = next((ln.split() for ln in out.splitlines() if ln.strip().startswith(cid[:8])), [])
+    return words[1] if len(words) > 1 else ""
+def price_in(line):  # «$2/$10 per 1M» in a line of `delegate.py models`, or ""
+    m = re.search(r"\$[\d.]+/\$[\d.]+ per 1M", line)
+    return m.group(0) if m else ""
 
 # models: quota and tiers — fast and standard on Gemini 4 Hydrogen, strong on Orchestrator (Carbon); the Claude tier
 # falls back to Gemini while its quota is used up; speeds measured from the conversations' own timings
 code, out = run("models")
-check("models: quota per group and the tiers", code == 0 and "«Gemini Models»: week 90% left" in out
+check("models: quota per group and the tiers — strong on Orchestrator (Carbon) though Antigravity lists Neon first",
+      code == 0 and "«Gemini Models»: week 90% left" in out
       and "fast      gemini-4-hydrogen-low" in out and "standard  gemini-4-hydrogen-high" in out
-      and "strong    gemini-pro-orchestrator" in out and "first choice of fast" in out, out)
+      and line_of(out, "strong ").split()[1:4] == ["gemini-pro-orchestrator", "Orchestrator", "(Carbon)"]
+      and "first choice of fast" in out and "first choice of strong" in out, out)
 check("models: the Claude tier falls back to a Gemini model with quota left", "claude    gemini-4-carbon-high" in out
       and "Claude Sonnet 5.5 (High): quota used up — resets in 22 h → next with quota left" in out
       and "«Claude and GPT models»: used up — resets in 22 h → unavailable" in out, out)
 check("models: speed measured from recent conversations",
-      f"Gemini 4 Hydrogen (High) · ≈2.0 s per call ({2 * len([c for c in BASE if c != C9])} calls)" in out, out)
-orch_line = next((ln for ln in out.splitlines() if ln.lstrip().startswith("gemini-pro-orchestrator")), "")
+      f"Gemini 4 Hydrogen (High) · ≈2.0 s per call ({2 * len([c for c in BASE if c not in (C9, CN)])} calls)" in out, out)
+orch_line = line_of(out, "gemini-pro-orchestrator ")
 check("models: Orchestrator's price is its planner's, its speed counts the Hydrogen calls that carry out the plan",
-      "Orchestrator (Carbon)" in orch_line and "$2/$10 per 1M · ≈3.0 s per call (3 calls)" in orch_line, orch_line)
+      "Orchestrator (Carbon)" in orch_line and "≈3.0 s per call (3 calls)" in orch_line
+      and price_in(orch_line) == price_in(line_of(out, "gemini-4-carbon-high ")) != "", orch_line)
+neon_line = line_of(out, "gemini-pro-orchestrator-neon ")
+check("models: … the same for Orchestrator (Neon)", "Orchestrator (Neon)" in neon_line and "≈3.0 s per call (3 calls)" in neon_line
+      and price_in(neon_line) == price_in(line_of(out, "gemini-4-neon-high ")) != "", neon_line)
+check("models: Gemini 4 Neon (High) is Antigravity's default", "Antigravity's default" in line_of(out, "gemini-4-neon-high ")
+      and "Antigravity's default" not in line_of(out, "gemini-4-carbon-medium "), out)
 code, out = run("models", "--json")
 check("models --json", code == 0 and json.loads(out)["tiers"]["claude"] == "gemini-4-carbon-high"
-      and json.loads(out)["states"]["Gemini Models"]["status"] == "ok", out)
+      and json.loads(out)["states"]["Gemini Models"]["status"] == "ok" and json.loads(out)["default"] == "gemini-4-neon-high", out)
+# Gemini 4 Neon in strong: Orchestrator (Carbon) first, then Orchestrator (Neon), then Neon (High) — before Carbon (High)
+MODEL_LEFT["gemini-pro-orchestrator"] = None
+code, out = run("budget")
+check("strong: Orchestrator (Carbon) used up → Orchestrator (Neon)",
+      line_of(out, "strong ").split()[1:4] == ["gemini-pro-orchestrator-neon", "Orchestrator", "(Neon)"]
+      and "Orchestrator (Carbon): quota used up — resets in" in out and "→ next with quota left" in out, out)
+MODEL_LEFT["gemini-pro-orchestrator-neon"] = None
+code, out = run("models", "--json")
+check("strong: both Orchestrators used up → Gemini 4 Neon (High), ahead of Carbon (High)",
+      json.loads(out)["tiers"]["strong"] == "gemini-4-neon-high", out)
+MODEL_LEFT.clear()
 
 # run: a folder Antigravity doesn't know gets a project; the brief goes in with the run rules; the report
 code, out = run("run", "--model", "standard", "--title", "Fix b", stdin="Goal: set b to 3.\nDone: tests pass.\n",
@@ -292,6 +349,25 @@ check("run --model orchestrator: Orchestrator (Carbon), its id to agentapi",
 check("report: the calls split between the planner and Hydrogen, and the weekly Gemini limit",
       "Model: Orchestrator (Carbon) · 3 model calls (1 on Orchestrator (Carbon), 2 on Gemini 4 Hydrogen (Orchestrator))" in out
       and "weekly «Gemini Models» limit 90.0% → 90.0% left" in out, out)
+# Orchestrator (Neon) just the same — and a task that finished before anyone waited: list, result and watch say done
+code, out = run("run", "--model", "orchestrator neon", "--no-wait", "--title", "Add e", "Goal: e = 6.", env={"FAKE_CID": CN})
+check("run --model \"orchestrator neon\": Orchestrator (Neon), its id to agentapi",
+      code == 0 and f"Started Antigravity task {CN} — Orchestrator (Neon)" in out
+      and agentapi_calls()[-1]["argv"][1] == "--model=gemini-pro-orchestrator-neon", out)
+code, out = run("list")
+check("list: a task that finished meanwhile is done (idle, nothing left in the background), and its record follows",
+      code == 0 and list_state(out, CN) == "done" and record_of(CN)["state"] == "done", out)
+code, out = run("result", CN[:8])
+check("result: Orchestrator (Neon)'s calls split between the planner and Hydrogen, and the weekly Gemini limit",
+      code == 0 and f"✅ Antigravity finished task {CN}" in out
+      and "Model: Orchestrator (Neon) · 3 model calls (1 on Orchestrator (Neon), 2 on Gemini 4 Hydrogen (Orchestrator))" in out
+      and "weekly «Gemini Models» limit 90.0% → 90.0% left" in out and "CHANGED: src.py — e = 6" in out, out)
+code, out = run("watch", CN[:8], "--timeout", "5")
+check("watch: … finished", code == 0 and "finished (STATUS: done)" in out, out)
+code, out = run("run", "--model", "gemini-4-neon-xhigh", "--no-wait", "Tidy the docs.", env={"FAKE_CID": CX})
+check("run --model gemini-4-neon-xhigh: that exact model", code == 0
+      and f"Started Antigravity task {CX} — Gemini 4 Neon (XHigh)" in out and "Why this model: your choice" in out
+      and agentapi_calls()[-1]["argv"][1] == "--model=gemini-4-neon-xhigh", out)
 
 # an exhausted model gives way within its tier; an approval in Antigravity stops the wait with exit 2
 code, out = run("run", "--model", "claude-sonnet-5-5-high", "Write the docs.", env={"FAKE_CID": C2})
@@ -329,6 +405,13 @@ code, out = run("cancel", C3[:8])
 check("cancel a running task", code == 0 and f"Stopped Antigravity task {C3}" in out, out)
 code, out = run("cancel", C1[:8])
 check("cancel an idle one", code == 0 and "wasn't running" in out, out)
+code, out = run("send", C3[:8], "Also cover the empty input.", "--no-wait")  # idle until it picks the follow-up up
+check("send to a stopped task: a follow-up", code == 0 and "Sent the follow-up" in out, out)
+code, out = run("list")
+check("list: idle, but it hasn't picked up Claude Code's message yet → running, not done", list_state(out, C3) == "running", out)
+code, out = run("result", C3[:8])
+check("result: … still running (exit 3)", code == 3 and f"Antigravity task {C3} is still running" in out
+      and "finished" not in out, out)
 
 # talking while it works — the agent's side: ask / tell only print a JSON line for Claude Code's side
 code, out = run("ask", "Keep the old name?", cwd=SP)
@@ -420,6 +503,37 @@ check("result: one last look over the whole turn finds a question the cursor wen
 code, out = run("watch", C8[:8], "--timeout", "2")
 check("watch: … and doesn't call such a task finished", "finished" not in out and code == 3, out)
 
+# seen live: it ended its turn to wait for a long build it sent to the background — the summary says IDLE, but the
+# build still runs (WaitForConversationFullyIdle blocks), and the agent goes on when it is over: not finished yet
+SESSION2 = {"CLAUDE_CODE_SESSION_ID": "sess-test-2"}
+code, out = run("run", "--model", "fast", "--no-wait", "Build the app.", env=dict(SESSION2, FAKE_CID=CB))
+code, out = run("result", CB[:8])
+check("result: idle while its background build runs → it ended its turn, wait for the rest", code == 0
+      and f"Antigravity task {CB} ended its turn in 2 min; something it started still runs there" in out
+      and "Antigravity finished task" not in out and WAITING in out
+      and f"wait for the rest → delegate.py wait {CB[:8]}" in out, out)
+check("result: … and its record says background", record_of(CB).get("state") == "background", record_of(CB))
+code, out = run("list")
+check("list: background, not done", code == 0 and list_state(out, CB) == "background", out)
+code, out = run("list", env={"ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:9"})
+check("list without the language server: the records answer", code == 0
+      and list_state(out, CB) == "background", out)
+code, out = run("watch", "--timeout", "2", env=SESSION2)
+check("watch (this session's tasks, a background one among them): keeps watching while the build runs", code == 3
+      and "finished" not in out and f"Still running: {CB[:8]}" in out, out)
+code, out = run("wait", CB[:8], "--timeout", "20")
+check("wait: «background» after its grace time, as before", code == 0
+      and f"Antigravity task {CB} ended its turn" in out and record_of(CB).get("state") == "background", out)
+background.discard(CB)  # the build is over: the agent got its result, went on and reported
+code, out = run("list")
+check("list: done once nothing it started runs any more, and the record follows", list_state(out, CB) == "done"
+      and record_of(CB).get("state") == "done", out)
+code, out = run("result", CB[:8])
+check("result: finished, with the report it wrote after the build", code == 0
+      and f"✅ Antigravity finished task {CB} in 2 min" in out and "BUILD SUCCEEDED" in out and WAITING not in out, out)
+code, out = run("watch", CB[:8], "--timeout", "5")
+check("watch: finished", code == 0 and "finished (STATUS: done)" in out, out)
+
 # errors
 code, out = run("run", "--model", "gpt-9", "x", env={"FAKE_CID": C1})
 check("unknown model → exit 1 with the choices", code == 1 and "unknown model 'gpt-9'" in out and "gemini-4-carbon-high" in out, out)
@@ -492,6 +606,36 @@ import conversation as conv
 sys.path.insert(0, os.path.dirname(DELEGATE))
 import delegate
 check("the mark is the same on both sides", delegate.MARK == conv.DELEGATED_MARK)
+
+# Gemini 4 Neon: its quota group by family, Orchestrator (Neon)'s by its whole label; the picks when Antigravity has
+# renamed its models; a few words name the right model; a price change applies from its day on
+LIVE = delegate.LS(ENV["ANTIGRAVITY_LS_ADDRESS"], "tok")
+groups = delegate.quota(LIVE)
+gname = lambda label: (delegate.group_of(label, groups) or {}).get("name")
+check("group_of: Gemini 4 Neon and Orchestrator (Neon) draw on «Gemini Models», nothing near them does by mistake",
+      gname("Gemini 4 Neon (High)") == gname("Gemini 4 Neon (XHigh)") == gname("Orchestrator (Neon)") == "Gemini Models"
+      and gname("Orchestrator (Carbon)") == "Gemini Models" and gname("Claude Sonnet 5.5 (High)") == "Claude and GPT models"
+      and gname("Orchestrator (Xenon)") is None and gname("Gemini 4 Neonite (High)") is None
+      and gname("Orchestrator") is None, groups)
+renamed = [{"id": f"m-{i}", "label": label, "left": 0.5, "reset": "", "enum": "", "tag": "", "note": ""} for i, label in
+           enumerate(["Gemini 4 Neon (XHigh)", "Gemini 4 Neon (High)", "Gemini 4 Carbon (High)", "Orchestrator (Neon)",
+                      "Gemini 4 Hydrogen (High)", "Orchestrator (Carbon)"])]
+got = [m["label"] for m in delegate.generic("strong", renamed, "")]
+check("generic (ids renamed): strong takes Orchestrator (Carbon), Orchestrator (Neon), Neon (High), Carbon (High), "
+      "then the other (High)", got == ["Orchestrator (Carbon)", "Orchestrator (Neon)", "Gemini 4 Neon (High)",
+                                       "Gemini 4 Carbon (High)", "Gemini 4 Hydrogen (High)"], got)
+ms, default = delegate.models(LIVE)
+pick_id = lambda words, order=ms: (delegate.fuzzy(words, order) or {}).get("id")
+check("a few words: «orchestrator» is Orchestrator (Carbon) though Antigravity lists Orchestrator (Neon) first; "
+      "«neon high» isn't XHigh in either order", pick_id("orchestrator") == "gemini-pro-orchestrator"
+      and pick_id("orchestrator neon") == "gemini-pro-orchestrator-neon" and pick_id("neon high") == "gemini-4-neon-high"
+      and pick_id("neon high", ms[::-1]) == "gemini-4-neon-high" and pick_id("neon xhigh", ms[::-1]) == "gemini-4-neon-xhigh"
+      and pick_id("carbon high") == "gemini-4-carbon-high" and pick_id("xenon") is None and default == "gemini-4-neon-high")
+table = [{"match": "carbon", "input": 2, "output": 10, "price_changes": [{"from": "2027-01-01", "input": 5, "output": 25},
+                                                                          {"from": "2026-12-01", "input": 4, "output": 20}]}]
+got = [delegate.price("Gemini 4 Carbon (High)", table, day) for day in ("2026-11-30", "2026-12-01", "2027-02-01")]
+check("price: the price changes dated on or before the day apply, in date order",
+      got == ["$2/$10 per 1M", "$4/$20 per 1M", "$5/$25 per 1M"] and delegate.price("Gemini 4 Neon (High)", table) == "", got)
 brief = delegate.compose("Goal: x", ws, ws)
 check("delegated(): the bridge's brief", conv.delegated({"users": [{"text": brief}]}))
 check("delegated(): a person who wrote into it took it over",
@@ -610,9 +754,12 @@ brain(C1, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "c
                          "content=" + delegate.FOLLOW_UP.format(message="Also set c to 4.") + "\n</SYSTEM_MESSAGE>"},
            call_row(3)])
 d = usage_json(C1)
+PRICES = json.load(open(os.path.join(PLUGIN, "skills", "usage", "pricing.json"), encoding="utf-8"))
+window = lambda mid: next((m.get("context_window") for m in PRICES["models"] if m["id"] == mid), None)
 check("usage: a delegated task gets the model it ran on (from the bridge's record), not the default",
-      d.get("models") == [rec1["label"]] and d.get("model_guessed_calls") == 0
-      and (d.get("context") or {}).get("model") == rec1["label"] and (d.get("context") or {}).get("window") == 300000, d)
+      d.get("models") == [rec1["label"]] and d.get("model_guessed_calls") == 0 and rec1["label"] == "Gemini 4 Carbon (High)"
+      and (d.get("context") or {}).get("model") == rec1["label"]
+      and (d.get("context") or {}).get("window") == window("gemini-4-carbon") != window(PRICES["default_model"]), d)
 check("usage: its title is the task, not the run rules; a follow-up is a turn of its own",
       d.get("title") == rec1["title"] and [t["text"] for t in d.get("turns", [])] == [rec1["title"], "Claude Code: Also set c to 4."], d)
 brain(C6, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-15T10:00:00Z",

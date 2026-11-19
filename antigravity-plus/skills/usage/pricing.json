@@ -1,11 +1,11 @@
 {
-  "_note": "USD per 1M tokens. Prices change — verify on https://www.anthropic.com/pricing and https://ai.google.dev/gemini-api/docs/pricing and edit this file. 'match' is a case-insensitive regex tested against the normalized model name; first match wins, so keep specific patterns (e.g. flash-lite) above generic ones. 'context_window' is the effective conversation token limit in Antigravity (~300k for Gemini, ~168k for Flash-Lite subagents, whose native Gemini API window 'api_context_window' is 1M), and 'compaction_threshold' is where Antigravity auto-compacts the history (~250k for Gemini, ~128k for Flash-Lite, ~840k for Claude 5.5). 'price_changes' entries ({from: 'YYYY-MM-DD', …prices}) apply to calls made on or after that local date. 'service_tiers' (Gemini API batch / flex / priority / contributor) are used only with usage.py --tier; a tier replaces the standard prices together with their price_changes and long_context. Orchestrator (Carbon / Argon) — a planner that hands its plan to Gemini 4 Hydrogen to carry out — matches its planner's entry; usage.py prices the calls Hydrogen made (Antigravity's metadata names them «Gemini 4 Hydrogen (Orchestrator)»; without it, the plan-mode markers in the transcript tell them apart) at Hydrogen's prices.",
-  "_updated": "2026-11-17",
+  "_note": "USD per 1M tokens. Prices change — verify on https://www.anthropic.com/pricing and https://ai.google.dev/gemini-api/docs/pricing and edit this file. 'match' is a case-insensitive regex tested against the normalized model name; first match wins, so keep specific patterns (e.g. flash-lite) above generic ones. 'context_window' is the effective conversation token limit in Antigravity (~560k for the Gemini 4 family — Antigravity reports maxContextTokens 512000 for them since 2026-11-17 and compacted real conversations at 509k–553k; ~300k for older Gemini, ~168k for Flash-Lite subagents; the native Gemini API window is 'api_context_window'), and 'compaction_threshold' is where Antigravity auto-compacts the history (~505k for Gemini 4, ~250k for older Gemini, ~128k for Flash-Lite, ~840k for Claude 5.5). 'price_changes' entries ({from: 'YYYY-MM-DD', …prices}) apply to calls made on or after that local date. 'service_tiers' (Gemini API batch / flex / priority / contributor) are used only with usage.py --tier; a tier replaces the standard prices together with their price_changes and long_context. Orchestrator (Carbon / Argon / Neon) — a planner that hands its plan to Gemini 4 Hydrogen to carry out — matches its planner's entry; usage.py prices the calls Hydrogen made (Antigravity's metadata names them «Gemini 4 Hydrogen (Orchestrator)»; without it, the plan-mode markers in the transcript tell them apart) at Hydrogen's prices.",
+  "_updated": "2026-11-19",
   "default_model": "claude-opus-5.5",
   "default_context_window": 200000,
   "subagent_model_aliases": {
     "flash_lite": "gemini-3.5-flash-lite",
-    "flash": "gemini-3.8-flash",
+    "flash": "gemini-4-hydrogen",
     "pro": "gemini-4-argon"
   },
   "models": [
@@ -61,13 +61,27 @@
       "context_window": 200000
     },
     {
+      "id": "gemini-4-neon",
+      "label": "Gemini 4 Neon",
+      "match": "gemini[- ]?4[- ]?neon|orchestrator.*neon",
+      "input": 3.0, "output": 15.0, "cache_read": 0.15, "cache_write": 3.0,
+      "context_window": 560000,
+      "compaction_threshold": 505000,
+      "api_context_window": 1048576,
+      "service_tiers": {
+        "batch": {"input": 1.5, "output": 7.5, "cache_read": 0.075, "cache_write": 1.5},
+        "flex": {"input": 1.5, "output": 7.5, "cache_read": 0.075, "cache_write": 1.5},
+        "priority": {"input": 5.4, "output": 27.0, "cache_read": 0.27, "cache_write": 5.4}
+      }
+    },
+    {
       "id": "gemini-4-carbon",
       "label": "Gemini 4 Carbon",
-      "match": "gemini[- ]?4[- ]?carbon|orchestrator(?!.*argon)",
+      "match": "gemini[- ]?4[- ]?carbon|orchestrator(?!.*(argon|neon))",
       "input": 2.0, "output": 10.0, "cache_read": 0.10, "cache_write": 2.0,
       "price_changes": [{"from": "2026-12-01", "input": 4.0, "output": 20.0, "cache_read": 0.20, "cache_write": 4.0}],
-      "context_window": 300000,
-      "compaction_threshold": 250000,
+      "context_window": 560000,
+      "compaction_threshold": 505000,
       "api_context_window": 1000000,
       "service_tiers": {
         "batch": {
@@ -90,8 +104,8 @@
       "match": "gemini[- ]?4[- ]?argon|orchestrator.*argon",
       "input": 2.0, "output": 10.0, "cache_read": 0.10, "cache_write": 2.0,
       "price_changes": [{"from": "2026-12-01", "input": 4.0, "output": 20.0, "cache_read": 0.20, "cache_write": 4.0}],
-      "context_window": 300000,
-      "compaction_threshold": 250000,
+      "context_window": 560000,
+      "compaction_threshold": 505000,
       "api_context_window": 1000000,
       "service_tiers": {
         "batch": {
@@ -112,10 +126,10 @@
     {
       "id": "gemini-4-hydrogen",
       "label": "Gemini 4 Hydrogen",
-      "match": "gemini[- ]?4[- ]?hydrogen",
+      "match": "gemini[- ]?4[- ]?hydrogen|gemini[- ]flash[- ]worker",
       "input": 1.50, "output": 7.50, "cache_read": 0.075, "cache_write": 1.50,
-      "context_window": 300000,
-      "compaction_threshold": 250000,
+      "context_window": 560000,
+      "compaction_threshold": 505000,
       "api_context_window": 1000000,
       "service_tiers": {
         "batch": {"input": 0.75, "output": 3.75, "cache_read": 0.0375, "cache_write": 0.75},

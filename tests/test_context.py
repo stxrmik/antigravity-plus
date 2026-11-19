@@ -178,7 +178,7 @@ check("top items limited to 10, sorted descending, exclude fixed rules/system, e
       and any("main_module.py" in t["label"] for t in top_items),
       top_items[:5])
 check("model window & compaction loaded from pricing.json",
-      data["model"] == "Gemini 4 Carbon (High)" and data["window"] == 300_000 and data["compaction"] == 250_000,
+      data["model"] == "Gemini 4 Carbon (High)" and data["window"] == 560_000 and data["compaction"] == 505_000,  # 512k since 2026-11-17
       (data["model"], data["window"], data["compaction"]))
 check("tips mention whole-file read and repeated read of main_module.py",
       any("main_module.py" in t and "раз" in t for t in data["tips"])

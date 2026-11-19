@@ -1,6 +1,6 @@
 """Facts: claims in the final report against what happened, file and line references, links from nowhere, versions
 and prices recalled from memory, the <grounding> hint before a question, and the guard refusing fake checks."""
-import json, os, shutil, subprocess, sys, time
+import json, os, re, shutil, subprocess, sys, time
 PLUGIN, SP = sys.argv[1], sys.argv[2]; HOOKS = os.path.join(PLUGIN, "hooks")
 sys.path.insert(0, HOOKS); import conversation as conv, facts
 MEMORY = os.path.join(PLUGIN, "skills", "memory", "scripts", "memory.py")
@@ -57,10 +57,14 @@ def cmd(line, code=0, output="ok"):
     add("GENERIC", content=f"Created At: {iso()}\nCommand exited with code {code}.\n\nCommand output:\n{output}\n")
 
 
-def bg_cmd(line, task, result):
+def bg_start(line, task):
     add("PLANNER_RESPONSE", calls=[("run_command", {"CommandLine": line})])
     add("GENERIC", content=f"Created At: {iso()}\nTool is running as a background task with task id: {cid}/{task}\n"
                            f"Task Description: {line}\n")
+
+
+def bg_cmd(line, task, result):
+    bg_start(line, task)
     add("SYSTEM_MESSAGE", content=f"<SYSTEM_MESSAGE>\n[Message] timestamp={iso()} sender={cid}/{task} "
                                   f"content=Task id \"{cid}/{task}\" finished with result:\n{result}\n</SYSTEM_MESSAGE>")
 
@@ -79,14 +83,26 @@ def answer(text):
     add("PLANNER_RESPONSE", content=text)
 
 
-def stop(execution=0):
-    p = {"conversationId": cid, "transcriptPath": tp, "artifactDirectoryPath": art, "workspacePaths": [WS],
+def stop(execution=0, roots=None):
+    p = {"conversationId": cid, "transcriptPath": tp, "artifactDirectoryPath": art, "workspacePaths": roots or [WS],
          "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": execution}
     out = subprocess.run([sys.executable, os.path.join(HOOKS, "stop.py")], input=json.dumps(p),
                          capture_output=True, text=True, encoding="utf-8")
     d = json.loads(out.stdout or "{}")
     reason = d.get("reason") or "" if d.get("decision") == "continue" else ""
     return (reason if "facts" in reason else ""), out.stderr.strip()
+
+
+def direct(roots=None):
+    """The facts check alone, in this process: no other end-of-turn reminder can come before it and hide what it finds."""
+    p = {"conversationId": cid, "transcriptPath": tp, "artifactDirectoryPath": art, "workspacePaths": roots or [WS]}
+    return facts.problems(p, {"users": []}, rows[-1].get("content", ""), re.compile(r"\bpytest\b"), (".py",), (".html",))
+
+
+def clean(roots=None):
+    """Neither the Stop hook nor the facts check itself has anything to say about the report: (ok, what was said)."""
+    found, reason = direct(roots), stop(roots=roots)[0]
+    return not found and not reason, (found, reason)
 
 
 def pre():
@@ -157,6 +173,99 @@ start("ran")
 cmd("docker compose --profile test run --rm test", output="building…")
 answer("Запустил прогон тестов в Docker, жду завершения.")
 check("«запустил тесты» only needs the command to have run", not stop()[0])
+
+# A test run is a command that runs tests, not one that only names them (seen live: a passing run, then `ls tests/`
+# and `rg … tests/…` became «the latest test runs» and the report «44 of 44 passed» was sent back).
+start("bg-then-look")
+edit(os.path.join(WS, "app", "sort.py"))
+bg_cmd("python3 tests/run_tests.py 2>&1 | tail -50", "task-51",
+       "Command exited with code 0.\n\nCommand output:\nPASS  test_sort  (1.1 s)\nPASS  test_replay  (0.4 s)\n\n44 of 44 passed")
+cmd("ls tests/", output="run_tests.py\ntest_replay.py\ntest_sort.py")
+cmd('rg -n "def replay" tests/test_replay.py', output="12:def replay(rows):")
+cmd('rg -n "replay" tests/run_tests.py', output="30:    names = [n for n in names if n != 'replay']")
+answer("Готово: `python3 tests/run_tests.py` completed (44 of 44 passed).")
+good, said = clean()
+check("a passing background run, then `ls tests/` and `rg … tests/…` → the run still backs «44 of 44 passed»", good, said)
+
+start("pytest-then-read")
+edit(os.path.join(WS, "app", "sort.py"))
+cmd("python3 -m pytest -q", output="........\n45 passed, 1 warning in 1.46s")
+for line in ("cat tests/test_sort.py", 'grep -rn "def test_" tests/', "git diff --stat -- tests/",
+             "sed -n '1,20p' tests/conftest.py", "find tests -name '*.py' | wc -l", "head -5 tests/test_sort.py"):
+    cmd(line, output="tests/test_sort.py:3:def test_sort():\n 1 file changed, 3 insertions(+)")
+answer("Сортировка починена, тесты проходят: 45 passed.")
+good, said = clean()
+check("pytest «45 passed», then cat/grep/git diff/sed/find/head on tests/ → still backed", good, said)
+
+start("later-runs")
+edit(os.path.join(WS, "app", "sort.py"))
+cmd("python3 -m pytest -q", output="45 passed in 1.2s")
+for _ in range(4):
+    cmd("python3 -m py_compile tests/test_sort.py", output="")
+answer("Тесты проходят (45 passed).")
+good, said = clean()
+check("later runs that print no test count don't hide the run the «45 passed» is about", good, said)
+
+start("newer-count")
+edit(os.path.join(WS, "app", "sort.py"))
+cmd("python3 -m pytest -q", output="29 passed in 0.4s")
+cmd("python3 -m pytest -q -k sort", output="27 passed, 2 deselected in 0.4s")
+answer("Тесты прошли (29 passed).")
+good, said = clean()
+check("the whole set after the change, then a smaller run (one suite) → the whole set still backs «29 passed»",
+      good, said)
+
+start("count-before-change")
+cmd("python3 -m pytest -q", output="29 passed in 0.4s")
+edit(os.path.join(WS, "app", "sort.py"))
+cmd("python3 -m pytest -q", output="27 passed in 0.4s")
+answer("Тесты прошли (29 passed).")
+reason = stop()[0]
+check("…but a number shown only before the last change → sent back with the newest count",
+      "doesn't show 29" in reason and "27 passed" in reason, reason)
+
+start("test-log")
+edit(os.path.join(WS, "app", "sort.py"))
+cmd("python3 -m pytest -q > /tmp/sort-run.out 2>&1; echo $?", output="0")
+cmd("tail -3 /tmp/sort-run.out", output="45 passed in 1.2s")
+answer("Тесты прошли: 45 passed.")
+good, said = clean()
+check("a test run into a file, then `tail` of that file → the count is read there", good, said)
+
+start("cd-run")
+edit(os.path.join(WS, "app", "sort.py"))
+cmd("cd tests && ./run_all.sh", output="12 passed")
+cmd("bash -lc 'ls tests/'", output="run_all.sh")
+answer("Тесты проходят (12 passed).")
+good, said = clean()
+check("`cd tests && ./run_all.sh` is a test run; `bash -lc 'ls tests/'` isn't", good, said)
+
+start("only-looked")
+edit(os.path.join(WS, "app", "sort.py"))
+cmd("ls tests/ && cat tests/test_sort.py", output="test_sort.py\ndef test_sort(): ...")
+cmd('grep -rn "passed" tests/', output='tests/test_sort.py:9:    assert "29 passed"')
+answer("Готово, тесты проходят.")
+reason = stop()[0]
+check("only `ls`/`cat`/`grep` on tests/ after the change → no test run", "no test run after your last change" in reason, reason)
+
+start("still-running")  # the Stop hook waits for the agent's own background commands first (parallel hints)
+edit(os.path.join(WS, "app", "sort.py"))
+bg_start("python3 -m pytest -q", "task-8")
+cmd("ls tests/", output="test_sort.py")
+answer("Тесты прошли.")
+reason = "\n".join(direct())
+config("parallel-hints", "off")
+check("a claim while the test run is still going (an `ls tests/` after it doesn't count) → sent back",
+      "still running" in reason and "still running" in stop()[0], reason)
+config("parallel-hints", "on")
+
+start("build-then-ls")
+edit(os.path.join(WS, "app", "sort.py"))
+cmd("npm run build", code=1, output="src/sort.ts(3,1): error TS2304: Cannot find name 'x'.")
+cmd("ls build/ && cat build.log", output="index.js")
+answer("Сборка проходит.")
+reason = stop()[0]
+check("a failed build, then `ls build/` → the build failed, not «passes»", "failed" in reason and "npm run build" in reason, reason)
 
 start("deploy")
 answer("Задеплоил панель на сервер, всё обновлено.")
@@ -248,6 +357,50 @@ with open(os.path.join(art, "walkthrough.md"), "w", encoding="utf-8") as f:
 start("refs-artifact")
 answer("Подробности — в [walkthrough](walkthrough.md).")
 check("a link to an artifact of the conversation resolves", not stop()[0])
+start("refs-abs")
+answer("Логика — в [X.swift](file:///Users/AnyKit/Sources/X.swift#L1-L2).")
+reason = stop()[0]
+check("a broken absolute file:// link → still named", "X.swift" in reason and "no such file" in reason, reason)
+
+# Paths from a subfolder of the project: the workspace is the repository root and the agent wrote `mcp/server.py`
+# for `plugin/mcp/server.py` (seen live). A git repository (git's file list) and a plain folder (a walk).
+REPO = os.path.realpath(os.path.join(SP, "repo"))
+for sub, lines in (("plugin/mcp/server.py", 12), ("plugin/hooks/quota.py", 3)):
+    os.makedirs(os.path.dirname(os.path.join(REPO, sub)), exist_ok=True)
+    with open(os.path.join(REPO, sub), "w", encoding="utf-8") as f:
+        f.write("".join(f"line {i}\n" for i in range(1, lines + 1)))
+for args in (["init", "-q"], ["add", "-A"], ["commit", "-qm", "init"], ["update-ref", "refs/remotes/fork/v0.24.0", "HEAD"],
+             ["update-ref", "refs/remotes/fork/2.0.x", "HEAD"]):
+    subprocess.run(["git"] + args, cwd=REPO, capture_output=True)
+os.makedirs(os.path.join(WS, "lib", "core"), exist_ok=True)
+with open(os.path.join(WS, "lib", "core", "engine.py"), "w", encoding="utf-8") as f:
+    f.write("".join(f"line {i}\n" for i in range(1, 6)))
+start("subfolder")
+answer("Поправил `mcp/server.py` и `hooks/quota.py` (см. `mcp/server.py:5`, `./mcp/server.py#L2-L4`), [папка хуков](hooks/).")
+good, said = clean([REPO])
+check("paths from a subfolder of a git repository resolve, line references within the file are fine", good, said)
+start("subfolder-walk")
+answer("Движок — `core/engine.py:3`; ещё см. [quota](plugin/hooks/quota.py).")
+good, said = clean([WS, REPO])
+check("…in a plain folder (a walk), and a relative path in another workspace folder", good, said)
+start("subfolder-bad")
+answer("См. `mcp/server.py:99`, `mcp/invented.py` и `core/engine.py:30`.")
+reason = "\n".join(direct([REPO, WS]))
+check("a subfolder path's line past the end → named with the file it means", "`mcp/server.py` — the file (`plugin/mcp/server.py`) "
+      "has only 12 lines" in reason and "has only 5 lines" in reason, reason)
+check("…an invented path that matches no file anywhere → still named", "`mcp/invented.py` — no such file" in reason, reason)
+check("…and the Stop hook says so", "mcp/invented.py" in stop(roots=[REPO, WS])[0])
+
+# Git refs aren't paths: `origin/v0.24.0` was named «no such file or folder» (seen live).
+start("git-refs")
+answer("Сравнил с `origin/v0.24.0`, `upstream/3.x` и `refs/tags/v1.2.0`; на форке — `fork/v0.24.0` и `fork/2.0.x`, "
+       "см. [HEAD~2](HEAD~2).")
+good, said = clean([REPO])
+check("a remote's branch or tag, refs/…, refs git knows (rev-parse) and HEAD~2 aren't paths", good, said)
+start("git-refs-bad")
+answer("Ветка `nosuch/v9.9.9` и файл `nosuch/app.py`.")
+reason = stop(roots=[REPO])[0]
+check("…a name that is neither a ref nor a file → still named", "nosuch/v9.9.9" in reason and "nosuch/app.py" in reason, reason)
 
 # ── links and recalled facts ──
 start("url", "Какая последняя версия fastcache?")

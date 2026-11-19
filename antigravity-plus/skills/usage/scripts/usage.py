@@ -46,7 +46,7 @@ DELEGATED_MARK = "[Delegated from Claude Code]"  # = hooks/conversation.py DELEG
 FOLLOW_UP_RE = re.compile(r"sender=system\b.{0,200}?content=Follow-up from Claude Code:\s*(.*?)"
                           r"(?:\n\n\(Same rules as before|</SYSTEM_MESSAGE>|$)", re.S)
 ALIASES = ("flash_lite", "flash", "pro")
-# Orchestrator (Carbon / Argon), seen on Antigravity 2.32: the planner works in plan mode and hands its plan over with
+# Orchestrator (Carbon / Argon / Neon), seen on Antigravity 2.32: the planner works in plan mode and hands its plan over with
 # exit_plan_mode; Antigravity then says «Plan mode is off: this turn runs on the execution model …», and Gemini 4
 # Hydrogen carries the plan out until it hands back with enter_plan_mode. Antigravity's metadata names each call's
 # model; the transcript doesn't, so where the language server can't be asked, these markers tell the two apart. The
@@ -336,7 +336,7 @@ def _ls_step_models(conv_id: str) -> Dict[int, str]:
 
 
 def orchestrated(model: str) -> bool:
-    """Orchestrator (Carbon / Argon): a planner that hands routine steps to Gemini 4 Hydrogen."""
+    """Orchestrator (Carbon / Argon / Neon): a planner that hands routine steps to Gemini 4 Hydrogen."""
     return "orchestrator" in normalize_model(model)
 
 

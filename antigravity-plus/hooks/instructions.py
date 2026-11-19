@@ -4,8 +4,10 @@
 In long conversations early instructions ("самое главное — ничего не пушь", "делай всё в Docker") end up under
 hundreds of tool results, and Antigravity's context compaction keeps only a summary of them. Before a model call
 this hook re-shows the user's own messages from this conversation — the first request, every ⚠ constraint, the
-latest ones — and the restrictions the guard enforces, as an ephemeral message (it is not kept in the
-conversation). It fires only when that helps:
+latest ones — and the restrictions the guard enforces. Antigravity 2.32 keeps every injected systemMessage in the
+conversation for good (its hook docs: it «persists in the conversation trajectory across turns»; the deprecated
+ephemeralMessage is converted into one), so each block here costs context for the rest of the conversation — they
+come only when they help, and seldom:
   * a new user message arrived and there are earlier ones (connect it with what was said before);
   * the context was compacted since the last reminder;
   * a long turn: LONG_TURN+ steps since the user last wrote, at most every REFRESH steps.
@@ -33,8 +35,8 @@ from typing import Any, List, Optional, Tuple, Union
 
 import conversation as conv
 
-LONG_TURN = 30      # steps since the last user message before a refresher
-REFRESH = 30        # min steps between refreshers
+LONG_TURN = 60      # steps since the last user message before a refresher
+REFRESH = 100       # min steps between refreshers (every one stays in the context: see the docstring)
 BUDGET = 3600       # chars of quoted messages
 FIRST_LAST = 900    # chars kept of the first and the latest message
 OTHER = 360         # chars kept of any other message

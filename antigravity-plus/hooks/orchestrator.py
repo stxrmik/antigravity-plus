@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Antigravity Plus — Orchestrator (Carbon / Argon planner + Hydrogen executor) phase & plan checks.
+"""Antigravity Plus — Orchestrator (Carbon / Argon / Neon planner + Hydrogen executor) phase & plan checks.
 
 In Antigravity's Orchestrator models, the planner works in plan mode and hands off to Hydrogen with
 `exit_plan_mode`, after which Antigravity injects a SYSTEM_MESSAGE «Plan mode is off: this turn runs on the

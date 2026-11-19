@@ -88,7 +88,7 @@ The plugin's commands are skills; your skills list shows each one's SKILL.md pat
 | `/handoff` | the user wraps up with work left, or the conversation was compacted twice and a lot remains |
 | `/memory` search | before asking the user something an earlier conversation may have settled |
 | `/usage` | the user asks about tokens, cost or limits; or a long conversation may be near its context limit |
-| `/context` | user asks what fills context, or context hints warn at 150k/220k tokens |
+| `/context` | user asks what fills context, or a `<context_budget>` hint says it is getting full |
 | `/insights` | user asks for hook/guard statistics, or when tuning plugin rules and false positives |
 | `/doctor` | a plugin command, hook, panel or subagent misbehaves |
 | `/ui-check` | you changed web UI (HTML, CSS, JS/TS, JSX/TSX, Vue, Svelte): check the pages at phone and desktop width before reporting done |

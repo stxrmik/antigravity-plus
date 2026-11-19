@@ -41,7 +41,18 @@ def guard(tool, arg):
     return json.loads(r.stdout or "{}").get("decision")
 for cmd, want in [("cat .env", "deny"), ("cat .env.example", "allow"), ("cat deploy/server.env", "deny"), ("env", "deny"),
                   ("printenv PATH", "allow"), ("echo $TELEGRAM_TOKEN", "deny"), ("echo $HOME", "allow"),
-                  ("cat ~/.ssh/id_rsa", "force_ask"), ("grep -c '^BOT_TOKEN=' .env", "allow"), ("sed 's/=.*/=***/' .env", "allow")]:
+                  ("cat ~/.ssh/id_rsa", "force_ask"), ("grep -c '^BOT_TOKEN=' .env", "allow"), ("sed 's/=.*/=***/' .env", "allow"),
+                  # ${VAR:+word} / ${VAR+word} print word only when VAR is set, ${#VAR} its length: not the value
+                  ('echo "addr=${ADDR:-none} tok=${API_TOKEN:+set}"', "allow"), ("echo ${API_TOKEN+set}", "allow"),
+                  ("echo ${#API_TOKEN}", "allow"), ("echo ${API_TOKEN:+${OTHER}}", "allow"),
+                  ('echo "${API_TOKEN}"', "deny"), ("echo ${API_TOKEN:-x}", "deny"), ("echo ${API_TOKEN:0:4}", "deny"),
+                  ("echo ${HOST:+$API_TOKEN}", "deny"), ('echo "${API_TOKEN:+set} ${DB_PASSWORD}"', "deny"),
+                  # names only: the environment piped straight into a filter that drops the values
+                  ('printenv | cut -d= -f1 | grep -i -E "APP|TOKEN" | sort', "allow"), ("env | cut -d '=' -f 1", "allow"),
+                  ("env | awk -F= '{print $1}'", "allow"), ("export -p | sed 's/=.*//'", "allow"), ("compgen -e", "allow"),
+                  ("env | grep NAME", "deny"), ("printenv", "deny"), ("env | sort", "deny"), ("env | sort | cut -d= -f1", "deny"),
+                  ("env | cut -d= -f2", "deny"), ("env | cut -d= -f1-", "deny"), ("env | awk -F= '{print $2}'", "deny"),
+                  ("env | sed 's/=.*/=&/'", "deny")]:
     check(f"guard: {cmd}", guard("run_command", cmd), want)
 for path, want in [(env, "deny"), (os.path.expanduser("~/.ssh/id_ed25519.pub"), "allow"), (cfg, "allow")]:
     check(f"guard read_file: {os.path.basename(path)}", guard("read_file", path), want)

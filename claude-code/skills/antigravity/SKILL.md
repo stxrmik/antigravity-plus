@@ -45,7 +45,7 @@ Once per session, and again before you hand over a big batch:
 |---|---|---|
 | `fast` | Gemini 4 Hydrogen (Low) → Hydrogen (Medium) → Gemini 3.8 Flash | light and simple tasks, quick |
 | `standard` | Gemini 4 Hydrogen (High) → Hydrogen (Medium) → Gemini 4 Carbon (Medium) | routine implementation from a clear spec, tests for existing code, refactors across a few files |
-| `strong` | Orchestrator (Carbon) → Gemini 4 Carbon (High) → Argon (High) → Hydrogen (XHigh) → Claude Opus 5.5 | multi-file features, debugging with a repro, unfamiliar code — Carbon plans (~11 s before each answer), Hydrogen carries the plan out |
+| `strong` | Orchestrator (Carbon) → Orchestrator (Neon) → Gemini 4 Neon (High) → Gemini 4 Carbon (High) → Argon (High) → Hydrogen (XHigh) → Claude Opus 5.5 | multi-file features, debugging with a repro, unfamiliar code — Carbon plans (~11 s before each answer), Hydrogen carries the plan out |
 | `claude` | Claude Sonnet 5.5 (High) in Antigravity | work that needs Claude-level care, on Antigravity's separate Claude quota |
 
 - Within a tier the script decides from the limits left: it skips used-up models, takes a tight quota last, and for
@@ -54,12 +54,15 @@ Once per session, and again before you hand over a big batch:
 - Take the lowest tier that will get it right the first time: a failed attempt costs you a review and a redo.
 - Any exact model works too (`gemini-4-hydrogen-xhigh`, `gemini-4-argon-high`, `claude-opus-5-5-high`, …):
   `delegate.py models` lists every model with the quota left, the price and its measured speed.
-- `orchestrator` — Orchestrator (Carbon) (`gemini-pro-orchestrator`; `orchestrator argon` for Argon): Carbon plans
-  (reads, runs probing commands), then Gemini 4 Hydrogen carries the plan out; the report shows how many calls each
-  made. It leads `strong`. Measured on a small task (a module, its CLI and ~18 tests; 2026-11-17, every run got it
-  right), per run: Orchestrator ~3.5–5 min of model time and ~0.01% of the weekly Gemini quota, Carbon (High)
-  ~4.5–6.5 min and ~0.07%, Hydrogen (XHigh) ~1.5–3.5 min and ~0.01–0.02%. At API prices Orchestrator costs about
-  what Carbon does ($0.35–0.44 against $0.29–0.38): Antigravity counts its quota far lower than Carbon (High)'s.
+- Gemini 4 Neon (High) is now Antigravity's default model: `--model gemini-4-neon-high`, or Neon planning for
+  Hydrogen with `--model "orchestrator neon"`. What it takes of the quota here isn't measured yet.
+- `orchestrator` — Orchestrator (Carbon) (`gemini-pro-orchestrator`; `orchestrator neon` for Neon,
+  `orchestrator argon` for Argon): Carbon plans (reads, runs probing commands), then Gemini 4 Hydrogen carries the
+  plan out; the report shows how many calls each made. It leads `strong`. Measured on a small task (a module, its CLI
+  and ~18 tests; 2026-11-17, every run got it right), per run: Orchestrator ~3.5–5 min of model time and ~0.01% of
+  the weekly Gemini quota, Carbon (High) ~4.5–6.5 min and ~0.07%, Hydrogen (XHigh) ~1.5–3.5 min and ~0.01–0.02%. At
+  API prices Orchestrator costs about what Carbon does ($0.35–0.44 against $0.29–0.38): Antigravity counts its quota
+  far lower than Carbon (High)'s.
 
 ## Write the brief
 
@@ -93,6 +96,12 @@ It prints the task id at once. Then follow it while you work on your own part:
   `run_in_background: true` — you are notified when it finishes, and earlier when it asks you something (exit 4).
 - Plain `run` without `--no-wait` also waits — run it in the background the same way.
 - Don't poll, and don't edit files in its scope until it reports.
+- Tasks you run at once share this computer's CPU and memory: let at most two of them build (xcodebuild, Gradle,
+  docker build) at the same time and keep the others to reading, edits and quick tests — seen live: four parallel
+  app builds plus their helper agents stalled a 16 GB laptop, tool calls failed and one build took half an hour.
+- «Ended its turn; something it started still runs there» (`list` shows `background`): a build, server or subagent
+  it started is still going, and it carries on by itself when that finishes. Wait for the rest with `wait <id>` in
+  the background (or keep the watch running) — no follow-ups asking it to wait.
 - It works in the current folder; `--cwd <path>` for another one. The first task in a folder Antigravity doesn't know
   yet creates an Antigravity project for it (the report says so).
 - Exit code: 0 finished · 4 it asks you a question and waits (answer it, then `wait` again) · 2 needs attention (it

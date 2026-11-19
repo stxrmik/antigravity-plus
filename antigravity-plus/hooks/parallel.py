@@ -262,6 +262,13 @@ def message(payload: dict, st: Optional[dict]) -> Optional[str]:
     par["poll"] = max(par.get("poll", -1), poll_step)
 
     if new:
+        if all(it.get("k") not in ("agent", "swarm") for it in run):
+            # Only commands went to the background. Antigravity's own notice for every one of them already says what
+            # to do (go on with other work or end the turn), and every injected block stays in the context for good:
+            # say it once per conversation.
+            if par.get("cmd_told"):
+                return None
+            par["cmd_told"] = True
         return launched(run)
     if run and polled:
         return polling(run)
@@ -284,5 +291,7 @@ def stop_message(run: List[dict], items: list, shown: int = 8) -> Optional[str]:
     return (f"Antigravity Plus: you ended your turn while {who} {verb} still working in the background. Their "
             "results arrive by themselves as messages — you don't need to wait for them. task.md still has open items:\n"
             f"{listed}{more}\n"
-            "Do the ones that don't depend on their results now and keep task.md updated. If everything left needs "
-            "their results, end your turn again with one line saying who you're waiting for.")
+            "Do the ones that don't depend on their results now and keep task.md updated. Don't start what you said "
+            "you'd do after their results — a deploy, push, commit or release, or acting on a review or test run that "
+            "hasn't arrived. If everything left needs their results, end your turn again with one line saying who "
+            "you're waiting for.")

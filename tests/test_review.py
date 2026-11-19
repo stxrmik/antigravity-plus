@@ -54,6 +54,21 @@ first, second = stop(), stop(1)
 print(f"{'✅' if first and not second else '❌'} reminder only once per turn             → {'once' if first and not second else 'repeated/none'}")
 ok &= bool(first) and not second
 print("\nreminder text:", (first or "")[:420])
+# seen live: the review reminder came twice in a row for the same files, because the «run a check» part beside it
+# changed (the agent ran the tests it was told to) and the whole set looked new
+VERIFIED[0] = False
+setup([U, w("a.py"), w("b.py"), w("c.py")])
+first = stop()
+VERIFIED[0] = True
+setup_keep = [U, w("a.py"), w("b.py"), w("c.py")]
+rows_before = open(tp).read()
+with open(tp, "a") as f:
+    f.write(json.dumps({"step_index": 99, "type": "PLANNER_RESPONSE", "content": "", "tool_calls": [{"name": "run_command", "args": {"CommandLine": "pytest -q"}}]}) + "\n")
+    f.write(json.dumps({"step_index": 100, "type": "PLANNER_RESPONSE", "content": "Готово, тесты запустил."}) + "\n")
+second = stop()
+good = bool(first) and "run /review" in first and not (second and "run /review" in second)
+print(f"{'✅' if good else '❌'} the check part changed → review not repeated      → {(second or 'stop')[:80]}")
+ok &= good
 for d in (ws, art): shutil.rmtree(d, ignore_errors=True)
 for f in os.listdir(conv.STATE_DIR):
     if f.startswith(cid): os.remove(os.path.join(conv.STATE_DIR, f))

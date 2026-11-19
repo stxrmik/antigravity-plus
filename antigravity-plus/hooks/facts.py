@@ -17,6 +17,9 @@ Plus holds the agent's final message against the conversation itself:
     documentation) or from the project's code («где у нас…», «как работает…»): a <grounding> hint to look it up
     first and to cite the source of each fact (hooks/instructions.py);
   * the guard refuses a command that only prints success (hooks/guard.py, fake_check()).
+A test run, a build or a linter run is a command that runs one (runs_named()): `ls tests/` or `rg -n "def test_"
+tests/` only name tests. A relative path in the report may start at a subfolder of the project (`mcp/server.py` for
+`plugin/mcp/server.py`), and a git ref (`origin/v1.2.0`) isn't a path.
 Setting factChecks (`memory.py config fact-checks off`). Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
@@ -25,8 +28,11 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
+import threading
+import time
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlparse
 
@@ -37,11 +43,17 @@ PLUGIN = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__))
 SHOWN = 6                 # problems listed in one message
 SEEN_LIMIT = 12_000_000   # chars of the conversation kept to look sources up in
 LINES_LIMIT = 5_000_000   # bytes read to count a file's lines
+FIND_TIME = 2.0           # seconds the search for a path in the project's subfolders may take (hooks have 10 s)
+FIND_BYTES = 2_000_000    # bytes of `git ls-files` output read
+WALK_LIMIT = 30_000       # files and folders a walk of a project that isn't a git repository looks at
+# Folders a walk leaves out: git's insides, dependencies and build output.
+SKIP_DIRS = frozenset({".git", "node_modules", "build", "dist", ".venv", "venv", "DerivedData", ".gradle", "Pods",
+                       "__pycache__", ".tox", ".next", "target"})
 
 # ─────────────────────────────── claims in the agent's report ───────────────────────────────
 
 # kind → (claim, the command that backs it, does it have to come after the last change?)
-TEST_CMD = re.compile(r"test|spec\b|jest|vitest|mocha|phpunit|rspec|ctest", re.I)
+TEST_CMD = re.compile(r"(?<!la)test|spec\b|jest|vitest|mocha|phpunit|rspec|ctest", re.I)  # not `npm i x@latest`
 BUILD_CMD = re.compile(r"\bbuild\b|\bcompile|xcodebuild|\btsc\b|webpack|gradlew?|\bmvn\b|\bmake\b|cmake|swiftc|go\s+build|"
                        r"cargo\s+build|docker\s+(?:compose\s+)?build|next\s+build|vite\s+build|--build\b", re.I)
 # kind → (claim, the command that backs it, after the last change?, must it have succeeded?)
@@ -145,6 +157,13 @@ HEDGE_BEFORE = re.compile(r"(?:чтобы|если|когда|пока|пуст�
 NUM_PASSED = re.compile(r"\b(\d+)\s+(?:passed|tests?\s+passed|тест\w*\s+(?:(?:успешно|тоже|уже)\s+)?(?:прош\w*|проход\w*|зел[её]н\w*))|\b(\d+)\s*(?:/|из)\s*\d+\s+"
                         r"(?:тест\w*|tests?)\b|\bавтотест\w*\s*[:—–-]\s*(\d+)", re.I)
 SUMMARY = re.compile(r"\b(?:passed|failed|errors?|ok|ran\s+\d+|tests?:|прошл\w*|упал\w*)\b", re.I)
+# A test runner's count in its output: «27 passed», «44 of 44 passed», «Ran 27 tests», «Tests: 27 passed», «27 passing»,
+# «Executed 27 tests», «27 examples, 0 failures», «OK (27 tests)». An output without one (a later run of something
+# else) says nothing about how many passed.
+COUNTED = re.compile(r"\b\d+\s+(?:passed|passing|failed|failing|tests?\s+(?:passed|completed|ran|run|ok))\b"
+                     r"|\bRan\s+\d+\s+tests?\b|\b\d+\s+(?:of|из)\s+\d+\s+(?:passed|tests?\b|тест\w*)|\bTests?:\s+\d+"
+                     r"|\bExecuted\s+\d+\s+tests?\b|\b\d+\s+examples?,\s+\d+\s+failures?|\bOK\s+\(\d+\s+tests?"
+                     r"|\b\d+\s+тест\w*", re.I)
 ATTRIBUTED = re.compile(r"по\s+отч[её]ту|по\s+словам|сообщил\w*|сообщает|пишет|reports?\b|according\s+to|test-writer|worker|debugger|"
                         r"code-reviewer|security-auditor|субагент\w*|subagent|researcher|explorer|вы\s+(?:сказали|писали)|"
                         r"you\s+(?:said|wrote)", re.I)
@@ -159,6 +178,10 @@ PATHLIKE = re.compile(r"^(?:\.{1,2}/|~/|[A-Za-z]:[\\/]|/|[\w.@+-]+/)[\w./\\@+-]*
 LINE_REF = re.compile(r"(?::(\d+)(?:-(\d+))?|#L(\d+)(?:-L?(\d+))?)$")
 # A path, not a git ref or a MIME type: a file extension, an explicit start (./ ../ ~/ /) or a trailing slash.
 FILEISH = re.compile(r"\.[A-Za-z0-9]{1,8}$|^(?:\.{1,2}[\\/]|~[\\/]|/|[A-Za-z]:[\\/])|[\\/]$")
+# …that isn't there may still be a git ref: a remote's branch or tag (`origin/v0.24.0`, `upstream/3.x`), refs/…, HEAD~2
+# — or another ref git knows here (`fork/v1.2.0`, asked of git only for a name without a file extension like `.py`).
+GIT_REF = re.compile(r"^(?:(?:origin|upstream)/|refs/)[\w.@/+-]+$|^HEAD(?:[~^]\d*|@\{[^{}\s]*\})+$")
+LETTER_EXT = re.compile(r"\.(?!x$)[A-Za-z][A-Za-z0-9]{0,7}$")  # `.py`, `.c` — not `2.0.x` (a version branch)
 TLD = r"(?:com|ru|org|net|io|dev|co|me|info|xyz|site|online|tech|cloud|pro|uk|de|eu|us|su|by|kz|ua|рф)"
 NOT_A_PATH = re.compile(r"^[\w-]+(?:\.[\w-]+)*\." + TLD + r"(?:[:/]|$)|[\\/][\w-]+(?:\.[\w-]+)*\." + TLD + r"$|^(?:\.\w+[\\/])+\.\w+$", re.I)
 IPV4_OR_DATE = re.compile(r"^v?(?:\d{1,3}(?:\.\d{1,3}){3}|\d{1,2}\.\d{1,2}\.\d{4})$")  # 1.2.3.4, 06.11.2026 (not 25.10.15)
@@ -210,8 +233,12 @@ def setting() -> bool:
         return True
 
 
+def workspaces(payload: dict) -> List[str]:
+    return [os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or [] if isinstance(w, str) and w]
+
+
 def workspace(payload: dict) -> str:
-    return next((os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or [] if isinstance(w, str) and w), "")
+    return next(iter(workspaces(payload)), "")
 
 
 # ─────────────────────────────── what happened in the conversation ───────────────────────────────
@@ -339,6 +366,199 @@ def _is_push_cmd(cmd: str) -> bool:
     return bool(PUSH_CMD.search(cleaned))
 
 
+# ─────────────────────────────── what a command runs ───────────────────────────────
+
+# Programs that only list, read, search, print, compare or move files: `ls tests/`, `rg -n "def test_" tests/`,
+# `sed -n 1,40p tests/conftest.py` or `mkdir -p tests/fixtures` run no tests, build or linter, whatever they name.
+TEXT_TOOLS = frozenset(
+    "ls cat head tail less more bat sed awk gawk rg grep egrep fgrep ag ack find fd wc stat file tree du df echo printf "
+    "diff cmp comm sort uniq cut tr jq yq nl column basename dirname realpath readlink which whereis type test [ [[ true "
+    "false pwd popd read mkdir touch cp mv rm rmdir ln chmod tee xxd od hexdump strings md5 md5sum shasum sha256sum date "
+    "sleep clear export unset alias open dir get-content get-childitem select-string".split())
+# Words before the program: shell keywords and wrappers that run the rest as it is.
+_KEYWORDS = frozenset("if then else elif fi do done while until esac time ! { } exec command builtin nohup noglob".split())
+# Wrappers with options, and the options that take a value.
+_WRAPPED = {"env": ("-u", "--unset", "-C", "--chdir", "-S", "--split-string"),
+            "sudo": ("-u", "-g", "-h", "-p", "-C", "-U", "-r", "-t", "-D"), "doas": ("-u", "-C"),
+            "nice": ("-n", "--adjustment"), "timeout": ("-s", "--signal", "-k", "--kill-after"),
+            "xargs": ("-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a", "--max-args", "--max-procs", "--delimiter",
+                      "--arg-file", "--max-lines", "--replace")}
+_SHELLS = frozenset("sh bash zsh dash ksh fish pwsh powershell cmd".split())
+_SSH_VALUE = frozenset("-b -c -D -E -e -F -I -i -J -L -l -m -O -o -p -Q -R -S -W -w -B".split())
+_GIT_VALUE = frozenset("-C -c --git-dir --work-tree --namespace".split())
+_HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*(['\"]?)(\w+)\1")
+# Reading what a test run wrote: `tail -50 /tmp/pytest.log` after `pytest > /tmp/pytest.log`, or a log named after tests.
+READERS = frozenset("cat tail head less more bat grep egrep rg sed awk type get-content select-string".split())
+LOG_FILE = re.compile(r"\.(?:log|out|txt)$", re.I)
+REDIRECT = re.compile(r"(?:^|[\s;&|])(?:\d|&)?>>?\s*([^\s;&|<>()'\"]+)|\btee\s+(?:-\w+\s+)*([^\s;&|<>()'\"]+)")
+
+
+def _simple_commands(cmd: str) -> List[str]:
+    """A command line's simple commands: split at ; & && || | ( ) ` and line breaks outside quotes, with heredoc bodies
+    left out (data, not commands: a test file written with `cat > tests/test_x.py <<'EOF'`)."""
+    lines: List[str] = []
+    end: Optional[str] = None
+    for ln in cmd[:20_000].split("\n"):
+        if end is not None:
+            end = None if ln.strip() == end else end
+            continue
+        lines.append(ln)
+        m = _HEREDOC.search(ln)
+        end = m.group(2) if m else None
+    text = "\n".join(lines)[:4000]
+    out: List[str] = []
+    cur: List[str] = []
+    quote, i = "", 0
+    esc = not compat.WINDOWS  # a backslash separates a path's parts there: it escapes nothing
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and esc and quote != "'":
+            cur.append(text[i:i + 2])
+            i += 2
+            continue
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c in ";|()`\n" or (c == "&" and text[i - 1:i] != ">" and text[i + 1:i + 2] != ">"):  # not 2>&1, &>
+            out += ["".join(cur)] + ([c] if c in "()" else [])  # a subshell's bounds: a `cd` in it stays there
+            cur = []
+            i += 1
+            continue
+        cur.append(c)
+        i += 1
+    out.append("".join(cur))
+    return [s.strip() for s in out if s.strip()]
+
+
+def _argv(seg: str) -> List[str]:
+    """A simple command's words past variable assignments, shell keywords and wrappers (`env X=1`, `sudo -u app`,
+    `time`, `nice -n 5`, `timeout 60`, `xargs -n1`): the program it runs and its arguments."""
+    try:
+        words = shlex.split(seg.replace("\\", "/") if compat.WINDOWS else seg, posix=True)
+    except ValueError:  # an unclosed quote
+        words = seg.split()
+    i = 0
+    while i < len(words):
+        w = words[i].lower()
+        if w == "command" and words[i + 1:i + 2] in (["-v"], ["-V"]):
+            return ["which"]  # `command -v pytest` looks a program up
+        if re.match(r"^[A-Za-z_]\w*=", words[i]) or w in _KEYWORDS:
+            i += 1
+        elif w in _WRAPPED:
+            i += 1
+            while i < len(words) and (words[i].startswith("-") or (w == "env" and "=" in words[i])):
+                i += 2 if words[i] in _WRAPPED[w] else 1
+            i += 1 if w == "timeout" else 0  # its duration
+        else:
+            break
+    return words[i:]
+
+
+def _prog(word: str) -> str:
+    """The program's name as TEXT_TOOLS knows it; a script of the project (`./test`, `bin/lint`) keeps its path."""
+    w = word.replace("\\", "/")
+    if "/" in w and not re.match(r"^/(?:usr/(?:local/)?)?s?bin/|^/opt/homebrew/bin/", w):
+        return w.lower()
+    return re.sub(r"\.(?:exe|cmd|bat)$", "", w.rsplit("/", 1)[-1].lower())
+
+
+def _inner(prog: str, args: List[str]) -> Optional[Tuple[str, str]]:
+    """What a wrapper runs, and on what: the command of `bash -c '…'`, `ssh host '…'`, `git bisect run …`, `git rebase
+    -x …` and `find tests … -exec …` (with find's own arguments: the files it runs come from there) — "" for git's
+    other commands and a find that runs nothing — or None for any other program."""
+    if prog in _SHELLS:
+        for j, a in enumerate(args):
+            if prog in ("pwsh", "powershell"):
+                if re.fullmatch(r"-c(?:o(?:m(?:m(?:a(?:n(?:d)?)?)?)?)?)?", a, re.I):
+                    return " ".join(args[j + 1:]), ""
+            elif prog == "cmd":
+                if a.lower() in ("/c", "/k"):
+                    return " ".join(args[j + 1:]), ""
+            elif re.fullmatch(r"-[a-z]*c[a-z]*", a):  # -c, -lc, -ec
+                return (args[j + 1] if j + 1 < len(args) else ""), ""
+            if not a.startswith("/" if prog == "cmd" else "-"):
+                break
+        return None  # `bash tests/run.sh`: the script is what it runs
+    if prog == "ssh":
+        j = 0
+        while j < len(args) and args[j].startswith("-"):
+            j += 2 if args[j] in _SSH_VALUE else 1
+        return " ".join(args[j + 1:]), ""  # past the host; "" for a login
+    if prog == "git":
+        j = 0
+        while j < len(args) and args[j].startswith("-"):
+            j += 2 if args[j] in _GIT_VALUE else 1
+        sub, rest = (args[j], args[j + 1:]) if j < len(args) else ("", [])
+        if sub == "bisect" and rest[:1] == ["run"]:
+            return " ".join(rest[1:]), ""
+        if sub == "rebase":
+            k = next((k for k, a in enumerate(rest[:-1]) if a in ("-x", "--exec")), -1)
+            return (rest[k + 1] if k >= 0 else ""), ""
+        return "", ""
+    if prog in ("find", "fd"):
+        runs = ("-exec", "-execdir", "-ok", "-okdir") if prog == "find" else ("-x", "-X", "--exec", "--exec-batch")
+        for j, a in enumerate(args):
+            if a in runs:
+                end = next((k for k in range(j + 1, len(args)) if args[k] in (";", "+")), len(args))
+                return " ".join(args[j + 1:end]), " ".join(args[:j])
+        return "", ""
+    return None
+
+
+def runs_named(cmd: str, proof: "re.Pattern", where: str = "", depth: int = 0) -> bool:
+    """Whether the command runs what `proof` names (tests, a build, a linter) in one of its simple commands — not in an
+    argument of a program that only lists, reads or prints text: `ls tests/` and `rg -n "def test_" tests/` aren't
+    test runs. The folder a `cd` went to counts for the commands after it (`cd tests && ./run.sh`), and the command of
+    `bash -c '…'`, `ssh host '…'` or `find -exec` is looked at as a command of its own."""
+    outer: List[str] = []
+    for seg in _simple_commands(cmd):
+        if seg == "(":
+            outer.append(where)
+            continue
+        if seg == ")":
+            where = outer.pop() if outer else where
+            continue
+        argv = _argv(seg)
+        if not argv:
+            continue
+        prog = _prog(argv[0])
+        if prog in ("cd", "pushd", "for", "select"):
+            where = (where if prog in ("for", "select") else "") + " " + " ".join(argv[1:])
+            continue
+        inner = _inner(prog, argv[1:])
+        if inner is not None:
+            if inner[0] and depth < 3 and runs_named(inner[0], proof, where + " " + inner[1], depth + 1):
+                return True
+        elif prog not in TEXT_TOOLS and proof.search((where + " " + " ".join(argv))[:1000]):
+            return True
+    return False
+
+
+def _written(cmd: str) -> List[str]:
+    """Names of the files a command sends its output to (`> out.txt 2>&1`, `| tee test.log`)."""
+    names = []
+    for m in REDIRECT.finditer(cmd[:4000]):
+        target = m.group(1) or m.group(2) or ""
+        if target and not target.startswith("/dev/"):
+            names.append(os.path.basename(target.replace("\\", "/")))
+    return names
+
+
+def _reads_log(cmd: str, proof: "re.Pattern", written: set) -> bool:
+    """Whether the command reads what a test run wrote: a file an earlier test run sent its output to, or a log named
+    after tests (`tail -50 test-output.log`)."""
+    for seg in _simple_commands(cmd):
+        argv = _argv(seg)
+        if not argv or _prog(argv[0]) not in READERS:
+            continue
+        for a in argv[1:]:
+            name = os.path.basename(a.replace("\\", "/"))
+            if not a.startswith("-") and (name in written or (LOG_FILE.search(name) and proof.search(name))):
+                return True
+    return False
+
+
 def code_edit_step(ev: dict, ws: str, exts: Tuple[str, ...]) -> int:
     last = -1
     for e in ev["edits"]:
@@ -352,12 +572,59 @@ def push_step(ev: dict) -> int:
     return max((c["s"] for c in ev["cmds"] if c.get("code") == 0 and _is_push_cmd(c["cmd"])), default=-1)
 
 
+RUN_KINDS = ("tests", "tests_ran", "build", "build_ran", "lint")  # backed only by a command that runs one
+
+
+def _summary_line(out: str, rx: "re.Pattern" = SUMMARY) -> str:
+    lines = [ln.strip() for ln in out.splitlines() if rx.search(ln)]
+    return lines[-1][:120] if lines else "no summary line"
+
+
+def count_problem(n: str, ev: dict, runs: List[dict], proof: "re.Pattern") -> Optional[str]:
+    """«44 passed» against the outputs of the successful test runs after the last change (`runs`, oldest first) and of
+    the logs they wrote: any of them that shows the number backs the claim — the code hasn't changed since, so a later,
+    smaller run (one suite after the whole set) doesn't undo it, and an output with no count (a later run of something
+    else) doesn't hide it. A number no run after the change shows is reported with the latest count there is."""
+    near = re.compile(rf"\b{n}\b[^\n]{{0,40}}(?:pass|ok\b|прош|тест|test)|(?:pass|ok\b|прош|тест|test|ran)[^\n]{{0,40}}\b{n}\b",
+                      re.I)
+    ran = {id(r) for r in runs}
+    shown: List[dict] = []
+    written: set = set()
+    for c in ev["cmds"]:  # in the order they ran
+        if id(c) in ran:
+            shown += [c] if c["code"] == 0 else []
+            written.update(_written(c["cmd"]))
+        elif runs and c["s"] > runs[0]["s"] and c.get("code") == 0 and _reads_log(c["cmd"], proof, written):
+            shown.append(c)
+    counted = None
+    for c in reversed(shown):
+        out = c.get("out") or ""
+        if near.search(out):
+            return None
+        if counted is None and COUNTED.search(out):
+            counted = out
+    if counted is not None:
+        return f"the latest test output doesn't show {n}: «{_summary_line(counted, COUNTED)}»."
+    return f"the latest test output doesn't show {n}: «{_summary_line(runs[-1].get('out') or '')}»."
+
+
 def unbacked(answer: str, ev: dict, ws: str, verify: "re.Pattern", code_ext: Tuple[str, ...],
              web_ext: Tuple[str, ...]) -> List[str]:
     """Claims in the report that the conversation doesn't back: no matching command (after the last change, for
     checks), the latest one failed or hasn't finished, or a number of passed tests its output doesn't show. «Запустил
-    тесты» only needs the command to have run."""
+    тесты» only needs the command to have run. Tests, builds and linters are backed by a command that runs them
+    (runs_named()), not by one that only names them (`ls tests/`)."""
     out, done = [], set()
+    named: Dict[Tuple[str, str], bool] = {}
+
+    def backs(c: dict, kind: str, proof: "re.Pattern") -> bool:
+        if kind not in RUN_KINDS:
+            return bool(proof.search(c["cmd"][:500]))
+        key = (proof.pattern, c["cmd"])
+        if key not in named:
+            named[key] = runs_named(c["cmd"], proof)
+        return named[key]
+
     for kind, sentence in claims(answer):
         proof, after, must_pass = next((c[2], c[3], c[4]) for c in CLAIMS if c[0] == kind)
         if kind == "works":
@@ -367,7 +634,7 @@ def unbacked(answer: str, ev: dict, ws: str, verify: "re.Pattern", code_ext: Tup
             since = max(since, push_step(ev))
         if kind == "ui" and any(s > since for s in ev["browser"]):
             continue
-        runs = [c for c in ev["cmds"] if c["s"] > since and proof.search(c["cmd"][:500])]
+        runs = [c for c in ev["cmds"] if c["s"] > since and backs(c, kind, proof)]
         quote = sentence if len(sentence) <= 120 else sentence[:119] + "…"
         last = runs[-1] if runs else None
         problem = None
@@ -398,11 +665,8 @@ def unbacked(answer: str, ev: dict, ws: str, verify: "re.Pattern", code_ext: Tup
         elif kind == "tests":
             m = NUM_PASSED.search(sentence)
             n = next((g for g in m.groups() if g), None) if m else None
-            near = re.compile(rf"\b{n}\b[^\n]{{0,40}}(?:pass|ok\b|прош|тест|test)|(?:pass|ok\b|прош|тест|test|ran)[^\n]{{0,40}}\b{n}\b",
-                              re.I) if n else None
-            if near and not any(near.search(c.get("out") or "") for c in runs[-3:] if c["code"] == 0):
-                lines = [ln.strip() for ln in (last.get("out") or "").splitlines() if SUMMARY.search(ln)]
-                problem = f"the latest test output doesn't show {n}: «{lines[-1][:120] if lines else 'no summary line'}»."
+            if n:
+                problem = count_problem(n, ev, runs, proof)
         if problem and (kind, problem) not in done:
             done.add((kind, problem))
             out.append(f"«{quote}» — {problem}")
@@ -425,10 +689,174 @@ def _local(target: str, ws: str) -> Optional[str]:
     return os.path.join(ws, t) if ws else None
 
 
-def references(answer: str, ev: dict, ws: str, art: str = "") -> List[str]:
+def _line_count(path: str) -> Optional[int]:
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(LINES_LIMIT)
+    except OSError:
+        return None
+    return data.count(b"\n") + (0 if not data or data.endswith(b"\n") else 1)
+
+
+def _bounded(cmd: List[str], cwd: str, timeout: float, limit: int) -> Tuple[Optional[bytes], bool]:
+    """A command's output, stopped after `timeout` seconds or `limit` bytes: (stdout, whether it finished), or (None,
+    True) when it can't run here or fails by itself (no git, not a repository)."""
+    try:
+        p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"))
+    except OSError:
+        return None, True
+    cut: List[bool] = []
+
+    def stop() -> None:
+        cut.append(True)
+        try:
+            p.kill()
+        except OSError:
+            pass
+
+    timer = threading.Timer(max(timeout, 0.05), stop)
+    timer.daemon = True
+    timer.start()
+    data = b""
+    try:
+        data = p.stdout.read(limit + 1) if p.stdout else b""
+        if len(data) > limit:
+            stop()
+        p.wait()  # the timer still guards this
+    except (OSError, ValueError):
+        stop()
+        try:
+            p.wait(1)
+        except subprocess.TimeoutExpired:
+            pass
+    finally:
+        timer.cancel()
+        if p.stdout:
+            p.stdout.close()
+    if cut:
+        return data[:limit], False
+    return (data, True) if p.returncode == 0 else (None, True)
+
+
+def _git_listed(root: str, rels: List[str], timeout: float) -> Optional[Tuple[List[str], bool]]:
+    """The project's files (tracked and untracked, not ignored: `git ls-files`) under a subfolder that end with one of
+    `rels` or lie in such a folder: ([paths relative to root], whether git listed them all), or None outside a git
+    repository. Git does the matching (`*/mcp/server.py`), so only those come back."""
+    specs: List[str] = []
+    for rel in rels:
+        glob = re.sub(r"([*?\[])", r"[\1]", rel)
+        specs += ["*/" + glob, "*/" + glob + "/*"]
+    data, whole = _bounded(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--"] + specs, root,
+                           timeout, FIND_BYTES)
+    if data is None:
+        return None
+    return [f for f in data.decode("utf-8", "replace").split("\0") if f], whole
+
+
+def _walk(root: str, rels: List[str], deadline: float, hits: Dict[str, List[str]]) -> bool:
+    """Files and folders under `root` whose path ends with one of `rels`, into hits; whether the walk saw all of it
+    (it leaves out SKIP_DIRS and stops after WALK_LIMIT entries or at the deadline)."""
+    by_name: Dict[str, List[str]] = {}
+    for rel in rels:
+        by_name.setdefault(rel.rsplit("/", 1)[-1], []).append(rel)
+    seen = 0
+    for folder, dirs, files in os.walk(root):
+        here = os.path.relpath(folder, root).replace(os.sep, "/")
+        here = "" if here == "." else here + "/"
+        for n in dirs + files:
+            for rel in by_name.get(n, ()):
+                if ("/" + here + n).endswith("/" + rel):
+                    hits.setdefault(rel, []).append(os.path.join(folder, n))
+        seen += len(dirs) + len(files)
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        if seen > WALK_LIMIT or time.monotonic() > deadline:
+            return False
+    return True
+
+
+def in_subfolders(roots: List[str], rels: List[str]) -> Tuple[Dict[str, List[str]], bool]:
+    """Files and folders of the project whose path ends with one of `rels`: the agent wrote `mcp/server.py` for
+    `<root>/plugin/mcp/server.py`. {rel: [paths]}, and whether the search went through all of every root — git's list
+    of files in a git repository, else a walk of the folders; both stop after FIND_TIME seconds."""
+    hits: Dict[str, List[str]] = {}
+    whole = True
+    deadline = time.monotonic() + FIND_TIME
+    for root in roots:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return hits, False
+        listed = _git_listed(root, rels, left)
+        if listed is None:
+            whole = _walk(root, rels, deadline, hits) and whole
+            continue
+        files, ok = listed
+        whole = whole and ok
+        for f in files:
+            s = "/" + f
+            for rel in rels:
+                if s.endswith("/" + rel):
+                    found = f
+                else:
+                    k = s.find("/" + rel + "/")
+                    if k < 0:
+                        continue
+                    found = s[1:k + 1 + len(rel)]  # the folder
+                path = os.path.join(root, *found.split("/"))
+                if path not in hits.get(rel, []) and len(hits.get(rel, [])) < 5 and os.path.exists(path):
+                    hits.setdefault(rel, []).append(path)
+    return hits, whole
+
+
+def is_git_ref(token: str, ws: str) -> bool:
+    """`fork/v1.2.0`: a branch, remote branch or tag git knows in the workspace (`git rev-parse --verify`)."""
+    if not ws or token.startswith("-") or re.search(r"\s", token):
+        return False
+    data, whole = _bounded(["git", "rev-parse", "--verify", "--quiet", token], ws, 1.0, 4096)
+    return bool(data and whole)
+
+
+def _settle(lost: List[Tuple[int, str, str, int]], found: List[Optional[str]], roots: List[str], ws: str) -> None:
+    """Relative paths that are under no workspace root, as (index in found, path as written, shown, line): a git ref
+    isn't a path, and a path that starts at a subfolder of the project is fine — unless its line reference is past
+    the end of every file it can mean. Nothing is reported for a path the search didn't finish looking for."""
+    want: Dict[str, List[int]] = {}
+    for k, (i, bare, _shown, _line) in enumerate(lost):
+        rel = re.sub(r"^(?:\./)+", "", bare.replace("\\", "/")).rstrip("/")
+        if GIT_REF.match(bare):
+            found[i] = None
+        elif rel and rel != ".." and not rel.startswith("../") and len(want) < 60:
+            want.setdefault(rel, []).append(k)
+    hits, whole = in_subfolders(roots, list(want)) if want else ({}, True)
+    asked = 0
+    for rel, ks in want.items():
+        paths = hits.get(rel) or []
+        for k in ks:
+            i, bare, shown, line_no = lost[k]
+            if paths:
+                files = [p for p in paths if os.path.isfile(p)]
+                counts = [n for n in (_line_count(p) for p in files) if n is not None] if line_no else []
+                longest = max(counts) if counts else 0
+                top_dir = next((r for r in roots if files and files[0].startswith(r + os.sep)), "")
+                where = files[0][len(top_dir) + 1:].replace(os.sep, "/") if top_dir else rel
+                found[i] = (f"`{shown}` — the file (`{where}`) has only {longest} lines." if counts and line_no > longest
+                            else None)
+            elif not whole:
+                found[i] = None  # the project is too big to look through in time: not a claim it's missing
+            elif not LETTER_EXT.search(bare) and asked < 3:
+                asked += 1
+                found[i] = None if is_git_ref(bare, ws or roots[0]) else found[i]
+
+
+def references(answer: str, ev: dict, ws: str, art: str = "", roots: Optional[List[str]] = None) -> List[str]:
     """File links and project paths in the report that don't exist, and line references past the end of a file.
-    A relative link may also point into the conversation's artifact folder (task.md, walkthrough.md)."""
-    out, done = [], set()
+    A relative link may also point into the conversation's artifact folder (task.md, walkthrough.md), another
+    workspace folder or a subfolder of the project (`mcp/server.py` for `plugin/mcp/server.py`); a git ref
+    (`origin/v1.2.0`) isn't a path."""
+    roots = [r for r in (roots or [ws]) if r]
+    found: List[Optional[str]] = []
+    lost: List[Tuple[int, str, str, int]] = []
+    done = set()
     gone = " ".join(c["cmd"] for c in ev["cmds"] if re.search(r"\b(rm|mv|git\s+(rm|mv)|del|remove-item|move-item)\b", c["cmd"], re.I))
     for line in _plain(answer).splitlines():
         if REMOVED.search(line):
@@ -449,23 +877,22 @@ def references(answer: str, ev: dict, ws: str, art: str = "") -> List[str]:
             name = os.path.basename(path.rstrip("/\\"))
             # as the agent writes paths, with «/» on every system (Windows: `app\missing.py` didn't match its report)
             shown = os.path.relpath(path, ws).replace(os.sep, "/") if ws and path.startswith(ws + os.sep) else raw
-            if not os.path.exists(path) and art and not os.path.isabs(bare) and not bare.startswith(("~", "file:")):
-                path = os.path.join(art, bare) if os.path.exists(os.path.join(art, bare)) else path
+            line_no = int(next((g for g in (ref.groups() if ref else ()) if g), 0) or 0)
+            relative = not (os.path.isabs(bare) or bare.startswith(("~", "file:")) or re.match(r"^[A-Za-z]:[\\/]", bare))
+            if not os.path.exists(path) and relative:
+                alts = [os.path.join(r, unquote(bare)) for r in roots if r != ws] + ([os.path.join(art, bare)] if art else [])
+                path = next((a for a in alts if os.path.exists(a)), path)
             if not os.path.exists(path):
                 if name and name not in gone:
-                    out.append(f"`{shown}` — no such file or folder.")
+                    lost += [(len(found), unquote(bare), shown, line_no)] if relative else []
+                    found.append(f"`{shown}` — no such file or folder.")
                 continue
-            line_no = int(next((g for g in (ref.groups() if ref else ()) if g), 0) or 0)
-            if line_no and os.path.isfile(path):
-                try:
-                    with open(path, "rb") as fh:
-                        data = fh.read(LINES_LIMIT)
-                    n = data.count(b"\n") + (0 if not data or data.endswith(b"\n") else 1)
-                except OSError:
-                    continue
-                if line_no > n:
-                    out.append(f"`{shown}` — the file has only {n} lines.")
-    return out
+            n = _line_count(path) if line_no and os.path.isfile(path) else None
+            if n is not None and line_no > n:
+                found.append(f"`{shown}` — the file has only {n} lines.")
+    if lost:
+        _settle(lost, found, roots, ws)
+    return [f for f in found if f]
 
 
 def _host_path(url: str) -> Tuple[str, str]:
@@ -523,10 +950,12 @@ def problems(payload: dict, st: dict, answer: str, verify: "re.Pattern", code_ex
         or VERSION.search(plain) or PRICE.search(plain)
     if not quick:
         return []  # nothing in the report to check: don't read the transcript
-    ws = workspace(payload)
+    roots = workspaces(payload)
+    ws = roots[0] if roots else ""
     ev = scan(tp)
     art = conv.to_path(payload.get("artifactDirectoryPath") or "") if payload.get("artifactDirectoryPath") else ""
-    out = unbacked(answer, ev, ws, verify, code_ext, web_ext) + references(answer, ev, ws, art) + sources(answer, ev, ws)
+    out = (unbacked(answer, ev, ws, verify, code_ext, web_ext) + references(answer, ev, ws, art, roots)
+           + sources(answer, ev, ws))
     users = st.get("users") or []
     if users and (RESEARCH.search(users[-1]["text"]) or "?" in users[-1]["text"]):
         facts = recalled(answer, ev)

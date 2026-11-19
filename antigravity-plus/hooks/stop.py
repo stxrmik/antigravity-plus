@@ -337,6 +337,12 @@ CI_WAIT_ITEM = re.compile(
     r"\b(?:ci|actions?|экшен\w*|пайплайн\w*|pipeline|воркфлоу|workflows?|checks?)\b"
     r"|\b(?:ci|github\s+actions?|gitlab\s+ci|pipeline)\b.*\b(?:зелён\w*|прош\w*|ожидан\w*|watch|pass\w*)\b", re.I
 )
+# A task.md item that acts outward (deploy, push, commit, release…): never what the agent should start while its
+# review or tests still run — seen live: told to do «what doesn't depend on them», it deployed before its review came.
+OUTWARD_ITEM = re.compile(
+    r"/(?:deploy|commit|pr|release)\b|\b(?:за)?депло\w*|\bвыка[тч]\w*|\bрелиз\w*|\bопубликов\w*|\bпубликац\w*"
+    r"|\b(?:за)?пуш\w*|\b(?:за)?коммит\w*|\bвлить\b|\bвле[йт]\w*|\bсмерж\w*|\bмерж\w*"
+    r"|\b(?:deploy|push|commit|release|publish|merge|roll\s*out|ship)\w*", re.I)
 HELP = re.compile(r"\s(--help|-h)(\s|$)")
 BG_STARTED = re.compile(r"running as a background task with task id:\s*(\S+)")
 BG_FINISHED = re.compile(r'Task id "([^"]+)" finished with result:\s*Command exited with code (-?\d+)')
@@ -628,6 +634,34 @@ def first_time(st: dict, key: List[str]) -> bool:
     return True
 
 
+def _told(st: dict) -> dict:
+    """What the reminders already named in this turn (since the user's last message), by kind."""
+    t = st.get("stop_told") or {}
+    if t.get("users") != len(st["users"]):
+        t = {"users": len(st["users"])}
+    return t
+
+
+def told_once(st: dict, review: List[str], verify: List[str], look: List[str], mobile: List[str]) -> tuple:
+    """The review / check / look reminders without the files a reminder of the same kind already named in this turn.
+    `first_time` compares the whole set of what's left, so when one part changed (the agent ran the tests it was
+    told to) the others came again word for word — seen live: «you changed 5 code files … run /review» twice in a
+    row for the same files. A second review reminder needs REVIEW_MIN_FILES files it hasn't named yet."""
+    t = _told(st)
+    fresh = lambda kind, paths: [p for p in paths if p not in (t.get(kind) or [])]  # noqa: E731
+    new_review = fresh("review", review)
+    review = new_review if not t.get("review") or len(new_review) >= REVIEW_MIN_FILES else []
+    return review, fresh("verify", verify), fresh("look", look), fresh("mobile", mobile)
+
+
+def mark_told(st: dict, **kinds: List[str]) -> None:
+    t = _told(st)
+    for kind, paths in kinds.items():
+        if paths:
+            t[kind] = sorted(set(t.get(kind) or []) | set(paths))
+    st["stop_told"] = t
+
+
 def waiting_on_background(payload: dict, st: dict, run: List[dict]) -> Optional[str]:
     """The main agent ended its turn while its own subagents or background commands still run. Waiting is fine when
     everything left needs their results; open task.md items it kept for itself are not."""
@@ -636,7 +670,7 @@ def waiting_on_background(payload: dict, st: dict, run: List[dict]) -> Optional[
     if payload.get("continuationActive") and st.get("bg_nudge_turn") == len(st["users"]):
         return None
     items = [(mark, text) for mark, text in task_items(payload, st)
-             if not DELEGATED.search(text) and not CI_WAIT_ITEM.search(text)]
+             if not DELEGATED.search(text) and not CI_WAIT_ITEM.search(text) and not OUTWARD_ITEM.search(text)]
     tp = conv.transcript_path(payload)
     if not items or handing_over(AGENT_WAIT.sub(" ", last_answer(tp) if tp else "")):
         return None
@@ -759,11 +793,16 @@ def decide(payload: dict) -> Optional[str]:
         if setting("autoReview") and not handed and not turn["reviewed"] and len(turn["files"]) >= REVIEW_MIN_FILES:
             review = turn["files"]
         if setting("autoVerify"):
-            unseen = turn["unseen"] if os.path.isfile(UI_CHECK) else []  # no /ui-check installed: tests are the check
+            # A task from Claude Code: Claude Code looks at the screens itself (several of its agents can't share one
+            # simulator), so only «run a check» stays — seen live: four delegated agents each sent back to «look at
+            # the app» they had been told not to launch, every extra call on a 300k–500k context.
+            look_ok = os.path.isfile(UI_CHECK) and not handed  # no /ui-check installed: tests are the check
+            unseen = turn["unseen"] if look_ok else []
             mobile = mobile_here(turn["mobile"], [os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or []
-                                                  if isinstance(w, str)]) if turn["mobile"] and os.path.isfile(MOBILE) else []
+                                                  if isinstance(w, str)]) if turn["mobile"] and os.path.isfile(MOBILE) and not handed else []
             # the web UI and a mobile app's screens are checked by looking at them
             unverified = [p for p in turn["pending"] if p not in unseen and p not in mobile]
+        review, unverified, unseen, mobile = told_once(st, review=review, verify=unverified, look=unseen, mobile=mobile)
     if (not broken and not items and not review and not unverified and not unseen and not mobile
             and not setup and not ci_need and not git_left and not announced):
         return (facts_check(payload, st, answer) or (objective_check(payload, st, answer) if st["users"] else None)
@@ -786,6 +825,7 @@ def decide(payload: dict) -> Optional[str]:
         return facts_check(payload, st, answer) or (objective_check(payload, st, answer) if st["users"] else None)
     if setup:
         st["setup"] = sorted(set(st.get("setup") or []) | set(setup))
+    mark_told(st, review=review, verify=unverified, look=unseen, mobile=mobile)
     conv.store(payload["conversationId"], st)
 
     ws = [os.path.realpath(conv.to_path(w)) for w in payload.get("workspacePaths") or [] if isinstance(w, str)]

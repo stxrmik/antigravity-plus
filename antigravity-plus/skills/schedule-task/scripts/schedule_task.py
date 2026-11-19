@@ -60,7 +60,7 @@ SAFE_ARG_RE = re.compile(r"^[\w@%+=:,./\\-]+\Z")
 DASHBOARD = "[Open Automations Dashboard](sidecar://dashboard)"
 GROUPS = ("gemini", "claude")
 GROUP_HINTS = {
-    "gemini": ("gemini", "orchestrator", "flash", "hydrogen", "carbon", "argon"),
+    "gemini": ("gemini", "orchestrator", "flash", "hydrogen", "carbon", "argon", "neon"),
     "claude": ("claude", "gpt", "opus", "sonnet"),
 }
 CRON_RANGES = (

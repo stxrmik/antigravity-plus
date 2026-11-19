@@ -144,6 +144,17 @@ cases = {
     "gh repo fork o/r": True, "gh repo fork o/r --clone=false": False,
     "git commit -F - <<'EOF'\nfix: add -p handling\nEOF": False, "cd x && git status": False,
 }
+# continued lines are one command: sh joins them at a backslash before the newline, PowerShell at a backtick
+C = "`" if compat.WINDOWS else "\\"
+LONG_PR = f'gh pr create {C}\n  --base main {C}\n  --head feature-x {C}\n  --title "Release 1.2" {C}\n  --body-file "/tmp/pr.md"'
+cases.update({LONG_PR: False, f"gh pr create {C}\n  --base main {C}\n  --head feature-x": True,
+              f"gh pr create {C}\r\n  --fill": False, f"gh pr create --title 'a {C}\nb'": True,  # in '…' it joins nothing
+              f"git status # see {C}\ngit add -p": True,  # a comment ends at the newline all the same
+              f"git rebase {C}\n  --continue": True, f"git add {C}\n  -p": True,
+              # a separator inside quotes splits nothing; a quote in a comment opens nothing
+              'gh pr create --title "Fix A; refactor B" --body-file pr.md': False,
+              'gh pr create --title "a && b | c" --body x': False, 'git commit -m "wip; git add -p later"': False,
+              "git status # don't\ngit add -p # that's it": True, 'echo "open; git add -p': True})
 wrong = [(c, w) for c, w in cases.items() if bool(gitcheck.interactive(c)) != w]
 check(f"{len(cases)} git/gh commands: the hanging ones caught, the rest left alone", not wrong, wrong)
 def guard(cmd, extra=None):
@@ -169,6 +180,13 @@ want_chain = (  # PowerShell: `$env:X=…;` can't sit between && links without c
 )
 check("guard: multi-segment chain rewrites both fetch and merge", dchain.get("decision") == "allow"
       and dchain.get("overwrite", {}).get("CommandLine") == want_chain, dchain)
+dlong = guard(LONG_PR)
+check("guard: `gh pr create` with its title and body on continued lines passes", dlong == {"decision": "allow"}, dlong)
+dcont = guard(f"git fetch {C}\n  origin")
+check("guard: a continued `git fetch` is auto-fixed as the one line it is", dcont.get("decision") == "allow"
+      and dcont.get("overwrite", {}).get("CommandLine") == pr_pfx + "git fetch   origin", dcont)
+check("rewrite: a continuation inside '…' is text, not a line to join (left alone)",
+      gitcheck.rewrite(f"git commit -m 'a {C}\nb' && git push") is None and gitcheck.rewrite(f"git push # x {C}\n origin") is None)
 # PowerShell (Windows): a single & is the call operator, a backtick escapes quotes, and an env assignment is a statement
 # of its own — so rewrite only where `;` (or nothing) surrounds git, never wrap it in `& { … }`, else leave it alone
 was_windows = compat.WINDOWS
@@ -192,13 +210,19 @@ try:
         "git merge feature; git push": "git merge --no-edit feature; $env:GIT_TERMINAL_PROMPT='0'; git push",
         "git rebase --continue": "$env:GIT_EDITOR='true'; git rebase --continue",
         "git status && git merge feat": "git status && git merge --no-edit feat",
+        "git fetch `\n  origin": "$env:GIT_TERMINAL_PROMPT='0'; git fetch   origin",  # a backtick continues the line
+        'git commit -m "a`\nb"; git push': None,
     }
     ps_got = {c: (gitcheck.rewrite(c) or (None, None))[1] for c in ps_cases}
+    ps_stall = {"gh pr create `\n  --title T `\n  --body-file b.md": None,
+                "gh pr create \\\n  --title T \\\n  --body-file b.md": "gh-prompt"}  # a backslash continues nothing there
+    ps_stall_got = {c: (gitcheck.interactive(c) or (None,))[0] for c in ps_stall}
 finally:
     compat.WINDOWS = was_windows
 ps_wrong = {c: g for c, g in ps_got.items() if g != ps_cases[c]}
 check(f"rewrite (PowerShell): {len(ps_cases)} command lines — no `& {{ … }}` wrap, call operator and backticks left alone",
       not ps_wrong, ps_wrong)
+check("interactive (PowerShell): lines continued with a backtick are one command", ps_stall_got == ps_stall, ps_stall_got)
 drev_m = guard("git revert -m 1 abc123")
 check("guard: `git revert -m 1` still auto-fixes with --no-edit", drev_m.get("decision") == "allow"
       and drev_m.get("overwrite", {}).get("CommandLine") == "git revert --no-edit -m 1 abc123", drev_m)

@@ -160,6 +160,13 @@ add("PLANNER_RESPONSE", calls=[("run_command", {"CommandLine": "sleep 20"})])
 check("sleep while it runs → polling", pre(), ["doesn't make them faster"])
 report("agp-par-cmd/task-3")
 check("command finished → quiet", pre(), empty=True)
+# every injected block stays in the context, and Antigravity's own notice of a background command already says what
+# to do: commands get the hint once per conversation (subagents keep theirs)
+add("PLANNER_RESPONSE", calls=[("run_command", {"CommandLine": "npm run build", "WaitMsBeforeAsync": 5000})])
+background(f"agp-par-cmd/task-7", "npm run build")
+check("a second background command → not told again", pre(), empty=True)
+invoke(("explorer", "Find the build config", "sub-cmdx-0001"))
+check("…a subagent launch still is", pre(), ["<background_work", "explorer «Find the build config»"])
 
 # 8. a stale subagent (its transcript hasn't changed for 30 min) isn't waited for
 start("stale")
@@ -253,6 +260,18 @@ invoke(("worker", "Build card", "sub-hhhh-0007"))
 open(task, "w").write("## INCY\n- [/] Карточка: worker\n- [ ] Тесты (в фоне)\n- [ ] Сборка — swarm\n- [ ] Бенч (background)\n- [x] План\n")
 add("PLANNER_RESPONSE", content="Жду фоновые задачи.")
 check("broadened DELEGATED patterns skip delegated items", stop({"fullyIdle": False}), empty=True)
+start("stop4d")  # seen live: told to do «what doesn't depend on them», it deployed before its review came back
+invoke(("code-reviewer", "Review", "sub-hhhh-0008"))
+open(task, "w").write("## INCY\n- [/] Прогнать тесты и /review\n- [ ] Выполнить `/deploy` панели с бэкапом\n"
+                      "- [ ] Закоммитить и запушить\n")
+add("PLANNER_RESPONSE", content="Жду ревью от code-reviewer, после чего перейду к деплою.")
+check("waiting for its review → deploy/commit items aren't offered", stop(),
+      ["Прогнать тесты", "Don't start what you said you'd do after their results"], ["/deploy", "Закоммитить"])
+start("stop4e")
+invoke(("code-reviewer", "Review", "sub-hhhh-0009"))
+open(task, "w").write("## INCY\n- [/] Ревью — code-reviewer\n- [ ] Задеплоить на прод\n- [ ] Push в main\n")
+add("PLANNER_RESPONSE", content="Жду ревью.")
+check("only deploy/push items left → waiting is fine", stop(), empty=True)
 start("stop5")
 invoke(("code-reviewer", "Review", "sub-hhhh-0005"))
 for f in ("a.py", "b.py", "c.py"):

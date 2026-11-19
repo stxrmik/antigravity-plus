@@ -238,11 +238,27 @@ think(10_000, 160_000)
 check("subagent: no /handoff", pre(), ["~170k"], ["/handoff"])
 start("ctxgemini")
 think(15_000, 220_000)
-check("Gemini near 250k → mentions ~250k compaction and ~300k limit", pre("gemini-4-carbon-high"), ["~235k", "~250k compaction", "~300k limit"])
-start("ctxorch")
+check("Gemini 4 at 235k (512k window since 2026-11-17) → only the lean hint", pre("gemini-4-carbon-high"),
+      ["~235k", "rg -n"], ["compacts"])
+think(15_000, 440_000)
+check("Gemini 4 near 505k → mentions ~505k compaction and ~550k limit", pre("gemini-4-carbon-high"),
+      ["~455k", "~505k compaction", "~550k limit"])
+start("ctxgemini3")
 think(15_000, 220_000)
-check("Orchestrator (Carbon plans, Hydrogen carries out) → the same Gemini limits", pre("Orchestrator (Carbon)"),
+check("older Gemini near 250k → mentions ~250k compaction and ~300k limit", pre("gemini-3.1-pro-high"),
       ["~235k", "~250k compaction", "~300k limit"])
+start("ctxorch")
+think(15_000, 440_000)
+check("Orchestrator (Carbon plans, Hydrogen carries out) → the same Gemini 4 limits", pre("Orchestrator (Carbon)"),
+      ["~455k", "~505k compaction", "~550k limit"])
+start("ctxneon")
+think(15_000, 440_000)
+check("Gemini 4 Neon and its Orchestrator → the same Gemini 4 limits", pre("gemini-4-neon-high"),
+      ["~455k", "~505k compaction"])
+start("ctxexec")
+think(15_000, 440_000)
+check("Orchestrator's executor (gemini-flash-worker-agy) → the Gemini 4 limits", pre("gemini-flash-worker-agy"),
+      ["~455k", "~505k compaction"])
 start("ctxflashlite", main=False)
 think(10_000, 105_000)
 check("Flash-Lite subagent → warns near ~128k compaction", pre("flash_lite"), ["~115k", "~128k compaction", "~168k limit"])
@@ -252,10 +268,10 @@ check("Claude Opus 5.5 at 230k → lean hint, not near-compaction yet", pre("cla
 think(30_000, 710_000)
 check("Claude Opus 5.5 at 740k → near ~840k compaction", pre("claude-opus-5-5-high"), ["~740k", "~840k compaction"])
 start("ctxswitch")
-think(15_000, 220_000)
-check("Gemini at 235k → level-2 compaction warning", pre("gemini-4-carbon-high"), ["~235k", "~250k compaction"])
-think(10_000, 230_000)
-check("switched to Claude Opus 5.5 at 240k → quiet until Claude's high threshold", pre("claude-opus-5-5-high"), empty=True)
+think(15_000, 440_000)
+check("Gemini 4 at 455k → level-2 compaction warning", pre("gemini-4-carbon-high"), ["~455k", "~505k compaction"])
+think(10_000, 450_000)
+check("switched to Claude Opus 5.5 at 460k → quiet until Claude's high threshold", pre("claude-opus-5-5-high"), empty=True)
 think(30_000, 710_000)
 check("later at 740k on Claude Opus 5.5 → warns again near ~840k compaction", pre("claude-opus-5-5-high"), ["~740k", "~840k compaction"])
 

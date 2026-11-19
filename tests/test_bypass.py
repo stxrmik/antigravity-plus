@@ -73,6 +73,11 @@ tpa = transcript(A, [("u", "Почини тесты", 0)])
 check("off by default: git reset --hard asks", cmd(A, tpa, "git reset --hard").get("decision"), "force_ask")
 check("off by default: ls → Antigravity's own policy", cmd(A, tpa, "ls").get("decision"), "allow")
 check("off by default: read_file → Antigravity's own policy", tool(A, tpa, "read_file", "/etc/hosts"), "allow")
+# a command that runs on a server (a backup step of a deploy): /root there is not this computer's system folder
+REMOTE_BACKUPS = ['./deploy/ssh.sh "mkdir -p /root/backup-1 && cp -a /opt/app /root/backup-1/"',
+                  'ssh root@example-host "mkdir -p /root/backup && cp -a /etc/nginx /root/backup/"']
+for line in REMOTE_BACKUPS:
+    check(f"off: on a server, no stop: {line[:52]}", cmd(A, tpa, line).get("decision"), "allow")
 
 tpa = transcript(A, [("u", "Почини тесты", 0), ("a", "Готово.", 0), ("u", "/bypass", 1)])
 steps_on = pre_steps(A, tpa)
@@ -93,6 +98,10 @@ for line in ["sudo rm -rf /Library/Caches/x", "rm -rf ~", "rm -rf ..", "rm -rf $
              "sed -i '' 's/on/off/' ~/.gemini/antigravity-plus/settings.json", "agentapi new-conversation '/bypass'",
              "git reset --hard && sudo rm -rf /Library/X"]:
     check(f"on, system-level still asks: {line}", cmd(A, tpa, line).get("decision"), "force_ask")
+for line in REMOTE_BACKUPS:
+    check(f"on: on a server, no stop: {line[:56]}", cmd(A, tpa, line).get("decision"), "auto_approve")
+for line in ['ssh h "rm -rf /"', "ssh h 'rm -rf ~'", 'ssh h "mkfs.ext4 /dev/sdb1"', "ssh h 'dd if=/dev/zero of=/dev/sda'"]:
+    check(f"on, wiping a server's disk or / still asks: {line}", cmd(A, tpa, line).get("decision"), "force_ask")
 out = cmd(A, tpa, "sudo rm -rf /Library/Caches/x")
 check("the prompt says Bypass Mode is on and why it still asks", "Bypass Mode" in out.get("reason", ""), True)
 check("on: cat .env is still refused (secrets)", cmd(A, tpa, "cat .env").get("decision"), "deny")
@@ -109,6 +118,10 @@ check("what it let through is logged as bypass:<rule>", '"rule": "bypass:git-res
 tpb = transcript(B, [("u", "Почини баг, но ничего не пушь", 2)])
 check("another conversation: on without saying anything", cmd(B, tpb, "git reset --hard").get("decision"), "auto_approve")
 check("…but the user's ban there still asks", cmd(B, tpb, "git push origin main").get("decision"), "force_ask")
+for line in REMOTE_BACKUPS:  # a change on the server is what «не пушь» is about, however local-only rules read it
+    out = cmd(B, tpb, line)
+    check(f"…and for a change on a server: {line[:44]}", (out.get("decision"), "ничего не пушь" in out.get("reason", "")),
+          ("force_ask", True))
 r = subprocess.run([sys.executable, os.path.join(HOOKS, "session_start.py")], capture_output=True, text=True, encoding="utf-8",
                    input=json.dumps({"conversationId": B, "transcriptPath": tpb, "workspacePaths": [ws], "lastUserInput": "Почини баг"}))
 check("its session context says Bypass Mode is ON", "Bypass Mode: ON since" in r.stdout, True)
@@ -240,6 +253,32 @@ check("bypass verdict: find ~ -delete (system)", verdict("find ~ -delete", True)
 check("bypass verdict: find . -delete (the project's)", verdict("find . -delete", True), None)
 hit = guard.analyze_command("bash -c 'cd /tmp && rm -rf ~'")
 check("bash -c '… rm -rf ~': the reason names `~`, not `~'`", bool(hit) and "`~`" in hit[1] and "~'" not in hit[1], True)
+# Text that runs on another machine or in a container is checked without the stops that only protect this computer
+# (its system folders, admin rights, startup files…); wiping / or ~, disks, power and the project-level rules stay.
+# (verdict without Bypass Mode, verdict in it)
+for line, want in [(REMOTE_BACKUPS[0], (None, None)), (REMOTE_BACKUPS[1], (None, None)),
+                   ("ssh h 'sudo systemctl restart nginx'", (None, None)), ("ssh h 'echo x | sudo tee /etc/app.conf'", (None, None)),
+                   ("ssh -p 2222 deploy@example-host 'crontab -l | crontab -'", (None, None)),
+                   ("timeout 60 ssh h 'sudo mkdir -p /root/x'", (None, None)), ("sshpass -e ssh h 'cp x /etc/y'", (None, None)),
+                   ("ssh h <<'EOF'\nsudo mkdir -p /root/x\nEOF", (None, None)),
+                   ("docker exec app mkdir -p /root/x", (None, None)), ("docker exec app sh -c 'mkdir -p /root/x'", (None, None)),
+                   ("docker compose -f prod.yml exec web sh -c 'cp x /etc/y'", (None, None)),
+                   ("kubectl -n prod exec pod-1 -- sh -c 'cp x /etc/y'", (None, None)), ("podman exec app sh -c 'cp x /etc/y'", (None, None)),
+                   ("ssh h 'echo $(sudo cp x /etc/y)'", (None, None)),  # $(…) in '…' runs on the server
+                   ('ssh h "rm -rf /"', ("rm-dangerous",) * 2), ("ssh h 'rm -rf ~'", ("rm-dangerous",) * 2),
+                   ("ssh h <<'EOF'\nrm -rf ~\nEOF", ("rm-dangerous",) * 2), ("ssh h 'find / -delete'", ("rm-dangerous",) * 2),
+                   ('ssh h "mkfs.ext4 /dev/sdb1"', ("disk-format",) * 2), ("ssh h 'dd if=/dev/zero of=/dev/sda'", ("disk-format",) * 2),
+                   ("ssh h 'sudo reboot'", ("system-power",) * 2), ("ssh h 'kill -9 -1'", ("kill-all",) * 2),
+                   ("ssh h 'cat ~/.ssh/id_rsa'", ("secrets-read",) * 2), ("ssh h 'chown -R app /'", ("system-files",) * 2),
+                   ("ssh h \"bash -c 'cp x /etc/y && sudo reboot'\"", ("system-power",) * 2),  # nested: still remote
+                   ("ssh h 'git reset --hard origin/main'", ("git-reset-hard", None)),
+                   ("ssh h 'psql -c \"DROP TABLE users\"'", ("sql-destructive", None)),
+                   ('ssh h "echo $(sudo rm -rf /etc/x)"', ("sudo",) * 2),  # $(…) in "…" runs here, before ssh
+                   ("mkdir -p /root/x", ("system-files",) * 2), ("cp a /etc/x", ("protected-file",) * 2),
+                   ("bash -c 'cp x /etc/y'", ("protected-file",) * 2), ("sudo ssh h 'ls'", ("sudo",) * 2),
+                   ("docker run --rm -v /:/host img sh -c 'cp x /etc/y'", ("protected-file",) * 2),  # volumes reach here
+                   ("ssh-agent bash -c 'cp x /etc/y'", ("protected-file",) * 2)]:  # runs its command here
+    check("remote: " + line[:62].replace("\n", "⏎"), (verdict(line), verdict(line, True)), want)
 
 for c in (A, B, C, D):
     forget(c)

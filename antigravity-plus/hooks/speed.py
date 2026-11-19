@@ -35,19 +35,26 @@ PLUGIN = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__))
 STORE = os.path.expanduser("~/.gemini/antigravity-plus/sandbox.json")
 AG_CONFIG = os.path.expanduser("~/.gemini/config/config.json")
 CTX_WARN = 150_000       # tokens per model call: steps get slower, details from the middle get lost
-CTX_HIGH = 220_000       # near the ~250k threshold where Antigravity compacts Gemini conversations (limit ~300k)
+CTX_HIGH = 220_000       # near the ~250k threshold where Antigravity compacts older Gemini conversations (limit ~300k)
+# The Gemini 4 family (Carbon, Argon, Hydrogen, Neon, Orchestrator) runs with maxContextTokens 512000 since 2026-11-17
+# (Antigravity's generator metadata); real conversations compacted at 509k–553k.
+GEMINI4 = re.compile(r"gemini[-_ ]?4|orchestrator|flash[-_]worker|hydrogen|carbon|argon|neon")
+CTX4_WARN, CTX4_HIGH = 200_000, 440_000
 FAIL_RUN = 3             # failures in a row before the error-loop hint (again at twice that)
 FORGET_AFTER = 2         # successes inside the sandbox that make a remembered command unnecessary
 KEEP = 20                # remembered commands per project
 
 
 def ctx_limits(model: str) -> Tuple[int, int, str]:
-    """(warn, high, note) context thresholds for `model`. In Antigravity 2.x Gemini conversations have a ~300k limit
-    and auto-compact around ~250k (Flash-Lite subagents: ~128k compaction, ~168k limit), while Claude 5.5 runs up to ~840k."""
+    """(warn, high, note) context thresholds for `model`. In Antigravity 2.32 the Gemini 4 family has a ~550k limit and
+    auto-compacts around ~505k; older Gemini models ~300k / ~250k (Flash-Lite subagents: ~128k compaction, ~168k
+    limit), while Claude 5.5 runs up to ~840k."""
     m = (model or "").lower()
     if re.search(r"flash[-_ ]?lite", m):
         return 80_000, 110_000, " (~128k compaction, ~168k limit)"
-    if "gemini" in m or "orchestrator" in m:  # Orchestrator: Carbon or Argon with Hydrogen, the same Gemini limits
+    if GEMINI4.search(m):  # Orchestrator: Carbon, Argon or Neon with Hydrogen, the same Gemini 4 limits
+        return CTX4_WARN, CTX4_HIGH, " (~505k compaction, ~550k limit)"
+    if "gemini" in m:
         return CTX_WARN, CTX_HIGH, " (~250k compaction, ~300k limit)"
     if re.search(r"(opus|sonnet)[- ]?5[.-]5", m):
         return 180_000, 720_000, " (~840k compaction)"

@@ -43,7 +43,7 @@ CRIT_LEFT = 0.05         # fraction left at or below which a zero-token critical
 PACE_TIGHT = 0.6         # weekly fraction left ÷ fraction of the week left: spending far ahead of time
 NEW_WINDOW = 3600        # a reset this much later than the one already told about = a new window (readings jitter)
 LEVELS = {"tight": 1, "exhausted": 2}
-FAMILIES = (("claude", "gpt", "opus", "sonnet"), ("gemini", "orchestrator", "flash", "hydrogen", "carbon", "argon"))
+FAMILIES = (("claude", "gpt", "opus", "sonnet"), ("gemini", "orchestrator", "flash", "hydrogen", "carbon", "argon", "neon"))
 
 Endpoint = Tuple[str, str]  # (host:port, CSRF token)
 # the language server is local: no proxy (and no slow lookup of the system's proxy settings on macOS)

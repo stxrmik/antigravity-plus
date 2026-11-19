@@ -180,7 +180,7 @@ check("hints include legacy EPHEMERAL_MESSAGE + new SYSTEM_MESSAGE hints & orche
                                 "context_budget", "orchestrator_handoff", "orchestrator_review"))
       and hints["bypass_notice"]["fired"] == 2
       and "quota.py" in hints["quota"]["hook"]
-      and hints["context_budget"]["models"].get("gemini-3.8-flash") == 1,
+      and hints["context_budget"]["models"].get("gemini-4-hydrogen") == 1,  # Model: flash runs Hydrogen (High) now
       hints)
 
 ui_n = data.get("ui_notices") or {}

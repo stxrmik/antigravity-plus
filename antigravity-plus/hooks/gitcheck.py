@@ -40,9 +40,46 @@ MID = re.compile(r"^={7}$")
 END = re.compile(r"^>{7}(?: |$)")
 
 
+def _joined(cmd: str) -> str:
+    r"""The command with its line continuations taken out, as the shell reads it: a backslash right before a newline
+    (PowerShell: a backtick) joins the next line on — `gh pr create \⏎ --title …` is one command. Not inside single
+    quotes, nor in a `#` comment (the newline still ends it), nor inside double quotes in PowerShell."""
+    esc = "`" if compat.WINDOWS else "\\"
+    out: List[str] = []
+    quote, comment, i, n = "", False, 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if comment:
+            comment = c != "\n"
+        elif quote == "'":
+            quote = "" if c == "'" else quote
+        elif c == esc:
+            nl = 2 if cmd.startswith("\n", i + 1) else 3 if cmd.startswith("\r\n", i + 1) else 0
+            if nl and not (quote and compat.WINDOWS):
+                i += nl
+                continue
+            out.append(cmd[i:i + 2])
+            i += 2
+            continue
+        elif c == '"':
+            quote = "" if quote else '"'
+        elif c == "'" and not quote:
+            quote = "'"
+        elif c == "#" and not quote and (not out or out[-1] in " \t\n;&|()"):
+            comment = True
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _segments(cmd: str) -> List[str]:
+    """The simple commands of a command line: heredoc bodies out, continued lines joined, split at ; && || | & and
+    newlines outside quotes (`gh pr create --title "a; b" …` is one); with a quote left open, at each of them."""
     cmd = re.sub(r"<<-?\s*['\"]?(\w+)['\"]?([^\n]*)\n.*?\n[ \t]*\1[ \t]*(?=\n|$)", r"\2\n", cmd, flags=re.S)  # heredoc bodies
-    return [p.strip() for p in re.split(r"\|\||&&|;|\||\r?\n", cmd) if p.strip()]
+    cmd = _joined(cmd)
+    spans = _split_spans(cmd, newlines=True)
+    parts = [cmd[s:e] for s, e, _sep in spans] if spans else re.split(r"\|\||&&|;|\||\r?\n", cmd)
+    return [p.strip() for p in parts if p.strip()]
 
 
 def _tokens(segment: str) -> List[str]:
@@ -147,32 +184,37 @@ def interactive(cmd: str) -> Optional[Tuple[str, str]]:
     return None
 
 
-def _split_spans(cmd: str) -> Optional[List[Tuple[int, int, str]]]:
+def _split_spans(cmd: str, newlines: bool = False) -> Optional[List[Tuple[int, int, str]]]:
     """(start, end, separator after it) of the segments separated by unquoted ;, &&, ||, | and & — a single & only in a
-    POSIX shell (a background job): in PowerShell it is the call operator (`& git push`), not a separator. None on
-    unclosed quotes."""
+    POSIX shell (a background job): in PowerShell it is the call operator (`& git push`), not a separator — and with
+    `newlines`, at unquoted newlines too, where a `#` comment's quotes count for nothing (`# don't`). None on unclosed
+    quotes."""
+    esc = "`" if compat.WINDOWS else "\\"
     spans: List[Tuple[int, int, str]] = []
     q, start, i, n = "", 0, 0, len(cmd)
     while i < n:
         c = cmd[i]
         if q:
-            if not compat.WINDOWS and c == "\\" and q == '"' and i + 1 < n:
+            if c == esc and q == '"' and i + 1 < n:
                 i += 2
                 continue
             if c == q:
                 q = ""
         elif c in "'\"":
             q = c
-        elif not compat.WINDOWS and c == "\\" and i + 1 < n:
+        elif c == esc and i + 1 < n:
             i += 2
             continue
+        elif newlines and c == "#" and (i == 0 or cmd[i - 1] in " \t\n;&|()"):
+            while i + 1 < n and cmd[i + 1] != "\n":  # to the end of the line, which still splits
+                i += 1
         elif c in "|&" and i + 1 < n and cmd[i + 1] == c:
             spans.append((start, i, c * 2))
             i += 2
             start = i
             continue
-        elif c in ";|" or (not compat.WINDOWS and c == "&" and (i == 0 or cmd[i - 1] not in "<>")
-                           and (i + 1 == n or cmd[i + 1] != ">")):
+        elif c in ";|" or (newlines and c == "\n") or (not compat.WINDOWS and c == "&" and (i == 0 or cmd[i - 1] not in "<>")
+                                                       and (i + 1 == n or cmd[i + 1] != ">")):
             spans.append((start, i, c))
             i += 1
             start = i
@@ -293,8 +335,12 @@ def _rewrite_segment(core: str, prior_editor: bool, prior_prompt: bool, ps_ok: b
 
 
 def rewrite(cmd: str) -> Optional[Tuple[str, str]]:
-    """Auto-fix non-interactive git flags/env on single-line commands; returns (rule, rewritten_cmd) or None."""
-    if not cmd or not cmd.strip() or "<<" in cmd or "\n" in cmd or "\r" in cmd:
+    r"""Auto-fix non-interactive git flags/env on single-line commands (lines joined by `\⏎` count as one: the fixed
+    command is that one line); returns (rule, rewritten_cmd) or None."""
+    if not cmd or not cmd.strip() or "<<" in cmd:
+        return None
+    cmd = _joined(cmd)
+    if "\n" in cmd or "\r" in cmd:
         return None
     if compat.WINDOWS and "`" in cmd:
         return None  # PowerShell escapes quotes with a backtick: where a string ends can't be followed safely

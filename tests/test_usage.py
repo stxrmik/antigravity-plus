@@ -1,4 +1,5 @@
-"""/usage & pricing.json: Gemini 4 / 3.x / 2.5 models, ~300k window & ~250k compaction, tiers and price steps."""
+"""/usage & pricing.json: Gemini 4 / 3.x / 2.5 models, ~560k window & ~505k compaction for Gemini 4 (~300k / ~250k
+for older Gemini), tiers and price steps."""
 import datetime as dt, json, os, subprocess, sys
 
 PLUGIN, SP = sys.argv[1], sys.argv[2]
@@ -20,9 +21,13 @@ p = usage.Pricing(PRICING)
 
 # 1. Model lookup: new Gemini 4 & 3.x lineup, and flash-lite isn't swallowed by generic flash
 expected = [
-    ("Gemini 4 Carbon (High)", "gemini-4-carbon", 2.0, 10.0, 0.10, 300_000, 250_000),
-    ("Gemini 4 Argon (Medium)", "gemini-4-argon", 2.0, 10.0, 0.10, 300_000, 250_000),
-    ("Gemini 4 Hydrogen (XHigh)", "gemini-4-hydrogen", 1.50, 7.50, 0.075, 300_000, 250_000),
+    ("Gemini 4 Carbon (High)", "gemini-4-carbon", 2.0, 10.0, 0.10, 560_000, 505_000),
+    ("Gemini 4 Argon (Medium)", "gemini-4-argon", 2.0, 10.0, 0.10, 560_000, 505_000),
+    ("Gemini 4 Hydrogen (XHigh)", "gemini-4-hydrogen", 1.50, 7.50, 0.075, 560_000, 505_000),
+    ("gemini-4-hydrogen-tiered-high", "gemini-4-hydrogen", 1.50, 7.50, 0.075, 560_000, 505_000),
+    # Gemini 4 Neon (2026-11-18): $3 / $15 / $0.15, Antigravity's default model
+    ("Gemini 4 Neon (High)", "gemini-4-neon", 3.0, 15.0, 0.15, 560_000, 505_000),
+    ("gemini-4-neon-xhigh", "gemini-4-neon", 3.0, 15.0, 0.15, 560_000, 505_000),
     ("Gemini 3.8 Flash (High)", "gemini-3.8-flash", 0.75, 3.75, 0.075, 300_000, 250_000),
     ("gemini-3.8-flash-tiered", "gemini-3.8-flash", 0.75, 3.75, 0.075, 300_000, 250_000),
     ("Gemini 3.6 Flash (Low)", "gemini-3.6-flash", 0.75, 3.75, 0.075, 300_000, 250_000),
@@ -36,11 +41,14 @@ expected = [
     ("gemini-2.5-flash", "gemini-2.5-flash", 0.30, 2.50, 0.03, 300_000, 250_000),
     ("Claude Opus 5.5 (High)", "claude-opus-5.5", 4.0, 20.0, 0.20, 1_000_000, 840_000),
     # Orchestrator: priced as its planner, the Hydrogen that carries out its plan as Hydrogen (see 5.)
-    ("Orchestrator (Carbon)", "gemini-4-carbon", 2.0, 10.0, 0.10, 300_000, 250_000),
-    ("Orchestrator (Argon)", "gemini-4-argon", 2.0, 10.0, 0.10, 300_000, 250_000),
-    ("gemini-pro-orchestrator", "gemini-4-carbon", 2.0, 10.0, 0.10, 300_000, 250_000),
-    ("gemini-pro-orchestrator-argon", "gemini-4-argon", 2.0, 10.0, 0.10, 300_000, 250_000),
-    ("Gemini 4 Hydrogen (Orchestrator)", "gemini-4-hydrogen", 1.50, 7.50, 0.075, 300_000, 250_000),
+    ("Orchestrator (Carbon)", "gemini-4-carbon", 2.0, 10.0, 0.10, 560_000, 505_000),
+    ("Orchestrator (Argon)", "gemini-4-argon", 2.0, 10.0, 0.10, 560_000, 505_000),
+    ("Orchestrator (Neon)", "gemini-4-neon", 3.0, 15.0, 0.15, 560_000, 505_000),
+    ("gemini-pro-orchestrator-neon", "gemini-4-neon", 3.0, 15.0, 0.15, 560_000, 505_000),
+    ("gemini-pro-orchestrator", "gemini-4-carbon", 2.0, 10.0, 0.10, 560_000, 505_000),
+    ("gemini-pro-orchestrator-argon", "gemini-4-argon", 2.0, 10.0, 0.10, 560_000, 505_000),
+    ("Gemini 4 Hydrogen (Orchestrator)", "gemini-4-hydrogen", 1.50, 7.50, 0.075, 560_000, 505_000),
+    ("gemini-flash-worker-agy", "gemini-4-hydrogen", 1.50, 7.50, 0.075, 560_000, 505_000),
 ]
 ts_nov = dt.datetime(2026, 11, 14, 12, 0, tzinfo=dt.timezone.utc)
 for raw_name, want_id, want_in, want_out, want_cr, want_win, want_comp in expected:
@@ -55,7 +63,7 @@ for raw_name, want_id, want_in, want_out, want_cr, want_win, want_comp in expect
 # 2. Subagent model aliases match Antigravity 2.x tiers
 check("subagent aliases: flash_lite / flash / pro",
       p.alias("flash_lite") == "gemini-3.5-flash-lite"
-      and p.alias("flash") == "gemini-3.8-flash"
+      and p.alias("flash") == "gemini-4-hydrogen"  # since 2026-11: subagents with Model: flash run Hydrogen (High)
       and p.alias("pro") == "gemini-4-argon",
       p.cfg.get("subagent_model_aliases"))
 
@@ -93,7 +101,7 @@ pro31 = usage.Call(6, ts_nov, "Gemini 3.1 Pro (High)", 250_000, 0, 100_000, [], 
 p_batch.price_call(pro31)
 check("Gemini 3.1 Pro batch long_context (>200k)", abs(pro31.cost - (0.25 * 2.0 + 0.1 * 9.0)) < 1e-6, pro31.cost)
 
-# 4. End-to-end CLI output (--json, markdown, --html) shows 300k window and ~250k compaction for Gemini
+# 4. End-to-end CLI output (--json, markdown, --html) shows the ~560k window and ~505k compaction of Gemini 4
 cid = "11111111-2222-3333-4444-555555555555"
 logs = os.path.join(SP, "brain", cid, ".system_generated", "logs")
 os.makedirs(logs, exist_ok=True)
@@ -111,16 +119,16 @@ js = subprocess.run([sys.executable, os.path.join(USAGE_DIR, "usage.py"), "--tra
                     capture_output=True, text=True, encoding="utf-8")
 data = json.loads(js.stdout)
 ctx = data.get("context") or {}
-check("usage.py --json reports window=300000 and compaction=250000 for Gemini",
-      ctx.get("window") == 300_000 and ctx.get("compaction") == 250_000 and ctx.get("current") == 230_000,
+check("usage.py --json reports window=560000 and compaction=505000 for Gemini 4",
+      ctx.get("window") == 560_000 and ctx.get("compaction") == 505_000 and ctx.get("current") == 230_000,
       ctx)
 
 html_out = os.path.join(SP, "usage.html")
 md = subprocess.run([sys.executable, os.path.join(USAGE_DIR, "usage.py"), "--transcript", tf, "--html", html_out],
                     capture_output=True, text=True, encoding="utf-8")
 html_body = open(html_out, encoding="utf-8").read() if os.path.isfile(html_out) else ""
-check("usage.py markdown & HTML include 300k limit and ~250k compaction",
-      "230k / 300k" in md.stdout and "(сжатие ~250k)" in md.stdout and "сжатие ~250k" in html_body,
+check("usage.py markdown & HTML include the 560k limit and ~505k compaction",
+      "230k / 560k" in md.stdout and "(сжатие ~505k)" in md.stdout and "сжатие ~505k" in html_body,
       md.stdout[:300])
 
 # 5. Orchestrator: the planner (Carbon) plans in plan mode and hands over with exit_plan_mode; Antigravity says the turn

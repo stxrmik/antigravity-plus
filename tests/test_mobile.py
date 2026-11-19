@@ -564,7 +564,7 @@ SCREENS = {"settings.gradle": "include ':app'\n", "app/build.gradle": "apply plu
 MAC_APP = {"MacTool.xcodeproj/project.pbxproj": "SDKROOT = macosx;\nMACOSX_DEPLOYMENT_TARGET = 15.0;\n",
            "Sources/Main.swift": "import SwiftUI\nstruct Main: View { var body: some View { Text(\"a\") } }\n"}
 DESKTOP = {"build.gradle.kts": "plugins { kotlin(\"jvm\") }\n", "src/main/kotlin/Main.kt": "import androidx.compose.runtime.Composable\n@Composable fun App() {}\n"}
-def setup(steps, final="Готово.", files=SCREENS):
+def setup(steps, final="Готово.", files=SCREENS, user="Поменяй экран"):
     """A conversation: the user's request, the agent's tool calls with their results, its last words. A command is
     ("run_command", line, outcome): an exit code, or "bg" for one that went on in the background — ("done", n, code)
     is then the message that the n-th such command has finished."""
@@ -573,7 +573,7 @@ def setup(steps, final="Готово.", files=SCREENS):
     subprocess.run(["git", "init", "-q"], cwd=hws)
     for f in os.listdir(conv.STATE_DIR):
         if f.startswith(cid): os.remove(os.path.join(conv.STATE_DIR, f))
-    rows = [{"step_index": 0, "type": "USER_INPUT", "created_at": "2026-11-10T10:00:00Z", "content": "<USER_REQUEST>Поменяй экран</USER_REQUEST>"}]
+    rows = [{"step_index": 0, "type": "USER_INPUT", "created_at": "2026-11-10T10:00:00Z", "content": f"<USER_REQUEST>{user}</USER_REQUEST>"}]
     tasks = []
     for step in steps:
         if step[0] == "done":
@@ -648,6 +648,13 @@ setup([w("lib/home.dart"), cmd("flutter test")], files={"pubspec.yaml": "name: x
 check("stop: a Flutter screen changed, then `flutter test` (widget tests): covered", stop() is None)
 setup([w("lib/api.dart"), cmd("flutter test")], files={"pubspec.yaml": "name: x\nflutter:\n", "lib/api.dart": "class Api {}\n"})
 check("stop: Flutter logic changed, then `flutter test`: a check was run", stop() is None)
+# a task from Claude Code: Claude Code looks at the screens itself (seen live: four parallel delegated agents, each
+# told not to launch a simulator, were sent back to «look at the app» — every extra call on a 300k–500k context)
+setup([w(HOME_KT), cmd(BUILD)], user=conv.DELEGATED_MARK + " Поменяй экран. Симулятор не запускай.")
+check("stop: a delegated task changed a screen and built it → no «look at the app» reminder", stop() is None)
+setup([w(HOME_KT)], user=conv.DELEGATED_MARK + " Поменяй экран.")
+got = stop() or ""
+check("stop: …but with no check at all after the change it still has to run one", "ran no check" in got, got or "(silent)")
 if compat.MAC and mobile_xcrun_real():
     setup([w("ios/Home.swift"), cmd("xcodebuild -scheme App build")]); got = stop() or ""
     check("stop: a SwiftUI view of an iOS app changed and only built (on a Mac with Xcode)", "the app's screens (ios/Home.swift)" in got, got or "(silent)")

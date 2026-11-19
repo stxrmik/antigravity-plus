@@ -35,6 +35,9 @@ for cmd, want in [
     (r'powershell -Command "Get-Date; Remove-Item -Recurse -Force ~"', "rm-dangerous"),
     (r'pwsh -c "Set-Location src; Remove-Item -Recurse -Force .\build"', None),
     ('Write-Host "ok"; Remove-Item -Recurse -Force ~', "rm-dangerous"), ('Write-Host "a`"; Remove-Item -Recurse -Force ~"', None),
+    # what runs on a server is checked without the stops that only protect this computer
+    (r'ssh.exe admin@example-host "sudo mkdir -p /root/backup && sudo cp -a /etc/nginx /root/backup/"', None),
+    (r'ssh admin@example-host "rm -rf /"', "rm-dangerous"), (r"ssh admin@example-host 'sudo reboot'", "system-power"),
 ]:
     check(f"windows: {cmd}", verdict(cmd), want)
 hit = guard.analyze_command(r'powershell -Command "Get-Date; Remove-Item -Recurse -Force ~"')
@@ -54,11 +57,14 @@ for cmd, want in [("rm -rf ~", "rm-dangerous"), ("rm -rf ./build", None), ("curl
                   ("git push --force origin main", "git-force-push"), ('git commit -m "fix: rm -rf ~ bug"', None),
                   ("crontab -r", "autostart"), ("crontab -l", None), ("sudo rm -rf /", "rm-dangerous"), ("ls -la", None),
                   ("sh -c 'cd / && rm -rf *'", "rm-dangerous"), ("find ~ -delete", "rm-dangerous"),
-                  ("find . -name '*.pyc' -delete", None), ("env -S 'rm -rf /'", "rm-dangerous")]:
+                  ("find . -name '*.pyc' -delete", None), ("env -S 'rm -rf /'", "rm-dangerous"),
+                  ("ssh admin@example-host 'sudo mkdir -p /root/backup'", None), ("ssh admin@example-host 'rm -rf ~'", "rm-dangerous"),
+                  ("mkdir -p /root/backup", "system-files")]:
     check(f"posix: {cmd}", verdict(cmd), want)
-for cmd in ["cat .env", "env", "echo $GITHUB_TOKEN"]:
+for cmd, want in [("cat .env", "secret-print"), ("env", "secret-print"), ("echo $GITHUB_TOKEN", "secret-print"),
+                  ("echo ${GITHUB_TOKEN:+set}", None), ("printenv | cut -d= -f1", None)]:
     hit = guard.secret_print(cmd)
-    check(f"posix secret: {cmd}", hit[0] if hit else None, "secret-print")
+    check(f"posix secret: {cmd}", hit[0] if hit else None, want)
 for path, want in [("/home/me/.config/autostart/x.desktop", "protected-file"), ("/home/me/.ssh/config", None),
                    ("/home/me/.ssh/id_ed25519", "protected-file"), ("/home/me/.gemini/antigravity-plus/settings.json", "agent-settings"),
                    ("/home/me/proj/app.py", None)]:

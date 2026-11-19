@@ -73,6 +73,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -107,20 +108,26 @@ POLL = float(os.environ.get("AGP_DELEGATE_POLL") or 15)              # seconds p
 IDLE_GRACE = float(os.environ.get("AGP_DELEGATE_IDLE_GRACE") or 240)  # turn over, only background work left
 WATCH_POLL = float(os.environ.get("AGP_DELEGATE_WATCH_POLL") or 3)    # seconds between two looks of `watch`
 WATCH_TIMEOUT = 1780  # `watch` stops on its own just before the Monitor tool's 30-minute limit, saying how to go on
+IDLE_PROBE = float(os.environ.get("AGP_DELEGATE_IDLE_PROBE") or 2)  # seconds: does work it started still run?
+NOT_OVER = ("running", "question", "approval", "background", "timeout")  # a task record's states until it is over
 
 # Tiers → model ids, best first; the limits left reorder them (see the docstring). Gemini 4 Hydrogen leads the fast
 # tiers: on the same small task (2026-11-14) Hydrogen (Low) took 20 s and 4 model calls, Gemini 3.8 Flash (Medium)
 # 25 s and 9 calls; Hydrogen streamed ~400–650 tokens/s, Flash ~130–310, both ~2–3 s to the first token, while
 # Gemini 4 Carbon (High) needs ~11 s to its first token (median of 687 calls). Orchestrator (Carbon) leads strong: Carbon
 # plans, Hydrogen carries the plan out — on the same task (2026-11-17, six runs one at a time, all right) it took ~0.01%
-# of the weekly Gemini quota per run against ~0.07% for Carbon (High), in about ¾ of the model time.
+# of the weekly Gemini quota per run against ~0.07% for Carbon (High), in about ¾ of the model time. Gemini 4 Neon
+# comes next, as Orchestrator (Neon) — Neon plans, Hydrogen carries out — and as Neon (High), Antigravity's default
+# model (seen 2026-11-19): Google puts Neon between Carbon and Hydrogen, at High «32% lower cost per task than Carbon»
+# (API $3/$15 per 1M against Carbon's $2/$10, $4/$20 from 2026-12-01). Neon is not measured here yet, its quota cost
+# per run included, so the measured Orchestrator (Carbon) stays first.
 TIERS: Dict[str, List[str]] = {
     "fast": ["gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
              "claude-sonnet-5-5-low"],
     "standard": ["gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-carbon-medium",
                  "gemini-4-argon-medium", "claude-sonnet-5-5-medium"],
-    "strong": ["gemini-pro-orchestrator", "gemini-4-carbon-high", "gemini-4-argon-high", "gemini-4-hydrogen-xhigh",
-               "claude-opus-5-5-high", "claude-sonnet-5-5-high"],
+    "strong": ["gemini-pro-orchestrator", "gemini-pro-orchestrator-neon", "gemini-4-neon-high", "gemini-4-carbon-high",
+               "gemini-4-argon-high", "gemini-4-hydrogen-xhigh", "claude-opus-5-5-high", "claude-sonnet-5-5-high"],
     "claude": ["claude-sonnet-5-5-high", "claude-opus-5-5-medium", "claude-sonnet-5-5-medium",
                "gemini-4-carbon-high"],
 }
@@ -373,8 +380,8 @@ def family(label: str) -> str:
 
 
 def group_of(label: str, groups: List[dict]) -> Optional[dict]:
-    """The quota group a model draws on. Groups list families («gemini 4 carbon») and whole labels whose brackets
-    name a variant, not an effort level («orchestrator (carbon)»)."""
+    """The quota group a model draws on. Groups list families («gemini 4 neon») and whole labels whose brackets
+    name a variant, not an effort level («orchestrator (carbon)», «orchestrator (neon)»)."""
     fam, whole = family(label), (label or "").strip().lower()
     return next((g for g in groups if (whole and whole in g["models"]) or (fam and fam in g["models"])), None)
 
@@ -389,8 +396,13 @@ def usable(m: dict) -> bool:
 
 
 def fuzzy(arg: str, ms: List[dict]) -> Optional[dict]:
+    """The model a few words of its label or id name. When several match, the one whose id adds the fewest words
+    to them, then Antigravity's order: «orchestrator» is gemini-pro-orchestrator — Orchestrator (Carbon), though
+    Antigravity lists Orchestrator (Neon) first —, «neon high» isn't gemini-4-neon-xhigh."""
     words = re.findall(r"[a-z0-9.]+", arg)
-    return next((m for m in ms if words and all(w in (m["label"] + " " + m["id"]).lower() for w in words)), None)
+    hits = [m for m in ms if words and all(w in (m["label"] + " " + m["id"]).lower() for w in words)]
+    return min(hits, key=lambda m: len([p for p in re.findall(r"[a-z0-9.]+", m["id"].lower()) if p not in words]),
+               default=None)  # min keeps the first of equals
 
 
 def state_of(group: Optional[dict], now: Optional[float] = None) -> dict:
@@ -437,7 +449,8 @@ def generic(tier: str, ms: List[dict], default: str) -> List[dict]:
     """When Antigravity has renamed its models: the closest ones by label, best first."""
     pats = {"fast": [r"hydrogen.*\(low\)", r"hydrogen.*\(medium\)", r"flash(?!.*lite).*\(medium\)", r"flash(?!.*lite)"],
             "standard": [r"hydrogen.*\(high\)", ""],
-            "strong": [r"^orchestrator \(carbon\)", r"carbon.*\(high\)", r"\(high\)"],
+            "strong": [r"^orchestrator \(carbon\)", r"^orchestrator \(neon\)", r"neon.*\(high\)", r"carbon.*\(high\)",
+                       r"\(high\)"],
             "claude": [r"claude.*sonnet.*\(high\)", r"claude"]}[tier]
     out: List[dict] = []
     for p in pats:
@@ -681,11 +694,19 @@ def prices() -> List[dict]:
     return []
 
 
-def price(label: str, table: List[dict]) -> str:
+def price(label: str, table: List[dict], day: str = "") -> str:
+    """«$2/$10 per 1M» (input/output) from pricing.json, with its price changes dated on or before `day` (YYYY-MM-DD,
+    default today, local time — as the usage panel prices calls)."""
+    day = day or time.strftime("%Y-%m-%d")
     for m in table:
         try:
             if re.search(m["match"], label, re.I):
-                return f"${m['input']:g}/${m['output']:g} per 1M"
+                rate = dict(m)
+                for ch in sorted((c for c in m.get("price_changes") or [] if isinstance(c, dict)),
+                                 key=lambda c: str(c.get("from"))):
+                    if str(ch.get("from") or "9999") <= day:
+                        rate.update(ch)
+                return f"${rate['input']:g}/${rate['output']:g} per 1M"
         except (re.error, KeyError, TypeError, ValueError):
             continue
     return ""
@@ -980,9 +1001,42 @@ def wait(ls: LS, task: dict, timeout: float) -> Tuple[str, dict]:
             idle_since = None
 
 
+def background_runs(ls: LS, cid: str) -> bool:
+    """The conversation ended its turn (its summary says IDLE), but something it started — a command that went to the
+    background, a subagent — still runs: WaitForConversationFullyIdle blocks until that is over, so a short wait for
+    it times out. The agent goes on by itself when that work finishes."""
+    try:
+        rpc(ls, "WaitForConversationFullyIdle", {"conversationId": cid}, timeout=IDLE_PROBE)
+    except TIMEOUTS:
+        return True
+    except RpcError:
+        return False  # Antigravity can't tell (no such call, or the conversation is gone): the summary decides
+    return False
+
+
+def last_sent(task: dict) -> float:
+    """When Claude Code last wrote into the conversation: the start, a follow-up or a reply."""
+    return max([float(task.get("started") or 0), float(task.get("sent") or 0)]
+               + [float(m.get("at") or 0) for m in task.get("chat") or [] if m.get("from") == "claude"])
+
+
+def idle_state(ls: LS, task: dict) -> str:
+    """A task whose conversation is IDLE, without waiting: "background" while something it started still runs,
+    "running" while a message from Claude Code hasn't been picked up yet (right after a start, a follow-up or a
+    reply it can look idle for a moment — `wait` gives it 30 s too), else "done"."""
+    if background_runs(ls, task["id"]):
+        return "background"
+    since = max(int(task.get("turn") or 0), int(task.get("since") or 0))
+    if time.time() - last_sent(task) < 30 and not answered(ls, task["id"], since):
+        return "running"
+    return "done"
+
+
 def state_now(ls: LS, task: dict) -> Tuple[str, dict]:
-    """Without waiting: "question", "running", "approval" or "done"."""
-    running = summary(ls, task["id"]).get("status") in ("CASCADE_RUN_STATUS_RUNNING", "CASCADE_RUN_STATUS_BUSY")
+    """Without waiting: "question", "running", "approval", "background" (it ended its turn, but something it
+    started still runs) or "done"."""
+    status = summary(ls, task["id"]).get("status")
+    running = status in ("CASCADE_RUN_STATUS_RUNNING", "CASCADE_RUN_STATUS_BUSY")
     listen(ls, task, start=None if running else int(task.get("turn") or 0))
     asked = open_questions(task)
     if asked:
@@ -990,7 +1044,7 @@ def state_now(ls: LS, task: dict) -> Tuple[str, dict]:
     if running:
         ask, _ = pending(ls, task["id"])
         return ("approval", ask) if ask else ("running", {})
-    return "done", {}
+    return (idle_state(ls, task) if status == "CASCADE_RUN_STATUS_IDLE" else "done"), {}
 
 
 # ─────────────────────────────── talking while it works ───────────────────────────────
@@ -1592,14 +1646,26 @@ def cmd_wait(a) -> int:
     return finish(connect(), task, a.timeout)
 
 
+def recorded(task: dict, state: str) -> dict:
+    """The fields that bring a task's record up to the state just found (for `list`, `watch` and the Control Center),
+    or {} when it says so already, the task isn't one of ours, or it was canceled and hasn't started again."""
+    if (not task.get("started") or state == task.get("state")
+            or (task.get("state") == "canceled" and state in ("done", "background"))):
+        return {}
+    return dict(state=state, **({"finished": time.time()} if state in ("done", "background") else {}))
+
+
 def cmd_result(a) -> int:
     task = task_for(a.id)
     ls = connect()
     state, info = state_now(ls, task)
     text, code = render(ls, task, state, info, full=a.full)
+    fields = recorded(task, state)
     shown = [m["id"] for m in task.get("chat") or [] if m.get("from") == "antigravity" and m.get("id")]
     if shown:
-        update(task, told_add=shown)  # a watch won't repeat them
+        fields["told_add"] = shown  # a watch won't repeat them
+    if fields:
+        update(task, **fields)
     print(text)
     return code
 
@@ -1635,7 +1701,7 @@ def watched(ids: List[str]) -> List[dict]:
     here = os.path.realpath(os.getcwd())
     out = []
     for t in records():
-        if time.time() - float(t.get("started") or 0) > 86400 or t.get("state") not in ("running", "question", "approval"):
+        if time.time() - float(t.get("started") or 0) > 86400 or t.get("state") not in NOT_OVER:
             continue
         cwd = str(t.get("cwd") or "")
         if (t.get("claude_session") == session) if session else (cwd and (inside(cwd, here) or inside(here, cwd))):
@@ -1695,10 +1761,8 @@ def watch_events(ls: LS, task: dict, told: set) -> Tuple[List[str], bool]:
         return out, False
     if not status or open_questions(task):
         return out, False  # it ended its turn to wait for your answer (or the summary didn't come): not over
-    try:  # idle, and nothing it started in the background still runs?
-        rpc(ls, "WaitForConversationFullyIdle", {"conversationId": task["id"]}, timeout=2)
-    except TIMEOUTS:
-        return out, False
+    if background_runs(ls, task["id"]):
+        return out, False  # idle, but something it started still runs — it goes on when that finishes
     since = max(int(task.get("turn") or 0), int(task.get("since") or 0))
     if not answered(ls, task["id"], since):
         return out, False  # a message to it hasn't been picked up yet
@@ -1850,14 +1914,32 @@ def cmd_list(a) -> int:
         live = (rpc(ls, "GetAllCascadeTrajectories", {}, timeout=30).get("trajectorySummaries") or {}) if ls else {}
     except SOFT:
         live = {}
+    status = {t["id"]: str((live.get(t["id"]) or {}).get("status") or "") for t in tasks}
+    # idle, while its record says it isn't over: done, or does something it started still run? Only those are asked,
+    # all at once (a busy one takes IDLE_PROBE seconds); without the language server the records answer.
+    probe = [t for t in tasks if ls and t.get("state") in NOT_OVER and status[t["id"]].endswith("IDLE")
+             and not open_questions(t)]
+    def look(t: dict) -> str:
+        try:
+            return idle_state(ls, t)
+        except SOFT:
+            return ""
+    found: Dict[str, str] = {}
+    if probe:
+        with ThreadPoolExecutor(max_workers=min(len(probe), 8)) as pool:
+            found = dict(zip([t["id"] for t in probe], pool.map(look, probe)))
     lines = ["Recent Antigravity tasks (newest first):"]
     for t in tasks:
-        status = str((live.get(t["id"]) or {}).get("status") or "")
-        state = "running" if status.endswith(("RUNNING", "BUSY")) else t.get("state") or "?"
-        if open_questions(t) and state in ("running", "question", "done"):
+        state = "running" if status[t["id"]].endswith(("RUNNING", "BUSY")) else t.get("state") or "?"
+        if open_questions(t) and state in NOT_OVER + ("done",):
             state = "question"  # it asked Claude Code something and waits for the answer
-        elif state in ("running", "question") and status.endswith("IDLE"):
-            state = "done"
+        elif found.get(t["id"]):
+            state = found[t["id"]]  # done, background (something it started still runs) or running (not picked up)
+            fields = recorded(t, state)
+            if fields:
+                update(t, **fields)
+        elif state in ("running", "question") and status[t["id"]].endswith("IDLE"):
+            state = "done"  # the language server couldn't say more
         age = span(time.time() - (t.get("started") or time.time())) + " ago"
         lines.append(f"  {t['id'][:8]}  {state:10} {age:12} {t.get('label') or t.get('model') or '?'}  "
                      f"{t.get('title') or ''}  [{t.get('cwd') or ''}]")
