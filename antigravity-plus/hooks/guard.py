@@ -58,8 +58,9 @@ import os
 import posixpath
 import re
 import shlex
+import socket
 import sys
-from typing import Dict, List, Optional, Set, Tuple
+from typing import AbstractSet, Dict, List, Optional, Set, Tuple
 
 import checks
 import compat
@@ -241,7 +242,8 @@ SYSTEM_RULES = {"disk-format", "disk-format-win", "system-power", "system-power-
                 "agent-settings", "scheduled-sidecar"}
 # The stops that protect only this computer — its system folders and startup files, admin rights, OS settings, the
 # agent's own permissions. Text that runs on another machine or inside a container (runs_elsewhere: `ssh host "sudo
-# mkdir -p /root/backup"`, `docker exec app sh -c '…'`) is checked without them; wiping / or ~, disks, power,
+# mkdir -p /root/backup"`, `docker exec app sh -c '…'`, the unquoted words of `ssh host crontab -e` or `kubectl exec
+# pod -- rm -rf /`, a heredoc fed to `./deploy/ssh.sh 'bash -s'`) is checked without them; wiping / or ~, disks, power,
 # kill -9 -1, fork bombs, reading private keys and every project-level rule still apply to it. Of check_writes' stops
 # only the recursive chmod/chown of / or a top-level folder stays there.
 LOCAL_RULES = {"system-files", "protected-file", "sudo", "run-as-admin", "autostart", "security-off",
@@ -473,17 +475,28 @@ def program(segment: str) -> str:
     return os.path.basename(tokens[0]) if tokens else ""
 
 
-def split_heredocs(cmd: str) -> Tuple[str, List[Tuple[str, str]]]:
-    """Remove heredoc bodies from the command; return (command, [(owner line, body), …])."""
-    docs: List[Tuple[str, str]] = []
+def _heredocs(cmd: str) -> Tuple[str, List[Tuple[str, str, str]]]:
+    """The command without its heredoc bodies, and per heredoc (its line up to the `<<`, the rest of that line, body)."""
+    docs: List[Tuple[str, str, str]] = []
 
     def repl(m: "re.Match[str]") -> str:
         start = cmd.rfind("\n", 0, m.start()) + 1
-        rest = m.group(3)
-        docs.append((cmd[start:m.start()] + rest, m.group(4)))
-        return "<<" + m.group(2) + rest + "\n"
+        docs.append((cmd[start:m.start()], m.group(3), m.group(4)))
+        return "<<" + m.group(2) + m.group(3) + "\n"
 
     return HEREDOC.sub(repl, cmd), docs
+
+
+def split_heredocs(cmd: str) -> Tuple[str, List[Tuple[str, str]]]:
+    """Remove heredoc bodies from the command; return (command, [(owner line, body), …])."""
+    cmd, docs = _heredocs(cmd)
+    return cmd, [(before + rest, body) for before, rest, body in docs]
+
+
+def heredoc_owner(before: str, rest: str) -> str:
+    """The simple command a heredoc is fed to: the words around its `<<` up to the separators on either side
+    (`cd /srv/app && ./deploy/ssh.sh 'bash -s' <<'EOF' | tee log` → `./deploy/ssh.sh 'bash -s'`)."""
+    return (_split(before)[-1][0] + " " + _split(rest)[0][0]).strip()
 
 
 # A delegated agent talking to Claude Code (claude-code/skills/antigravity/scripts/delegate.py ask|tell, the commands
@@ -974,17 +987,65 @@ def command_strings(seg: str) -> List[str]:
 # Programs with "ssh" in the name that run what they are given here, not on a server.
 SSH_LOCAL_TOOLS = {"ssh-agent", "ssh-add", "ssh-keygen", "ssh-keyscan", "ssh-copy-id", "sshd", "sshfs"}
 CONTAINER_CLIS = {"docker", "podman", "kubectl", "docker-compose"}
-# Their options before the subcommand that take a value (`kubectl -n prod exec …`, `docker compose -f x.yml exec`).
+# Their options before the subcommand that take a value (`kubectl -n prod exec …`, `docker compose -f x.yml exec`),
+# and the ones that take none: any other option right before `exec` may have taken it as its value (`docker
+# --tlscacert exec run -v /:/host …` is `docker run`), so such a command counts as one that runs here.
 CONTAINER_VALUE_OPTS = {"-c", "--context", "-H", "--host", "-l", "--log-level", "--config", "--connection", "--url",
                         "--identity", "-n", "--namespace", "--kubeconfig", "--cluster", "--user", "-s", "--server",
                         "--token", "--as", "-v", "-f", "--file", "-p", "--project-name", "--project-directory",
-                        "--env-file", "--profile"}
+                        "--env-file", "--profile", "--tlscacert", "--tlscert", "--tlskey", "--as-group", "--as-uid",
+                        "--cache-dir", "--certificate-authority", "--client-certificate", "--client-key", "--password",
+                        "--profile-output", "--request-timeout", "--tls-server-name", "--username", "--v", "--vmodule",
+                        "--log-dir", "--log-file", "--log-flush-frequency", "--ansi", "--parallel", "--progress",
+                        "--root", "--runroot", "--runtime", "--storage-driver", "--storage-opt", "--tmpdir", "--ssh",
+                        "--cgroup-manager", "--events-backend", "--hooks-dir", "--network-config-dir", "--module"}
+CONTAINER_FLAGS = {"-D", "--debug", "--tls", "--tlsverify", "--insecure-skip-tls-verify", "--match-server-version",
+                   "--disable-compression", "--warnings-as-errors", "--dry-run", "--compatibility", "--all-resources",
+                   "-r", "--remote", "--syslog", "--transient-store", "--verbose", "--no-ansi", "--skip-hostname-check"}
+# ssh destinations that are this computer itself: what ssh runs there runs here.
+try:
+    _NAME = socket.gethostname().lower().rstrip(".")
+except Exception:  # no name: only the loopback ones
+    _NAME = ""
+THIS_COMPUTER = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback", "0.0.0.0", "::1",
+                 "0:0:0:0:0:0:0:1"} | ({_NAME, _NAME.split(".")[0], _NAME.split(".")[0] + ".local"} if _NAME else set())
+
+
+def _this_computer(host: str) -> bool:
+    """Is this ssh destination (`user@host`, `ssh://user@host:2222`, `[::1]`) this computer — localhost, 127.x, ::1 or
+    its own name?"""
+    h = host.lower()
+    uri = h.startswith("ssh://")
+    h = (h[6:] if uri else h).rsplit("@", 1)[-1].rstrip("/")
+    if h.startswith("["):
+        h = h[1:].split("]", 1)[0]
+    elif uri:
+        h = h.split(":", 1)[0]
+    h = h.rstrip(".")
+    return h in THIS_COMPUTER or bool(re.fullmatch(r"127(?:\.\d{1,3}){1,3}", h))
+
+
+def _exec_at(words: List[str], i: int, prog: str) -> Optional[int]:
+    """Where `exec`'s own words start in `docker [options] exec …` (also `docker compose exec`, `docker container
+    exec`, podman, `kubectl [options] exec …`), words[i] being the CLI; None for another subcommand, or when an option
+    it doesn't know stands right before `exec` (it may have taken `exec` as its value)."""
+    seen, j = [], i + 1
+    while j < len(words) and len(seen) < 2 and seen[-1:] != ["exec"]:
+        w, before = words[j], words[j - 1] if j > i + 1 else ""
+        if w == "exec" and before.startswith("-") and "=" not in before and before not in CONTAINER_FLAGS:
+            return None
+        j += 2 if w in CONTAINER_VALUE_OPTS else 1
+        if not w.startswith("-"):
+            seen.append(w)
+    if seen != ["exec"] and not (prog in ("docker", "podman") and seen in (["compose", "exec"], ["container", "exec"])):
+        return None
+    return j
 
 
 def runs_elsewhere(seg: str) -> bool:
     """Does this command run its command text on another machine — ssh, sshpass, a wrapper script named after ssh
     (`./deploy/ssh.sh "…"`), also under `timeout 30 …` — or inside a container (`docker exec`, `docker compose
-    exec`, `podman exec`, `kubectl exec`)? Not `docker run`: its volumes can reach this computer."""
+    exec`, `podman exec`, `kubectl exec`)? Not `docker run`: its volumes can reach this computer; not `ssh localhost`."""
     tokens = strip_prefixes(tokenize(seg))
     if tokens and os.path.basename(tokens[0]) in ("timeout", "gtimeout"):  # timeout [-s SIG] [-k T] 30 ssh …
         i = 1
@@ -993,17 +1054,119 @@ def runs_elsewhere(seg: str) -> bool:
         tokens = tokens[i + 1:]  # `timeout 30 sudo ssh …` stays local: its sudo runs here
     prog = re.sub(r"\.exe$", "", os.path.basename(tokens[0]).lower()) if tokens else ""
     if "ssh" in prog:
-        return prog not in SSH_LOCAL_TOOLS
-    if prog not in CONTAINER_CLIS:
-        return False
-    words, i = [], 1  # the subcommand, past the options before it
-    while i < len(tokens) and len(words) < 2:
-        t = tokens[i]
-        i += 2 if t in CONTAINER_VALUE_OPTS else 1
-        if not t.startswith("-"):
-            words.append(t)
-    return words[:1] == ["exec"] or prog in ("docker", "podman") and words in (["compose", "exec"],
-                                                                              ["container", "exec"])
+        if prog in SSH_LOCAL_TOOLS:
+            return False
+        parts = _ssh_parts(tokens, 0, prog) if prog in ("ssh", "sshpass") else None
+        return not (parts and _this_computer(tokens[parts[0]]))
+    return prog in CONTAINER_CLIS and _exec_at(tokens, 0, prog) is not None
+
+
+ELSEWHERE_HINT = re.compile(r"ssh|docker|podman|kubectl", I)  # every program runs_elsewhere knows has one in its name
+# Options of `exec` that take a value: docker/podman/compose (`-e`, `-u`, `-w`), kubectl (`-c`, `-f`, `-n`, `-s`, `-v`).
+EXEC_VALUE_OPTS = {"--env", "--env-file", "--user", "--workdir", "--detach-keys", "--index", "--preserve-fd",
+                   "--preserve-fds", "--cidfile", "--container", "--filename", "--pod-running-timeout", "--namespace",
+                   "--context", "--cluster", "--kubeconfig", "--server", "--token", "--as", "--as-group", "--as-uid",
+                   "--request-timeout", "--v", "--log-file", "--username", "--password"}
+
+
+def _options_end(words: List[str], i: int, letters: str, longs: AbstractSet[str] = frozenset()) -> Tuple[int, bool]:
+    """Where a getopt-style command's options from words[i] on end: (the index of its first other word, whether `--`
+    ended them). A long option in `longs` takes the next word (`--user root`; `--user=root` is one word); in a cluster
+    of short ones (`-it`, `-itu root`) a letter in `letters` takes the rest of the word (`-p2222`) or the next one."""
+    while i < len(words):
+        w = words[i]
+        if w == "--":
+            return i + 1, True
+        if len(w) < 2 or not w.startswith("-"):
+            return i, False
+        i += 1
+        if w.startswith("--"):
+            i += 1 if w in longs else 0
+            continue
+        for k in range(1, len(w)):
+            if w[k] in letters:
+                i += 1 if k == len(w) - 1 else 0
+                break
+    return i, False
+
+
+def _ssh_parts(words: List[str], i: int, prog: str) -> Optional[Tuple[int, int]]:
+    """(where the host is, where the remote command starts) in `[sshpass …] ssh [options] host [options] [--]
+    command…`, words[i] being `prog`, sshpass or ssh (OpenSSH reads options after the host too, up to its first other
+    word); None without a host or when sshpass runs something else."""
+    if prog == "sshpass":
+        i = _options_end(words, i + 1, "pfdP")[0]
+        if i >= len(words) or re.sub(r"\.exe$", "", os.path.basename(words[i]).lower()) != "ssh":
+            return None
+    letters = "".join(SSH_ARG_OPTS)
+    host, ended = _options_end(words, i + 1, letters)
+    if host >= len(words):
+        return None
+    return host, host + 1 if ended else _options_end(words, host + 1, letters)[0]
+
+
+def _exec_command_at(words: List[str], i: int, prog: str) -> Optional[int]:
+    """Where the command starts in `docker [options] exec [options] container command…` (`docker compose exec`,
+    `docker container exec`, podman, `kubectl exec pod [options] -- command…`), words[i] being the CLI; None for
+    another subcommand."""
+    j = _exec_at(words, i, prog)
+    if j is None:
+        return None
+    if prog == "kubectl":  # kubectl exec pod -- command…; the older form without `--`: the words after the pod
+        if "--" in words[j:]:
+            return words.index("--", j) + 1
+        k = _options_end(words, j, "cfnsv", EXEC_VALUE_OPTS)[0]
+        return _options_end(words, k + 1, "cfnsv", EXEC_VALUE_OPTS)[0] if k < len(words) else None
+    k = _options_end(words, j, "euw", EXEC_VALUE_OPTS)[0]
+    if prog == "podman" and any(w == "--latest" or re.fullmatch(r"-[dit]*l[dilt]*", w) for w in words[j:k]):
+        return k  # podman exec -l: the latest container, none named
+    if k >= len(words):
+        return None
+    return k + 2 if words[k + 1:k + 2] == ["--"] else k + 1  # `--` as a command fails; read on, to be safe
+
+
+def elsewhere_words(seg: str) -> Optional[Tuple[str, str]]:
+    """A command that runs its own words on another machine or in a container (runs_elsewhere) → (what runs here — the
+    program, its options, the host or container —, what runs there, as a command line): `ssh h rm -rf /` → ("ssh h",
+    "rm -rf /"). ssh joins its words with spaces for the remote shell and a wrapper script named after ssh passes them
+    on (`./deploy/ssh.sh uptime`); `docker exec app rm -rf /` and `kubectl exec pod -- rm -rf /` run them as they are.
+    None for anything else, and with nothing to run there (`ssh h` opens a session; its heredoc is read on its own)."""
+    if not ELSEWHERE_HINT.search(seg):  # no such program named: the long `git commit -m "…"` is not split again
+        return None
+    words = tokenize(seg)
+    tokens = strip_prefixes(words)
+    if not tokens or words[len(words) - len(tokens):] != tokens:  # env -S rebuilt them: its string is read on its own
+        return None
+    i = 0
+    if os.path.basename(tokens[0]) in ("timeout", "gtimeout"):  # timeout [-s SIG] [-k T] 30 ssh … (runs_elsewhere)
+        i = 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            i += 2 if tokens[i] in ("-s", "--signal", "-k", "--kill-after") else 1
+        i += 1
+    prog = re.sub(r"\.exe$", "", os.path.basename(tokens[i]).lower()) if i < len(tokens) else ""
+    if "ssh" in prog and prog not in SSH_LOCAL_TOOLS:
+        parts = _ssh_parts(tokens, i, prog) if prog in ("ssh", "sshpass") else (i, i + 1)
+        if prog in ("ssh", "sshpass") and parts and _this_computer(tokens[parts[0]]):
+            return None  # `ssh localhost crontab -e` runs here
+        at, join = parts[1] if parts else None, " ".join
+    elif prog in CONTAINER_CLIS:
+        at, join = _exec_command_at(tokens, i, prog), shlex.join
+    else:
+        return None
+    if at is None or at >= len(tokens):
+        return None
+    return shlex.join(words[:len(words) - len(tokens) + at]), join(tokens[at:])
+
+
+def runs_there(seg: str) -> str:
+    """The program that ends up running in `ssh h psql`, `./deploy/ssh.sh 'docker exec -i db psql'` (through each
+    machine and container on the way: elsewhere_words), or of the command itself."""
+    for _ in range(3):
+        there = elsewhere_words(seg)
+        if not there:
+            break
+        seg = there[1]
+    return program(seg)
 
 
 def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
@@ -1012,7 +1175,9 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
     there (SYSTEM_RULES), looked for in the whole command — past any project-level match. known: what the command
     around this one set (its variables and current folder: `cd / && bash -c 'rm -rf *'`, `x=$(rm -rf $S/y)`).
     remote: the text runs on another machine or in a container (runs_elsewhere) — without the stops that only protect
-    this computer (LOCAL_RULES), down into its own quoted strings, $(…) and heredocs."""
+    this computer (LOCAL_RULES), down into its own quoted strings, $(…) and heredocs. What a command hands over to run
+    there — its unquoted words too (`ssh h crontab -e`, `docker exec app rm -rf /`: elsewhere_words), a heredoc fed to
+    it (`./deploy/ssh.sh 'bash -s' <<'EOF'`) — is analysed so."""
     if not cmd or not cmd.strip() or depth > 2:
         return None
     keep = lambda rid: (not system_only or rid in SYSTEM_RULES) and not (remote and rid in LOCAL_RULES)  # noqa: E731
@@ -1021,7 +1186,7 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
     cmd = re.sub(r"\\\r?\n", " ", cmd)
     if keep("agent-settings") and SELF_SWITCH.search(cmd):
         return "agent-settings", SELF_SWITCH_REASON
-    cmd, heredocs = split_heredocs(cmd)
+    cmd, heredocs = _heredocs(cmd)
     # Quoted text is data (commit messages, search patterns) unless it is handed to an interpreter.
     text = cmd if INTERPRETER.search(cmd) else QUOTED.sub("''", cmd)
     for rid, rx, reason in PIPE_RULES:
@@ -1054,16 +1219,23 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
         # The rules read the command's own words; a quoted command string is split at its own separators below, so
         # `ssh h 'git pull && make clean && rm -f x'` is no `git clean -f`. Too deep for that: the whole text.
         target = bare if deeper else seg if INTERPRETER.search(seg) else QUOTED.sub("''", seg)
+        # `ssh h crontab -e`: only the program, its options and the host or container run here, so the rules that
+        # protect only this computer read just those; the words that run there are analysed as remote below. The
+        # other rules read all the words, as before (`docker exec app cat ~/.ssh/id_rsa`).
+        there = elsewhere_words(seg)
+        here = _bare(there[0]) if there else target
         for rid, rx, reason in SEGMENT_RULES:
-            if keep(rid) and rx.search(target):
+            if keep(rid) and rx.search(here if rid in LOCAL_RULES else target):
                 return rid, reason
+        # the panel's routes in all the words: `ssh -R 9999:localhost:…` brings a server's request to this computer
         if keep("agent-settings") and prog.lower() not in ("git", "git.exe") and _sidecar_api_hit(seg):
             return "agent-settings", SIDECAR_API_REASON
-        if keep("scheduled-sidecar") and schedule_change(seg):
+        if keep("scheduled-sidecar") and schedule_change(there[0] if there else seg):
             return "scheduled-sidecar", SCHEDULE_REASON
-        w = check_writes(seg, known, remote)
+        w = check_writes(seg, known, remote)  # a redirection outside quotes writes here: `ssh h cat x > /etc/y`
         if w:
             return w
+        analysed: List[str] = []  # command strings analysed as remote with no folder: `ssh h '…'` needs no second
         if code and deeper:  # the quoted text is a command, run from this folder (its variables are not passed on)
             cwd = {"__cwd__": known["__cwd__"]} if "__cwd__" in known else None
             elsewhere = remote or runs_elsewhere(seg)  # `ssh host "…"`, `docker exec app sh -c '…'`
@@ -1071,12 +1243,19 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
                 hit = analyze_command(line, depth + 1, system_only, cwd, elsewhere)
                 if hit:
                     return hit
-    for owner, body in heredocs:  # bodies fed to a shell or a DB client are code
+                analysed += [line] if elsewhere and not cwd else []
+        if there and deeper and there[1] not in analysed:  # there, neither this shell's variables nor its folder apply
+            hit = analyze_command(there[1], depth + 1, system_only, remote=True)
+            if hit:
+                return hit
+    for before, rest, body in heredocs:  # bodies fed to a shell or a DB client are code
+        owner = heredoc_owner(before, rest)  # `cd /srv/app && ssh h <<'EOF'`: the body goes to ssh, not to cd
         prog = program(owner)
-        if keep("sql-destructive") and prog in SQL_PROGRAMS and SQL_DESTRUCTIVE.search(body):
-            return "sql-destructive", SQL_REASON
-        if prog in SHELLS:  # `ssh host <<'EOF'` runs its body on the server
-            hit = analyze_command(body, depth + 1, system_only, remote=remote or runs_elsewhere(owner))
+        if keep("sql-destructive") and runs_there(owner) in SQL_PROGRAMS and SQL_DESTRUCTIVE.search(body):
+            return "sql-destructive", SQL_REASON  # `psql <<EOF`, `docker exec -i db psql <<EOF`, `ssh h psql <<EOF`
+        far = runs_elsewhere(owner)  # `ssh host <<'EOF'`, `./deploy/ssh.sh 'bash -s' <<'EOF'`, `docker exec -i app sh`
+        if prog in SHELLS or far:  # what runs on the server or in the container reads it there
+            hit = analyze_command(body, depth + 1, system_only, remote=remote or far)
             if hit:
                 return hit
     return None

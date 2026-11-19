@@ -182,24 +182,25 @@ cd antigravity-plus
   больше, включая лёгкие задачи; квота Antigravity впритык — только объёмную работу на самой дешёвой модели;
   исчерпана — делает сам до сброса.
 - Модель выбирается уровнем или точным id: `fast` — Gemini 4 Hydrogen (Low) для лёгких задач, `standard` — Gemini 4
-  Hydrogen (High) для работы по ясному заданию, `strong` — Orchestrator (Carbon), а за ним Orchestrator (Neon),
-  Gemini 4 Neon (High) и Gemini 4 Carbon (High), для фич на несколько файлов и отладки, `claude` — Claude Sonnet 5.5 (High) в Antigravity, на отдельной квоте Claude. Внутри уровня решают остатки
+  Hydrogen (High) для работы по ясному заданию, `strong` — Orchestrator (Neon), а за ним Gemini 4 Neon (High),
+  Orchestrator (Carbon) и Gemini 4 Carbon (High), для фич на несколько файлов и отладки, `claude` — Claude Sonnet 5.5 (High) в Antigravity, на отдельной квоте Claude. Внутри уровня решают остатки
   лимитов: исчерпанные модели пропускаются, группа квот «впритык» (меньше 15% или расход быстрее, чем идёт неделя)
   берётся последней, а квота, которая сгорит к скорому сбросу, — первой. В выводе есть строка «почему эта модель».
 - Почему Hydrogen для лёгкого: на одной и той же задаче Hydrogen (Low) справился за 20 с и 4 вызова модели, Gemini 3.8
   Flash — за 25 с и 9 вызовов; Hydrogen выдаёт ~400–650 токенов/с против ~130–310 у Flash, а Gemini 4 Carbon (High)
   думает ~11 с перед каждым ответом. Скорость моделей по вашим недавним беседам показывает `delegate.py models`.
-- Orchestrator (Carbon) — точный id `gemini-pro-orchestrator` (`orchestrator argon` — вариант с Argon): Carbon
-  составляет план, Gemini 4 Hydrogen его выполняет; в отчёте видно, сколько вызовов сделал каждый. Он первый в
-  `strong`. На небольшой задаче (модуль, его CLI и ~18 тестов; 17.11.2026, справились все прогоны) за прогон:
-  Orchestrator — ~3,5–5 мин работы модели и ~0,01% недельной квоты Gemini, Carbon (High) — ~4,5–6,5 мин и ~0,07%,
-  Hydrogen (XHigh) — ~1,5–3,5 мин и ~0,01–0,02%. По ценам API Orchestrator стоит почти как Carbon ($0.35–0.44 против
-  $0.29–0.38): квоту Antigravity считает ему намного меньше, чем Carbon (High).
-- Gemini 4 Neon (вышла 18.11.2026, теперь модель Antigravity по умолчанию) — между Carbon и Hydrogen: по данным Google
-  на уровне High задача обходится на 32% дешевле, чем у Carbon; по API $3 / $15 за 1M токенов (Carbon и Argon до 30.11
-  стоят $2 / $10, с 1.12 — $4 / $20). Точные id: `gemini-4-neon-low|medium|high|xhigh`, Orchestrator с Neon в роли
-  планировщика — `gemini-pro-orchestrator-neon` (`--model "orchestrator neon"`). Сколько квоты она тратит здесь, ещё
-  не измерено, поэтому в `strong` она идёт после измеренного Orchestrator (Carbon).
+- Orchestrator — один разговор, где сильная модель составляет план (читает файлы, запускает пробные команды), а
+  Gemini 4 Hydrogen его выполняет; в отчёте видно, сколько вызовов сделал каждый. Точные id: Orchestrator (Neon) —
+  `gemini-pro-orchestrator-neon` (`--model "orchestrator neon"`), Orchestrator (Carbon) — `gemini-pro-orchestrator`
+  (`--model orchestrator`), Orchestrator (Argon) — `orchestrator argon`.
+- Gemini 4 Neon (вышла 18.11.2026, теперь модель Antigravity по умолчанию) первая в `strong`: на небольшой задаче
+  (модуль, его CLI и ~18 тестов; 19.11.2026, прогоны по одному, справились все) за прогон Orchestrator (Neon) — ~1,6–2
+  мин работы модели и 0,016% недельной квоты Gemini, Gemini 4 Neon (High) — ~1,7–1,8 мин и 0,013%, Orchestrator
+  (Carbon) — ~3,3–4,3 мин и 0,039%. Квоту Antigravity списывает по цене каждого вызова в API: за токен Hydrogen
+  считается как 1, Neon — как 2, Carbon — примерно как 4, поэтому чем больше задачи делает исполнитель Hydrogen, тем
+  дешевле Orchestrator. По API Neon стоит $3 / $15 за 1M токенов, Carbon и Argon — $2 / $10 до 30.11.2026, с 1.12 —
+  $4 / $20. (Прежние цифры «~0,01% у Orchestrator (Carbon) против ~0,07% у Carbon (High)» от 17.11 были ошибкой
+  замера: Antigravity отдаёт остаток квоты из кеша, который обновляется раз в ~5 минут.)
 - Агент Antigravity работает в той же папке, его беседа видна в Antigravity («Claude Code: …»), а Claude Code тем
   временем делает свою часть. В конце Claude Code получает короткий отчёт: слова агента, изменённые файлы (+/−
   строк), команды с кодами выхода и цену — вызовы модели, токены, доля недельного лимита.

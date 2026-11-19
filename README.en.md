@@ -185,24 +185,25 @@ they install the saved choice.
   spending). Its own limit running low → it hands over more, light tasks included; Antigravity's quota tight → only
   bulky work on the cheapest model; used up → it does the work itself until the reset.
 - The model is a tier or an exact id: `fast` — Gemini 4 Hydrogen (Low) for light tasks, `standard` — Gemini 4 Hydrogen
-  (High) for work from a clear spec, `strong` — Orchestrator (Carbon), then Orchestrator (Neon), Gemini 4 Neon (High)
+  (High) for work from a clear spec, `strong` — Orchestrator (Neon), then Gemini 4 Neon (High), Orchestrator (Carbon)
   and Gemini 4 Carbon (High), for multi-file features and debugging, `claude` — Claude Sonnet 5.5 (High) in Antigravity, on its separate Claude quota. Within a tier the limits left decide:
   used-up models are skipped, a "tight" quota group (under 15% left, or spent faster than the week goes by) comes
   last, and a quota that would reset unused soon comes first. The output says why this model.
 - Why Hydrogen for light work: on the same task Hydrogen (Low) finished in 20 s and 4 model calls, Gemini 3.8 Flash in
   25 s and 9 calls; Hydrogen streams ~400–650 tokens/s against ~130–310 for Flash, while Gemini 4 Carbon (High) thinks
   ~11 s before each answer. `delegate.py models` shows each model's speed in your recent conversations.
-- Orchestrator (Carbon) is the exact id `gemini-pro-orchestrator` (`orchestrator argon` for the Argon variant): Carbon
-  makes the plan, Gemini 4 Hydrogen carries it out; the report shows how many calls each made. It leads `strong`. On a
-  small task (a module, its CLI and ~18 tests; 2026-11-17, every run got it right), per run: Orchestrator ~3.5–5 min of
-  model time and ~0.01% of the weekly Gemini quota, Carbon (High) ~4.5–6.5 min and ~0.07%, Hydrogen (XHigh)
-  ~1.5–3.5 min and ~0.01–0.02%. At API prices Orchestrator costs about what Carbon does ($0.35–0.44 against
-  $0.29–0.38): Antigravity counts its quota far lower than Carbon (High)'s.
-- Gemini 4 Neon (out 2026-11-18, now Antigravity's default model) sits between Carbon and Hydrogen: Google puts a task
-  at its High level at 32% less than on Carbon; API prices $3 / $15 per 1M tokens (Carbon and Argon cost $2 / $10 until
-  2026-11-30, $4 / $20 from 2026-12-01). Exact ids: `gemini-4-neon-low|medium|high|xhigh`; Orchestrator with Neon as
-  the planner is `gemini-pro-orchestrator-neon` (`--model "orchestrator neon"`). Its quota cost here isn't measured
-  yet, so in `strong` it comes after the measured Orchestrator (Carbon).
+- Orchestrator is one conversation where a strong model makes the plan (reads files, runs probing commands) and
+  Gemini 4 Hydrogen carries it out; the report shows how many calls each made. Exact ids: Orchestrator (Neon) is
+  `gemini-pro-orchestrator-neon` (`--model "orchestrator neon"`), Orchestrator (Carbon) `gemini-pro-orchestrator`
+  (`--model orchestrator`), Orchestrator (Argon) `orchestrator argon`.
+- Gemini 4 Neon (out 2026-11-18, now Antigravity's default model) leads `strong`: on a small task (a module, its CLI
+  and ~18 tests; 2026-11-19, runs one at a time, every one right), per run Orchestrator (Neon) took ~1.6–2 min of model
+  time and 0.016% of the weekly Gemini quota, Gemini 4 Neon (High) ~1.7–1.8 min and 0.013%, Orchestrator (Carbon)
+  ~3.3–4.3 min and 0.039%. Antigravity books every call at its API price — per token Hydrogen counts 1, Neon 2,
+  Carbon ~4 —, so the more of a task its Hydrogen executor carries out, the cheaper an Orchestrator gets. API prices:
+  Neon $3 / $15 per 1M tokens, Carbon and Argon $2 / $10 until 2026-11-30 and $4 / $20 from 2026-12-01. (The
+  2026-11-17 «~0.01% for Orchestrator (Carbon) against ~0.07% for Carbon (High)» was a measuring error: Antigravity
+  answers quota reads from a cache it refreshes only every ~5 minutes.)
 - The Antigravity agent works in the same folder, its conversation shows up in Antigravity ("Claude Code: …"), and
   Claude Code does its own part meanwhile. At the end Claude Code gets a short report: the agent's words, the files it
   changed (+/− lines), its commands with exit codes, and the cost — model calls, tokens, share of the weekly limit.

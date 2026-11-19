@@ -270,8 +270,9 @@ def render(model: str, group: dict, st: dict, others: List[Tuple[dict, dict]]) -
     spare = [f"«{g['name']}» ({s['text']})" for g, s in others if s["status"] == "ok"]
     switch = ("a model from " + ", ".join(spare) + " draws on a separate quota" if spare else "")
     if gemini:
-        cheaper = ("a cheaper model: Gemini 4 Hydrogen, or Orchestrator (Carbon), which Antigravity counts far "
-                   "cheaper than Carbon (High)" + (f"; {switch}" if switch else ""))
+        # Antigravity books each call at its API price: per token Hydrogen counts 1, Neon 2, Carbon ~4 (2026-11-19)
+        cheaper = ("a cheaper model: Gemini 4 Hydrogen (about a quarter of Carbon per token), or Gemini 4 Neon / "
+                   "Orchestrator (Neon) (about half)" + (f"; {switch}" if switch else ""))
     else:
         cheaper = switch or "a cheaper model of this group"
     head = (f"Plan limits of «{group['name']}», which this conversation's model ({model}) draws on: {st['text']}.")

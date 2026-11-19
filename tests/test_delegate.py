@@ -273,13 +273,13 @@ def price_in(line):  # «$2/$10 per 1M» in a line of `delegate.py models`, or "
     m = re.search(r"\$[\d.]+/\$[\d.]+ per 1M", line)
     return m.group(0) if m else ""
 
-# models: quota and tiers — fast and standard on Gemini 4 Hydrogen, strong on Orchestrator (Carbon); the Claude tier
+# models: quota and tiers — fast and standard on Gemini 4 Hydrogen, strong on Orchestrator (Neon); the Claude tier
 # falls back to Gemini while its quota is used up; speeds measured from the conversations' own timings
 code, out = run("models")
-check("models: quota per group and the tiers — strong on Orchestrator (Carbon) though Antigravity lists Neon first",
+check("models: quota per group and the tiers — strong on Orchestrator (Neon), measured cheapest per task (2026-11-19)",
       code == 0 and "«Gemini Models»: week 90% left" in out
       and "fast      gemini-4-hydrogen-low" in out and "standard  gemini-4-hydrogen-high" in out
-      and line_of(out, "strong ").split()[1:4] == ["gemini-pro-orchestrator", "Orchestrator", "(Carbon)"]
+      and line_of(out, "strong ").split()[1:4] == ["gemini-pro-orchestrator-neon", "Orchestrator", "(Neon)"]
       and "first choice of fast" in out and "first choice of strong" in out, out)
 check("models: the Claude tier falls back to a Gemini model with quota left", "claude    gemini-4-carbon-high" in out
       and "Claude Sonnet 5.5 (High): quota used up — resets in 22 h → next with quota left" in out
@@ -298,16 +298,16 @@ check("models: Gemini 4 Neon (High) is Antigravity's default", "Antigravity's de
 code, out = run("models", "--json")
 check("models --json", code == 0 and json.loads(out)["tiers"]["claude"] == "gemini-4-carbon-high"
       and json.loads(out)["states"]["Gemini Models"]["status"] == "ok" and json.loads(out)["default"] == "gemini-4-neon-high", out)
-# Gemini 4 Neon in strong: Orchestrator (Carbon) first, then Orchestrator (Neon), then Neon (High) — before Carbon (High)
-MODEL_LEFT["gemini-pro-orchestrator"] = None
-code, out = run("budget")
-check("strong: Orchestrator (Carbon) used up → Orchestrator (Neon)",
-      line_of(out, "strong ").split()[1:4] == ["gemini-pro-orchestrator-neon", "Orchestrator", "(Neon)"]
-      and "Orchestrator (Carbon): quota used up — resets in" in out and "→ next with quota left" in out, out)
+# strong by the 2026-11-19 measurement: Orchestrator (Neon), then Neon (High), then Orchestrator (Carbon), Carbon (High)
 MODEL_LEFT["gemini-pro-orchestrator-neon"] = None
+code, out = run("budget")
+check("strong: Orchestrator (Neon) used up → Gemini 4 Neon (High)",
+      line_of(out, "strong ").split()[1:6] == ["gemini-4-neon-high", "Gemini", "4", "Neon", "(High)"]
+      and "Orchestrator (Neon): quota used up — resets in" in out and "→ next with quota left" in out, out)
+MODEL_LEFT["gemini-4-neon-high"] = None
 code, out = run("models", "--json")
-check("strong: both Orchestrators used up → Gemini 4 Neon (High), ahead of Carbon (High)",
-      json.loads(out)["tiers"]["strong"] == "gemini-4-neon-high", out)
+check("strong: both Neon models used up → Orchestrator (Carbon), ahead of Carbon (High)",
+      json.loads(out)["tiers"]["strong"] == "gemini-pro-orchestrator", out)
 MODEL_LEFT.clear()
 
 # run: a folder Antigravity doesn't know gets a project; the brief goes in with the run rules; the report
@@ -372,7 +372,7 @@ check("run --model gemini-4-neon-xhigh: that exact model", code == 0
 # an exhausted model gives way within its tier; an approval in Antigravity stops the wait with exit 2
 code, out = run("run", "--model", "claude-sonnet-5-5-high", "Write the docs.", env={"FAKE_CID": C2})
 check("run: an exhausted model gives way to the next of its tier", "Claude Sonnet 5.5 (High): quota used up" in out
-      and "→ took Orchestrator (Carbon) instead" in out and "(created for this folder)" not in out, out)
+      and "→ took Orchestrator (Neon) instead" in out and "(created for this folder)" not in out, out)
 check("run: an approval it waits for → exit 2 with what and why", code == 2 and "is waiting for the user's approval" in out
       and "Waiting for: write_file /x/.git/hooks/pre-commit" in out and "Reason: 🛡️ guard says" in out
       and "Don't approve the agent's actions yourself" in out, out)
@@ -582,12 +582,12 @@ check("budget: fast stays on Hydrogen — every quota it draws on is tight",
       "fast      gemini-4-hydrogen-low" in out and "Every quota this tier draws on is tight" in out, out)
 check("budget: standard and strong take the quota that would reset unused",
       "standard  claude-sonnet-5-5-medium" in out and "instead of Gemini 4 Hydrogen (High): «Claude and GPT models»" in out
-      and "strong    claude-sonnet-5-5-high" in out and "instead of Orchestrator (Carbon)" in out, out)
+      and "strong    claude-sonnet-5-5-high" in out and "instead of Orchestrator (Neon)" in out, out)
 check("budget: advice per group", "«Claude and GPT models» has quota to spare" in out
       and "«Gemini Models» is tight" in out, out)
 code, out = run("run", "--model", "strong", "Port the parser.", env={"FAKE_CID": C1})
 check("run: strong goes to the Claude quota that would reset unused", agentapi_calls()[-1]["argv"][1] == "--model=claude-sonnet-5-5-high"
-      and "Why this model: instead of Orchestrator (Carbon)" in out, out)
+      and "Why this model: instead of Orchestrator (Neon)" in out, out)
 code, out = run("run", "--model", "gemini-4-carbon-high", "Port the parser.", env={"FAKE_CID": C1})
 check("run: an exact model is kept, with a word about its tight quota", agentapi_calls()[-1]["argv"][1] == "--model=gemini-4-carbon-high"
       and "Why this model: your choice; «Gemini Models»" in out and "a lower tier would save it" in out, out)
@@ -621,8 +621,8 @@ renamed = [{"id": f"m-{i}", "label": label, "left": 0.5, "reset": "", "enum": ""
            enumerate(["Gemini 4 Neon (XHigh)", "Gemini 4 Neon (High)", "Gemini 4 Carbon (High)", "Orchestrator (Neon)",
                       "Gemini 4 Hydrogen (High)", "Orchestrator (Carbon)"])]
 got = [m["label"] for m in delegate.generic("strong", renamed, "")]
-check("generic (ids renamed): strong takes Orchestrator (Carbon), Orchestrator (Neon), Neon (High), Carbon (High), "
-      "then the other (High)", got == ["Orchestrator (Carbon)", "Orchestrator (Neon)", "Gemini 4 Neon (High)",
+check("generic (ids renamed): strong takes Orchestrator (Neon), Neon (High), Orchestrator (Carbon), Carbon (High), "
+      "then the other (High)", got == ["Orchestrator (Neon)", "Gemini 4 Neon (High)", "Orchestrator (Carbon)",
                                        "Gemini 4 Carbon (High)", "Gemini 4 Hydrogen (High)"], got)
 ms, default = delegate.models(LIVE)
 pick_id = lambda words, order=ms: (delegate.fuzzy(words, order) or {}).get("id")

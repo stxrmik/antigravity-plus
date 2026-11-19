@@ -1,6 +1,6 @@
 ---
 name: antigravity
-description: Hand sub-tasks — light and simple ones included — to a Google Antigravity agent that works in the same folder and reports back briefly, on a model chosen from the limits left on both sides (Gemini 4 Hydrogen for quick work, Orchestrator — Carbon plans, Hydrogen carries out — for hard work, or Claude in Antigravity). Its reading, edits and test runs spend the user's Antigravity quota instead of your tokens; it runs while you keep working, and you two talk while it works — it asks you when unsure, you answer and steer it.
+description: Hand sub-tasks — light and simple ones included — to a Google Antigravity agent that works in the same folder and reports back briefly, on a model chosen from the limits left on both sides (Gemini 4 Hydrogen for quick work, Orchestrator — Neon plans, Hydrogen carries out — for hard work, or Claude in Antigravity). Its reading, edits and test runs spend the user's Antigravity quota instead of your tokens; it runs while you keep working, and you two talk while it works — it asks you when unsure, you answer and steer it.
 when_to_use: On your own initiative whenever part of the work fits a short brief and can be checked — light, simple tasks (a small function with its test, a rename, a lint fix, docs, a lookup across files: quick on Gemini 4 Hydrogen) as well as token-heavy ones (edits across many files, tests, build or lint fix loops, porting, translations, digging through a large codebase or logs, long commands) — and the more so when your own plan limits run low. Also when the user asks to use Antigravity or Gemini, or to save tokens. Not for a one-step edit in a file you already have open, work that needs this conversation's context or the user's decisions, commits, pushes, deploys or secrets.
 argument-hint: "[task to hand over]"
 ---
@@ -45,7 +45,7 @@ Once per session, and again before you hand over a big batch:
 |---|---|---|
 | `fast` | Gemini 4 Hydrogen (Low) → Hydrogen (Medium) → Gemini 3.8 Flash | light and simple tasks, quick |
 | `standard` | Gemini 4 Hydrogen (High) → Hydrogen (Medium) → Gemini 4 Carbon (Medium) | routine implementation from a clear spec, tests for existing code, refactors across a few files |
-| `strong` | Orchestrator (Carbon) → Orchestrator (Neon) → Gemini 4 Neon (High) → Gemini 4 Carbon (High) → Argon (High) → Hydrogen (XHigh) → Claude Opus 5.5 | multi-file features, debugging with a repro, unfamiliar code — Carbon plans (~11 s before each answer), Hydrogen carries the plan out |
+| `strong` | Orchestrator (Neon) → Gemini 4 Neon (High) → Orchestrator (Carbon) → Gemini 4 Carbon (High) → Argon (High) → Hydrogen (XHigh) → Claude Opus 5.5 | multi-file features, debugging with a repro, unfamiliar code — Neon plans, Hydrogen carries the plan out |
 | `claude` | Claude Sonnet 5.5 (High) in Antigravity | work that needs Claude-level care, on Antigravity's separate Claude quota |
 
 - Within a tier the script decides from the limits left: it skips used-up models, takes a tight quota last, and for
@@ -54,15 +54,14 @@ Once per session, and again before you hand over a big batch:
 - Take the lowest tier that will get it right the first time: a failed attempt costs you a review and a redo.
 - Any exact model works too (`gemini-4-hydrogen-xhigh`, `gemini-4-argon-high`, `claude-opus-5-5-high`, …):
   `delegate.py models` lists every model with the quota left, the price and its measured speed.
-- Gemini 4 Neon (High) is now Antigravity's default model: `--model gemini-4-neon-high`, or Neon planning for
-  Hydrogen with `--model "orchestrator neon"`. What it takes of the quota here isn't measured yet.
-- `orchestrator` — Orchestrator (Carbon) (`gemini-pro-orchestrator`; `orchestrator neon` for Neon,
-  `orchestrator argon` for Argon): Carbon plans (reads, runs probing commands), then Gemini 4 Hydrogen carries the
-  plan out; the report shows how many calls each made. It leads `strong`. Measured on a small task (a module, its CLI
-  and ~18 tests; 2026-11-17, every run got it right), per run: Orchestrator ~3.5–5 min of model time and ~0.01% of
-  the weekly Gemini quota, Carbon (High) ~4.5–6.5 min and ~0.07%, Hydrogen (XHigh) ~1.5–3.5 min and ~0.01–0.02%. At
-  API prices Orchestrator costs about what Carbon does ($0.35–0.44 against $0.29–0.38): Antigravity counts its quota
-  far lower than Carbon (High)'s.
+- Gemini 4 Neon leads `strong`, as Orchestrator (Neon) (`gemini-pro-orchestrator-neon`, `--model "orchestrator
+  neon"`: Neon plans — reads, runs probing commands —, then Gemini 4 Hydrogen carries the plan out; the report shows
+  how many calls each made) and then as Neon (High) (`gemini-4-neon-high`, Antigravity's default model). Measured on a
+  small task (a module, its CLI and ~18 tests; 2026-11-19, runs one at a time, every one right), per run: Orchestrator
+  (Neon) ~1.6–2 min of model time and 0.016% of the weekly Gemini quota, Neon (High) ~1.7–1.8 min and 0.013%,
+  Orchestrator (Carbon) (`--model orchestrator`) ~3.3–4.3 min and 0.039%; at API prices $0.35–0.39, $0.31–0.32 and
+  $0.37–0.42. Antigravity books every call at its API price — per token Hydrogen counts 1, Neon 2, Carbon ~4 —, so
+  the more of a task Hydrogen carries out, the cheaper the Orchestrator.
 
 ## Write the brief
 

@@ -279,8 +279,54 @@ for line, want in [(REMOTE_BACKUPS[0], (None, None)), (REMOTE_BACKUPS[1], (None,
                    ("docker run --rm -v /:/host img sh -c 'cp x /etc/y'", ("protected-file",) * 2),  # volumes reach here
                    ("ssh-agent bash -c 'cp x /etc/y'", ("protected-file",) * 2)]:  # runs its command here
     check("remote: " + line[:62].replace("\n", "⏎"), (verdict(line), verdict(line, True)), want)
+# …and so are its words without quotes, and a heredoc fed to a wrapper script or a container's shell
+for line, want in [("ssh example-host rm -rf /", ("rm-dangerous",) * 2), ("docker exec app rm -rf /", ("rm-dangerous",) * 2),
+                   ("kubectl exec pod-1 -- rm -rf /", ("rm-dangerous",) * 2), ("./deploy/ssh.sh rm -rf ~", ("rm-dangerous",) * 2),
+                   ("ssh -p 2222 deploy@example-host rm -rf ~", ("rm-dangerous",) * 2),
+                   ("sshpass -e ssh -o StrictHostKeyChecking=no h rm -rf /", ("rm-dangerous",) * 2),
+                   ("ssh -t h -- rm -rf /", ("rm-dangerous",) * 2), ("timeout 30 ssh h find / -delete", ("rm-dangerous",) * 2),
+                   ("docker exec -itu root app find / -delete", ("rm-dangerous",) * 2),
+                   ("docker compose -f prod.yml exec -T web rm -rf /", ("rm-dangerous",) * 2),
+                   ("kubectl -n prod exec -it pod-1 -c app -- chown -R app /", ("system-files",) * 2),
+                   ("ssh h sudo reboot", ("system-power",) * 2), ("ssh h shutdown -h now", ("system-power",) * 2),
+                   ("ssh h mkfs.ext4 /dev/sdb1", ("disk-format",) * 2), ("ssh h kill -9 -1", ("kill-all",) * 2),
+                   ("ssh h cat ~/.ssh/id_rsa", ("secrets-read",) * 2),
+                   ("ssh h git reset --hard origin/main", ("git-reset-hard", None)),
+                   # the rules that protect only this computer don't read the words that run there
+                   ("ssh example-host crontab -e", (None, None)), ("ssh h sudo mkdir -p /root/x", (None, None)),
+                   ("kubectl exec pod-1 -- cp x /etc/y", (None, None)), ("ssh h python3 schedule_task.py create x", (None, None)),
+                   # …the other rules still read all the words; what runs here is still checked as here
+                   ("docker exec app cat ~/.ssh/id_rsa", ("secrets-read",) * 2),
+                   ("kubectl exec pod-1 -- base64 $HOME/.ssh/id_ed25519", ("secrets-read",) * 2),
+                   ('ssh h "docker exec app cat img > /dev/sda"', ("disk-format",) * 2),
+                   ("ssh h cat /var/log/x > /etc/x", ("protected-file",) * 2),  # the redirection writes here
+                   ("sudo docker exec app ls", ("sudo",) * 2), ("docker run --rm img crontab -e", ("autostart",) * 2),
+                   ("ssh -R 9999:localhost:8765 h curl -X POST localhost:9999/api/toggle", ("agent-settings",) * 2),
+                   ("ssh localhost crontab -e", ("autostart",) * 2), ("ssh deploy@127.0.0.1 'crontab -e'", ("autostart",) * 2),
+                   ("ssh -p 2222 localhost <<'EOF'\ncrontab -e\nEOF", ("autostart",) * 2),  # loopback: this computer
+                   ("docker --tlscacert exec run --rm -v /:/host img chroot /host crontab -e", ("autostart",) * 2),
+                   ("kubectl --request-timeout 30s exec pod-1 -- rm -rf /", ("rm-dangerous",) * 2),
+                   ("./deploy/ssh.sh 'bash -s' <<'EOF'\nrm -rf ~\nEOF", ("rm-dangerous",) * 2),
+                   ("./deploy/ssh.sh 'bash -s' <<'EOF'\nsudo mkdir -p /root/x && crontab -l\nEOF", (None, None)),
+                   ("cd /srv/app && ./deploy/ssh.sh 'bash -s' <<'EOF' | tee deploy.log\nsudo reboot\nEOF", ("system-power",) * 2),
+                   ("./deploy/ssh.sh 'docker exec -i app python3 -' <<'PY'\nimport json\nprint(json.dumps({'a': 1}))\nPY", (None, None)),
+                   ("cd /srv && ssh h <<'EOF'\nrm -rf ~\nEOF", ("rm-dangerous",) * 2),
+                   ("docker exec -i app sh <<'EOF'\nrm -rf /\nEOF", ("rm-dangerous",) * 2),
+                   ("docker exec -i app sh <<'EOF'\ncp x /etc/y\nEOF", (None, None)),
+                   ("kubectl exec -i pod-1 -- sh <<'EOF'\nkill -9 -1\nEOF", ("kill-all",) * 2),
+                   ("docker exec -i db psql -U app <<'EOF'\nDROP TABLE users;\nEOF", ("sql-destructive", None)),
+                   ("bash -s <<'EOF'\nmkdir -p /root/x\nEOF", ("system-files",) * 2)]:  # a local shell's heredoc: here
+    check("remote words: " + line[:56].replace("\n", "⏎"), (verdict(line), verdict(line, True)), want)
+# what the user's «не пушь» stops is the same as before: a change on a server, quoted or not
+E = "agp-bypass-ban-0001"
+forget(E)
+tpe = transcript(E, [("u", "Почини баг, но ничего не пушь", 12)])
+for line, want in [("ssh root@example-host mkdir -p /root/backup", True), ("./deploy/ssh.sh uptime", True),
+                   ("ssh h uptime", False), ("ssh h 'cat /etc/hostname'", False)]:
+    out = cmd(E, tpe, line)
+    check(f"«не пушь», remote: {line[:52]}", out.get("decision") == "force_ask" and "ничего не пушь" in out.get("reason", ""), want)
 
-for c in (A, B, C, D):
+for c in (A, B, C, D, E):
     forget(c)
 shutil.rmtree(ws); shutil.rmtree(art)
 print("ALL OK" if ok else "FAILURES")

@@ -114,19 +114,21 @@ NOT_OVER = ("running", "question", "approval", "background", "timeout")  # a tas
 # Tiers → model ids, best first; the limits left reorder them (see the docstring). Gemini 4 Hydrogen leads the fast
 # tiers: on the same small task (2026-11-14) Hydrogen (Low) took 20 s and 4 model calls, Gemini 3.8 Flash (Medium)
 # 25 s and 9 calls; Hydrogen streamed ~400–650 tokens/s, Flash ~130–310, both ~2–3 s to the first token, while
-# Gemini 4 Carbon (High) needs ~11 s to its first token (median of 687 calls). Orchestrator (Carbon) leads strong: Carbon
-# plans, Hydrogen carries the plan out — on the same task (2026-11-17, six runs one at a time, all right) it took ~0.01%
-# of the weekly Gemini quota per run against ~0.07% for Carbon (High), in about ¾ of the model time. Gemini 4 Neon
-# comes next, as Orchestrator (Neon) — Neon plans, Hydrogen carries out — and as Neon (High), Antigravity's default
-# model (seen 2026-11-19): Google puts Neon between Carbon and Hydrogen, at High «32% lower cost per task than Carbon»
-# (API $3/$15 per 1M against Carbon's $2/$10, $4/$20 from 2026-12-01). Neon is not measured here yet, its quota cost
-# per run included, so the measured Orchestrator (Carbon) stays first.
+# Gemini 4 Carbon (High) needs ~11 s to its first token (median of 687 calls). Gemini 4 Neon leads strong, as
+# Orchestrator (Neon) — Neon plans, Hydrogen carries the plan out — and then as Neon (High), Antigravity's default
+# model: on the same small task (a module, its CLI and ~18 tests; 2026-11-19, runs one at a time, every one right, quota
+# read with forceRefresh) a run took 0.016% of the weekly Gemini quota and 95–118 s of model time on Orchestrator
+# (Neon), 0.013% and 102–108 s on Neon (High), 0.039% and 197–255 s on Orchestrator (Carbon). Antigravity books each
+# call at its API price — per token Hydrogen counts 1, Neon 2, Carbon ~4 —, so Orchestrator (Neon) should pay off on
+# longer tasks, where Hydrogen does more of the work. (The 2026-11-17 «~0.01% for Orchestrator (Carbon) against ~0.07%
+# for Carbon (High)» came from the language server's 5-minute quota cache: Orchestrator (Carbon) is only 10–15%
+# cheaper than Carbon (High).)
 TIERS: Dict[str, List[str]] = {
     "fast": ["gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
              "claude-sonnet-5-5-low"],
     "standard": ["gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-carbon-medium",
                  "gemini-4-argon-medium", "claude-sonnet-5-5-medium"],
-    "strong": ["gemini-pro-orchestrator", "gemini-pro-orchestrator-neon", "gemini-4-neon-high", "gemini-4-carbon-high",
+    "strong": ["gemini-pro-orchestrator-neon", "gemini-4-neon-high", "gemini-pro-orchestrator", "gemini-4-carbon-high",
                "gemini-4-argon-high", "gemini-4-hydrogen-xhigh", "claude-opus-5-5-high", "claude-sonnet-5-5-high"],
     "claude": ["claude-sonnet-5-5-high", "claude-opus-5-5-medium", "claude-sonnet-5-5-medium",
                "gemini-4-carbon-high"],
@@ -354,10 +356,18 @@ def models(ls: LS) -> Tuple[List[dict], str]:
 
 
 def quota(ls: LS) -> List[dict]:
-    """The plan's limits: [{name, models (lower-case families), buckets {window: {left, reset, disabled}}}]."""
-    try:
-        d = rpc(ls, "RetrieveUserQuotaSummary", {})
-    except SOFT:
+    """The plan's limits: [{name, models (lower-case families), buckets {window: {left, reset, disabled}}}]. Asked with
+    forceRefresh: without it the language server answers from a cache it refreshes only every ~5 minutes (measured
+    2026-11-19), so «limit 84.8% → 78.4% left» in a report would miss the task's last minutes; the server books each
+    model call within seconds. When the forced read fails (it sometimes answers 500), the cached one does."""
+    d = None
+    for body in ({"forceRefresh": True}, {}):
+        try:
+            d = rpc(ls, "RetrieveUserQuotaSummary", body)
+            break
+        except SOFT:
+            continue
+    if d is None:
         return []
     groups = []
     for g in ((d.get("response") or {}).get("groups") or []):
@@ -449,7 +459,7 @@ def generic(tier: str, ms: List[dict], default: str) -> List[dict]:
     """When Antigravity has renamed its models: the closest ones by label, best first."""
     pats = {"fast": [r"hydrogen.*\(low\)", r"hydrogen.*\(medium\)", r"flash(?!.*lite).*\(medium\)", r"flash(?!.*lite)"],
             "standard": [r"hydrogen.*\(high\)", ""],
-            "strong": [r"^orchestrator \(carbon\)", r"^orchestrator \(neon\)", r"neon.*\(high\)", r"carbon.*\(high\)",
+            "strong": [r"^orchestrator \(neon\)", r"neon.*\(high\)", r"^orchestrator \(carbon\)", r"carbon.*\(high\)",
                        r"\(high\)"],
             "claude": [r"claude.*sonnet.*\(high\)", r"claude"]}[tier]
     out: List[dict] = []
