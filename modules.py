@@ -325,13 +325,13 @@ MODULES: List[Dict] = [
         "details": {
             "ru": "Навык antigravity для Claude Code (~/.claude/skills) и команда /claude в Antigravity: оба умеют "
                   "передавать подзадачи друг другу, сверяя квоты обеих сторон. Claude Code отдаёт лёгкую и объёмную "
-                  "рутину агентам Antigravity (Hydrogen, Orchestrator, Carbon) и переговаривается с ними по ходу "
+                  "рутину агентам Antigravity (Gemini 4 Hydrogen, Neon, Carbon, Claude) и переговаривается с ними по ходу "
                   "работы; агент Antigravity через /claude (claude_task.py) может запустить `claude -p` на подзадачу "
                   "и принять diff и отчёт (только по вашей просьбе или при полном доступе). Ставится, только если "
                   "на компьютере есть Claude Code.",
             "en": "The antigravity skill for Claude Code (~/.claude/skills) plus /claude in Antigravity: both sides "
                   "can hand sub-tasks to each other based on remaining limits. Claude Code sends light and bulky "
-                  "routine work to Antigravity agents (Hydrogen, Orchestrator, Carbon) and talks while they run; an "
+                  "routine work to Antigravity agents (Gemini 4 Hydrogen, Neon, Carbon, Claude) and talks while they run; an "
                   "Antigravity agent can use /claude (claude_task.py) to launch `claude -p` on a sub-task and review "
                   "its diff and report (only on your request or under full access). Installed only when Claude Code is "
                   "on the computer.",

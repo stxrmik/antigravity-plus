@@ -35,9 +35,11 @@ PLUGIN = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__))
 STORE = os.path.expanduser("~/.gemini/antigravity-plus/sandbox.json")
 AG_CONFIG = os.path.expanduser("~/.gemini/config/config.json")
 CTX_WARN = 150_000       # tokens per model call: steps get slower, details from the middle get lost
-CTX_HIGH = 220_000       # near the ~250k threshold where Antigravity compacts older Gemini conversations (limit ~300k)
-# The Gemini 4 family (Carbon, Argon, Hydrogen, Neon, Orchestrator) runs with maxContextTokens 512000 since 2026-11-17
-# (Antigravity's generator metadata); real conversations compacted at 509k–553k.
+CTX_HIGH = 220_000       # near the 256k window of Gemini 3.x Flash, where Antigravity compacts the conversation
+# Antigravity compacts a conversation when the next model call would no longer fit its window (maxContextTokens,
+# counted with the tokens the model reported; verified on 2.33.0, 2026-11-20): 512k for the Gemini 4 family (Carbon,
+# Argon, Hydrogen, Neon, every Orchestrator) since 2026-11-16 — real conversations' last calls before a compaction
+# carried 504k–512k, none more —, 256k for Gemini 3.x Flash, 128k for Flash-Lite, 840k for Claude 5.5.
 GEMINI4 = re.compile(r"gemini[-_ ]?4|orchestrator|flash[-_]worker|hydrogen|carbon|argon|neon")
 CTX4_WARN, CTX4_HIGH = 200_000, 440_000
 FAIL_RUN = 3             # failures in a row before the error-loop hint (again at twice that)
@@ -46,18 +48,17 @@ KEEP = 20                # remembered commands per project
 
 
 def ctx_limits(model: str) -> Tuple[int, int, str]:
-    """(warn, high, note) context thresholds for `model`. In Antigravity 2.32 the Gemini 4 family has a ~550k limit and
-    auto-compacts around ~505k; older Gemini models ~300k / ~250k (Flash-Lite subagents: ~128k compaction, ~168k
-    limit), while Claude 5.5 runs up to ~840k."""
+    """(warn, high, note) context thresholds for `model`: Antigravity compacts when the next call wouldn't fit the
+    window — 512k for the Gemini 4 family, 256k for older Gemini, 128k for Flash-Lite subagents, 840k for Claude 5.5."""
     m = (model or "").lower()
     if re.search(r"flash[-_ ]?lite", m):
-        return 80_000, 110_000, " (~128k compaction, ~168k limit)"
-    if GEMINI4.search(m):  # Orchestrator: Carbon, Argon or Neon with Hydrogen, the same Gemini 4 limits
-        return CTX4_WARN, CTX4_HIGH, " (~505k compaction, ~550k limit)"
+        return 80_000, 110_000, " of the model's 128k window"
+    if GEMINI4.search(m):  # Orchestrator: Carbon, Argon or Neon with Hydrogen, the same Gemini 4 window
+        return CTX4_WARN, CTX4_HIGH, " of the model's 512k window"
     if "gemini" in m:
-        return CTX_WARN, CTX_HIGH, " (~250k compaction, ~300k limit)"
+        return CTX_WARN, CTX_HIGH, " of the model's 256k window"
     if re.search(r"(opus|sonnet)[- ]?5[.-]5", m):
-        return 180_000, 720_000, " (~840k compaction)"
+        return 180_000, 720_000, " of the model's 840k window"
     return CTX_WARN, CTX_HIGH, ""
 
 
@@ -278,13 +279,14 @@ def message(payload: dict, st: Optional[dict]) -> Optional[str]:
                     "`| grep`)" + (", hand broad searches to `explorer`. When the current task is done and more work "
                                    "remains, suggest /handoff to continue in a fresh conversation." if main else "."))
         else:
-            text = (f"The context is ~{ctx // 1000}k tokens — close to the point where Antigravity compacts the "
-                    f"conversation{ctx_note} and drops details. Keep task.md current so nothing gets lost"
+            text = (f"The context is ~{ctx // 1000}k tokens{ctx_note} — close to the point where Antigravity "
+                    "compacts the conversation (as soon as the next step won't fit) and drops details. Keep task.md "
+                    "current so nothing gets lost"
                     + (", save to memory what a future conversation would need and isn't saved yet — how the servers "
                        "and deploys work, the cause of a stubborn failure, the user's preferences (rules: «Memory»)"
                        if main and setting("autoMemory") else "")
-                    + (", and at the next natural pause suggest /handoff to continue in a fresh conversation."
-                       if main else "."))
+                    + (", and at the next natural pause suggest /handoff to continue in a fresh conversation (or the "
+                       "user's /compact, which compacts this one at a moment they choose)." if main else "."))
         out.append(tag("context_budget", text))
 
     big = calls.get("big") or {}

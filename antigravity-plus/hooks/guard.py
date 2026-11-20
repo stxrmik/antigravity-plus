@@ -429,8 +429,112 @@ def _split(cmd: str) -> List[Tuple[str, str]]:
 
 
 def split_unquoted(cmd: str) -> List[str]:
-    """The command's simple commands (_split): `ssh host 'a && b'` and `x=$(a; b)` stay one segment each."""
-    return [s.strip() for s, _op in _split(cmd) if s.strip()]
+    """The command's simple commands (_split): `ssh host 'a && b'` and `x=$(a; b)` stay one segment each. The shell's
+    own syntax around them is taken off (shell_segments): `if true; then rm -rf ~/; fi` gives `true` and `rm -rf ~/`."""
+    return shell_segments([s for s, _op in _split(cmd)])
+
+
+# The words of the shell's own syntax around a simple command (POSIX shells): they only open or close a construct, so
+# the command after them is judged as if it stood alone — `if true; then rm -rf ~/; fi` like `rm -rf ~/`,
+# `while true; do shutdown -h now; done` like `shutdown -h now`. A word only counts as one at the start of a segment
+# and followed by a space, a separator or the end (`done=1`, `docker`, `ifconfig` and `find` are no keywords).
+_LEAD = re.compile(r"(?:(?:then|do|else|elif|if|while|until|!)(?=[\s;&|()]|$)|\{(?=\s|$)|\()\s*")
+_CLOSE = re.compile(r"(?:fi|done|esac|\}|\))(?=[\s;&|<>)]|$)\s*")
+_FUNC = re.compile(r"(?:function\s+[\w.:@+-]+(?:\s*\(\s*\))?|[\w.:@+-]+\s*\(\s*\))\s*(?:[{(](?=\s|$)\s*)?")
+_CASE = re.compile(r"case\s+(?:\"[^\"]*\"|'[^']*'|\S+)\s+in(?=\s|$)\s*")
+_WORD = r"(?:\"[^\"]*\"|'[^']*'|[^\s()|;&<>\"'])+"
+_PATTERN = re.compile(rf"\(?\s*{_WORD}(?:\s*\|\s*{_WORD})*\s*\)\s*")  # a case branch: `x)`, `*)`, `a|b)`, `(x)`
+_LOOP = re.compile(r"(?:for|select)\s+([A-Za-z_]\w*)(?:\s+in(?=\s|$)(.*))?$", re.S)
+LOOP_WORDS = 16      # words of one for-loop its body is checked with
+LOOP_SEGMENTS = 64   # copies of one simple command, over all the loops around it
+
+
+def _loop_words(text: str) -> List[str]:
+    """The words of `for NAME in WORDS`, as written (quotes kept, so a word goes back in as the shell would read it)."""
+    try:
+        lex = shlex.shlex(text, posix=False)
+        lex.whitespace_split = True
+        lex.commenters = ""
+        return list(lex)
+    except ValueError:
+        return text.split()
+
+
+def _unclosed(s: str) -> int:
+    """How many more `)` than `(` the segment has outside quotes and substitutions (`$(…)` counts as both)."""
+    bare = _bare(s)
+    return bare.count(")") - bare.count("(")
+
+
+def _put(seg: str, name: str, word: str) -> str:
+    """The segment with the loop variable `name` replaced by one of its words: "$d" and "${d}" as a whole word give
+    the word itself (the shell expanded it when it built the list: `for d in ~/` makes "$d" the home folder)."""
+    seg = re.sub(rf"\"\$(?:\{{{name}\}}|{name}(?!\w))\"", lambda _m: word, seg)
+    return re.sub(rf"\$(?:\{{{name}\}}|{name}(?!\w))", lambda _m: word, seg)
+
+
+def shell_segments(segs: List[str]) -> List[str]:
+    """Simple commands as the rules read them: the keywords and grouping around each taken off (then, do, else, elif,
+    if, while, until, !, { … }, ( … ), a case's head and branch patterns, a function's head, fi / done / esac), and
+    the body of a `for NAME in WORDS` loop given once per word with $NAME / ${NAME} replaced by it — so
+    `for d in ~/ /tmp/x; do rm -rf "$d"; done` is judged like `rm -rf ~/` and `rm -rf /tmp/x`."""
+    out: List[str] = []
+    heads: List[Tuple[str, List[str]]] = []   # loop heads waiting for their `do`
+    loops: List[Tuple[str, List[str]]] = []   # open loops: (name, words) of a for/select loop, ("", []) for others
+    cases = 0
+    for seg in segs:
+        s = seg.strip()
+        while s:
+            m = _CLOSE.match(s)
+            if m:
+                word = m.group(0).strip()
+                if word == "done" and loops:
+                    loops.pop()
+                elif word == "esac" and cases:
+                    cases -= 1
+                s = s[m.end():]
+                continue
+            m = _LOOP.match(s)
+            if m:  # `for d in a b`: no command; its words wait for the body that `do` opens
+                heads.append((m.group(1), _loop_words(m.group(2))[:LOOP_WORDS] if m.group(2) is not None else []))
+                s = ""
+                break
+            m = _CASE.match(s)
+            if m:
+                cases += 1
+                s = s[m.end():]
+                m = _PATTERN.match(s)
+                if m:
+                    s = s[m.end():]
+                continue
+            m = _LEAD.match(s)
+            if m:
+                word = m.group(0).strip()
+                if word in ("while", "until"):
+                    heads.append(("", []))
+                elif word == "do":
+                    loops.append(heads.pop() if heads else ("", []))
+                s = s[m.end():]
+                continue
+            m = _FUNC.match(s) if s.split(None, 1)[0] == "function" or re.match(r"[\w.:@+-]+\s*\(\s*\)", s) else None
+            if m:
+                s = s[m.end():]
+                continue
+            m = _PATTERN.match(s) if cases else None
+            if m:
+                s = s[m.end():]
+                continue
+            break
+        while s.endswith(")") and _unclosed(s) > 0:  # `( rm -rf ~/ )`: the subshell's end
+            s = s[:-1].rstrip()
+        if not s:
+            continue
+        copies = [s]
+        for name, words in loops:
+            if name and words and re.search(rf"\$(?:\{{{name}\}}|{name}(?!\w))", s):
+                copies = [_put(c, name, w) for c in copies for w in words][:LOOP_SEGMENTS]
+        out += copies
+    return out
 
 
 def _bare(seg: str) -> str:
@@ -893,8 +997,9 @@ def pipelines(cmd: str) -> List[List[str]]:
     $(…) don't count (_split)."""
     out: List[List[str]] = [[]]
     for seg, op in _split(cmd):
-        if seg.strip():
-            out[-1].append(seg.strip())
+        stage = shell_segments([seg])  # `if true; then curl -s x | sh; fi`: the stage is `curl -s x`, not `then …`
+        if stage:
+            out[-1].append(stage[0])
         if op not in ("|", "|&"):
             out.append([])
     return [p for p in out if p]

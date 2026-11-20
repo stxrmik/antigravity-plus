@@ -36,7 +36,8 @@ sends when a command finished in the background), so they need no file access an
 Replies go back with `agentapi send-message`: between the agent's steps while it works, or waking it up when it
 ended its turn to wait.
 
-Choosing by the limits left: a tier (fast, standard, strong, claude) is a list of models, best first. Each model
+Choosing by the limits left: a tier (fast, standard, strong, ultra, claude) is a list of models, best first; the
+models in no tier are «Experimental» (EXPERIMENTAL: a word on when each may fit) and go by their exact id. Each model
 belongs to a quota group of Antigravity's plan (Gemini; Claude and GPT) with a weekly and a 5-hour window. A group is
 "exhausted", "tight" (under 15% left, or spending ahead of the week's pace), "spend" (much left and the week
 resets soon, or far behind pace) or "ok". A tier skips exhausted models, takes tight groups last and — for standard
@@ -111,34 +112,80 @@ WATCH_TIMEOUT = 1780  # `watch` stops on its own just before the Monitor tool's 
 IDLE_PROBE = float(os.environ.get("AGP_DELEGATE_IDLE_PROBE") or 2)  # seconds: does work it started still run?
 NOT_OVER = ("running", "question", "approval", "background", "timeout")  # a task record's states until it is over
 
-# Tiers → model ids, best first; the limits left reorder them (see the docstring). Gemini 4 Hydrogen leads the fast
-# tiers: on the same small task (2026-11-14) Hydrogen (Low) took 20 s and 4 model calls, Gemini 3.8 Flash (Medium)
-# 25 s and 9 calls; Hydrogen streamed ~400–650 tokens/s, Flash ~130–310, both ~2–3 s to the first token, while
-# Gemini 4 Carbon (High) needs ~11 s to its first token (median of 687 calls). Gemini 4 Neon leads strong, as
-# Orchestrator (Neon) — Neon plans, Hydrogen carries the plan out — and then as Neon (High), Antigravity's default
-# model: on the same small task (a module, its CLI and ~18 tests; 2026-11-19, runs one at a time, every one right, quota
-# read with forceRefresh) a run took 0.016% of the weekly Gemini quota and 95–118 s of model time on Orchestrator
-# (Neon), 0.013% and 102–108 s on Neon (High), 0.039% and 197–255 s on Orchestrator (Carbon). Antigravity books each
-# call at its API price — per token Hydrogen counts 1, Neon 2, Carbon ~4 —, so Orchestrator (Neon) should pay off on
-# longer tasks, where Hydrogen does more of the work. (The 2026-11-17 «~0.01% for Orchestrator (Carbon) against ~0.07%
-# for Carbon (High)» came from the language server's 5-minute quota cache: Orchestrator (Carbon) is only 10–15%
-# cheaper than Carbon (High).)
+# Tiers → model ids, best first; the limits left reorder them (see the docstring). Chosen by a benchmark on Antigravity
+# 2.33.0 (2026-11-20): five tasks with hidden tests — a function with tests, a feature across four files, five bugs in a
+# calendar library (DST, time zones), a version resolver with backtracking, and a security fix in a 2,000-line module of
+# this plugin — run through this script on 16 models (48 runs). Every run got every hidden test right but one
+# (Hydrogen (Low) missed a nested case of the largest task); what differed was time and quota. Model time per task
+# on the four small tasks / on the 2,000-line fix, and the share of the weekly Gemini quota (Antigravity books each
+# call at its API price: ~0.042% of the week per dollar for Hydrogen and Neon, ~0.125% for Carbon and Argon):
+#   Gemini 4 Hydrogen (Low)       0.5–0.6 / 1.3 min      ~0.004–0.006% / 0.010%
+#   Gemini 4 Hydrogen (Medium)    0.7–1.5 / 3.8 min      ~0.005–0.010% / 0.028%
+#   Gemini 4 Hydrogen (High)      1.1–2.7 / 8.7 min      ~0.007–0.016% / 0.074%
+#   Gemini 4 Neon (Medium)        2.3–2.8 / 8.0 min      ~0.019–0.021% / 0.073%
+#   Gemini 4 Neon (High)          3.6–5.9 / 17 min       ~0.025–0.042% / 0.14%
+#   Orchestrator (Neon)           4.5–6.3 / 21 min       ~0.033–0.042% / 0.20%
+#   Gemini 4 Hydrogen (XHigh)     2.8–5.2 / 40 min       ~0.018–0.033% / 0.38% (it started two reviewer subagents)
+#   Gemini 4 Carbon (High), Orchestrator (Carbon)  11–21 / 26 min  ~0.09–0.21% / 0.38%
+#   Gemini 3.8 Flash              5.5–6.2 min even on the light task
+# So Hydrogen carries fast and standard, and Neon (Medium) — a stronger model at about Hydrogen (High)'s time and
+# quota — leads strong. Gemini 4 Carbon, Google's strongest model for long-horizon work, has a tier of its own after
+# strong, ultra, for the complex and specific tasks that the benchmark's ones were too small to show: there it was never
+# better, at 4–12× the time and up to 14× the quota (and Carbon's price doubles on 2026-12-01). Its recommended effort
+# is High — every step at full depth is what ultra is for (Google: pick Carbon directly «where every intermediate step
+# needs maximum reasoning depth»); Orchestrator (Carbon), where Carbon plans and Hydrogen carries the plan out, comes
+# next — about as good and 10–15% cheaper per task, but real delegated tasks on it took 21–76 min, and on read-only
+# audits its planner did all the work, with no Hydrogen calls at all. Plans without Carbon (Google AI Pro) fall back to
+# Argon (High) and Neon (High). Higher effort levels than a tier names only took longer. Claude Sonnet 5.5 (High) was the fastest on the hard tasks (0.8–1.6 / 6.3 min), but
+# Antigravity's Claude group costs ~2.5% of its week per dollar (12% of it for this benchmark's $5 of Claude runs) —
+# ~60× the Gemini quota per task —, so it stays the `claude` tier and a fallback. All Gemini models share one quota
+# group, so a Gemini fallback only helps where a plan lacks a model; Gemini 3.8 Flash is there for plans without
+# Gemini 4.
 TIERS: Dict[str, List[str]] = {
-    "fast": ["gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-3.8-flash-medium", "gemini-3.8-flash-low",
-             "claude-sonnet-5-5-low"],
-    "standard": ["gemini-4-hydrogen-high", "gemini-4-hydrogen-medium", "gemini-4-carbon-medium",
-                 "gemini-4-argon-medium", "claude-sonnet-5-5-medium"],
-    "strong": ["gemini-pro-orchestrator-neon", "gemini-4-neon-high", "gemini-pro-orchestrator", "gemini-4-carbon-high",
-               "gemini-4-argon-high", "gemini-4-hydrogen-xhigh", "claude-opus-5-5-high", "claude-sonnet-5-5-high"],
-    "claude": ["claude-sonnet-5-5-high", "claude-opus-5-5-medium", "claude-sonnet-5-5-medium",
-               "gemini-4-carbon-high"],
+    "fast": ["gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-neon-low", "gemini-3.8-flash-low",
+             "gemini-3.8-flash-medium", "claude-sonnet-5-5-low"],
+    "standard": ["gemini-4-hydrogen-medium", "gemini-4-hydrogen-high", "gemini-4-neon-medium", "gemini-3.8-flash-high",
+                 "claude-sonnet-5-5-medium"],
+    "strong": ["gemini-4-neon-medium", "gemini-4-hydrogen-high", "gemini-4-neon-high", "gemini-pro-orchestrator-neon",
+               "gemini-4-hydrogen-xhigh", "claude-sonnet-5-5-high", "claude-opus-5-5-high"],
+    "ultra": ["gemini-4-carbon-high", "gemini-pro-orchestrator", "gemini-4-carbon-medium", "gemini-4-argon-high",
+              "gemini-4-neon-high", "claude-opus-5-5-high"],
+    "claude": ["claude-sonnet-5-5-high", "claude-opus-5-5-high", "claude-sonnet-5-5-medium", "claude-opus-5-5-medium",
+               "gemini-4-neon-medium"],
 }
 TIER_USE = {
-    "fast": "light and simple tasks, quick: a small function with its test, a rename, a lint fix, docs, lookups, "
-            "summaries of files or logs, babysitting a long command",
-    "standard": "routine implementation from a clear spec, tests for existing code, refactors across a few files",
-    "strong": "multi-file features, debugging with a repro, unfamiliar code — where a redo would cost more",
-    "claude": "Claude-quality work on Antigravity's separate Claude quota instead of this session's tokens",
+    "fast": "light tasks and lookups: a small function with its test, a rename, a lint fix, docs, «where is X used», "
+            "summaries of files or logs, babysitting a long command — ~0.5 min, ~0.005% of the weekly Gemini quota",
+    "standard": "most work: implementation from a spec, tests for existing code, refactors and fixes across files, "
+                "debugging with a repro, read-only reviews and audits — ~1–4 min, ~0.005–0.03%",
+    "strong": "the hardest parts, or a retry after `standard` got it wrong: subtle bugs, design-heavy changes in "
+              "unfamiliar code — ~2–8 min, ~0.02–0.07%",
+    "ultra": "complex, specific tasks where every step needs the deepest reasoning: architecture across many modules, "
+             "concurrency or protocol bugs, big migrations, niche domains, or a retry after `strong` failed — Gemini 4 "
+             "Carbon at its recommended High effort, ~11–26 min, ~0.1–0.4% of the weekly Gemini quota",
+    "claude": "Claude-quality work on Antigravity's separate Claude quota — quick, but ~0.5–3% of that quota's week "
+              "per task",
+}
+# Experimental: the models Antigravity offers that are in no tier — an exact `--model <id>` still takes them. `models`
+# and `budget` list every such model under «Experimental» with a word on when it may fit; one Antigravity adds later
+# shows up there too, with Antigravity's own description until it gets one here. Numbers from the 2026-11-20 benchmark
+# where a model ran in it.
+EXPERIMENTAL = {
+    "gemini-4-neon-xhigh": "Neon at its Extra High reasoning budget — the deepest Neon: a hard debugging task took it "
+                           "7.7 min against Neon (Medium)'s 2.6, same result; for a problem Neon (High) left unsure",
+    "gemini-4-carbon-low": "Carbon with little thinking — its knowledge and long-horizon habits at less time: a "
+                           "question in a niche domain that needs Carbon's knowledge more than its depth (untested here)",
+    "gemini-4-argon-low": "Argon, the original Gemini 4 model, with little thinking: a second opinion from another Gemini "
+                          "4 line (untested here; ~4× Hydrogen's quota per token)",
+    "gemini-4-argon-medium": "Argon at medium effort: on plans without Carbon (Google AI Pro) the closest to it; ultra "
+                             "falls back to Argon (High) (untested here; ~4× Hydrogen's quota per token)",
+    "gemini-pro-orchestrator-argon": "Orchestrator with Argon planning and Hydrogen carrying the plan out — the Carbon "
+                                     "Orchestrator's stand-in on Google AI Pro, for long edit-heavy work (untested here)",
+    "claude-opus-5-5-low": "Claude Opus with little thinking: a quick Claude-quality review, wording or answer on "
+                           "Antigravity's Claude quota (~2.5% of its week per API dollar)",
+    "gpt-oss-120b-medium": "OpenAI's open-weight GPT-OSS 120B on the «Claude and GPT models» quota, 80k context window "
+                           "in Antigravity: a second opinion from neither Google nor Anthropic; Antigravity removes it "
+                           "on 2026-11-30",
 }
 STATE_RANK = {"spend": 0, "ok": 1, "tight": 2, "exhausted": 3}
 FAILED_ENDS = {
@@ -455,13 +502,23 @@ STATE_TEXT = {"spend": "quota to spare — use it", "ok": "fine", "tight": "tigh
               "exhausted": "unavailable"}
 
 
+def experimental(ms: List[dict]) -> List[Tuple[dict, str]]:
+    """The models Antigravity offers right now that are in no tier, each with a word on when it may fit."""
+    tiered = {i for ids in TIERS.values() for i in ids}
+    return [(m, EXPERIMENTAL.get(m["id"]) or m.get("note") or "no description yet — try it on a small task first")
+            for m in ms if m["id"] not in tiered]
+
+
 def generic(tier: str, ms: List[dict], default: str) -> List[dict]:
     """When Antigravity has renamed its models: the closest ones by label, best first."""
-    pats = {"fast": [r"hydrogen.*\(low\)", r"hydrogen.*\(medium\)", r"flash(?!.*lite).*\(medium\)", r"flash(?!.*lite)"],
-            "standard": [r"hydrogen.*\(high\)", ""],
-            "strong": [r"^orchestrator \(neon\)", r"neon.*\(high\)", r"^orchestrator \(carbon\)", r"carbon.*\(high\)",
+    pats = {"fast": [r"hydrogen.*\(low\)", r"hydrogen.*\(medium\)", r"neon.*\(low\)", r"flash(?!.*lite).*\(low\)",
+                     r"flash(?!.*lite)"],
+            "standard": [r"hydrogen.*\(medium\)", r"hydrogen.*\(high\)", r"neon.*\(medium\)", ""],
+            "strong": [r"neon.*\(medium\)", r"hydrogen.*\(high\)", r"neon.*\(high\)", r"^orchestrator \(neon\)",
                        r"\(high\)"],
-            "claude": [r"claude.*sonnet.*\(high\)", r"claude"]}[tier]
+            "ultra": [r"carbon.*\(high\)", r"^orchestrator \(carbon\)", r"carbon.*\(medium\)", r"argon.*\(high\)",
+                      r"neon.*\(high\)", r"\(high\)"],
+            "claude": [r"claude.*sonnet.*\(high\)", r"claude.*opus.*\(high\)", r"claude"]}[tier]
     out: List[dict] = []
     for p in pats:
         for m in ms:
@@ -518,7 +575,9 @@ def pick(arg: str, ms: List[dict], default: str, groups: Optional[List[dict]] = 
     def order(x: dict) -> int:  # stable sort: the tier's own order stays within each state
         rank = STATE_RANK[state(x)["status"]]
         return max(rank, 1) if a == "fast" else rank  # fast stays fast: only a tight quota moves a model back
-    m = live[0] if a not in TIERS or a == "claude" else sorted(live, key=order)[0]
+    # claude and ultra keep their order: they name the model family the task needs, a quota with time to spare
+    # elsewhere doesn't change that (a used-up model is still skipped)
+    m = live[0] if a not in TIERS or a in ("claude", "ultra") else sorted(live, key=order)[0]
     first = live[0]
     passed = [x for x in listed[:listed.index(first)] if not ok(x)]  # used up, and ahead of what was taken
     notes = [f"{x['label']}: {used_up(x)}" for x in passed]
@@ -615,8 +674,10 @@ def advice(cstate: str, states: List[dict], groups: List[dict]) -> List[str]:
                 out.append(f"«{g['name']}» is tight ({s['text']}): the tiers take it last; keep what lands there "
                            "to bulky work.")
         if not any(s["status"] == "spend" for s in states):
-            out.append("Antigravity's quota is fine: hand over self-contained work, light tasks included (`fast`), "
-                       "on the lowest tier that will do it right.")
+            out.append("Antigravity's quota is fine: hand over self-contained work, light tasks included — `fast` for "
+                       "light ones, `standard` for the rest, `strong` only for the hardest part or after a miss, `ultra` "
+                       "(Gemini 4 Carbon) only for a complex, specific task that needs its depth (every tier got every "
+                       "benchmark task right; the higher ones only took longer — ultra 4–12× standard's time).")
     if best != "exhausted":
         out.append({"critical": "Your own limit is almost used up: hand over everything you can describe in a brief, "
                                 "keep checking short (diff --stat, one test run), and tell the user.",
@@ -1503,6 +1564,18 @@ def tier_lines(ms: List[dict], default: str, groups: List[dict], sp: Dict[str, d
     return lines
 
 
+def experimental_lines(ms: List[dict], sp: Dict[str, dict]) -> List[str]:
+    exp = experimental(ms)
+    if not exp:
+        return []
+    lines = ["", "Experimental — in no tier; --model <id> takes one when it fits:"]
+    for m, note in exp:
+        speed = speed_text(sp, m["label"])
+        lines.append(f"  {m['id']:28} {m['label']}" + (f" · {speed}" if speed else ""))
+        lines.append(f"            {note}")
+    return lines
+
+
 def quota_lines(groups: List[dict], now: float) -> List[str]:
     out = []
     for g in groups:
@@ -1526,10 +1599,12 @@ def cmd_models(a) -> int:
             except Failure:
                 tiers[t] = None
         print(json.dumps({"models": ms, "default": default, "quota": groups, "tiers": tiers, "speeds": sp,
+                          "experimental": {m["id"]: note for m, note in experimental(ms)},
                           "states": {g["name"]: state_of(g, now) for g in groups}}, ensure_ascii=False, indent=1))
         return 0
     lines = ["Quota left:"] + quota_lines(groups, now)
     lines += ["", "Tiers (--model) — what each takes now and why:"] + tier_lines(ms, default, groups, sp, now, True)
+    lines += experimental_lines(ms, sp)
     lines += ["", "All models (--model <id>): quota left · price · measured speed"]
     for m in ms:
         left = "?" if m["left"] is None else f"{m['left'] * 100:.0f}%"
@@ -1555,6 +1630,10 @@ def cmd_budget(a) -> int:
     lines += quota_lines(groups, now)
     lines += ["", "What each tier takes now (--model):"] + tier_lines(ms, default, groups, sp, now, False)
     states = [state_of(g, now) for g in groups]
+    exp = experimental(ms)
+    if exp:
+        lines += ["", "Experimental — in no tier, an exact --model takes them (delegate.py models says when each fits): "
+                  + ", ".join(m["id"] for m, _ in exp)]
     lines += ["", "How much to hand over:"] + ["  • " + x for x in advice(cstate, states, groups)]
     print("\n".join(lines))
     return 0
@@ -1974,7 +2053,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("run", help="start a task (and wait for it)")
     p.add_argument("brief", nargs="?", help="the task; omit it (or '-') to read stdin")
-    p.add_argument("--model", "-m", default="standard", help="tier (fast, standard, strong, claude), model id or label")
+    p.add_argument("--model", "-m", default="standard", help="tier (fast, standard, strong, ultra, claude), model id or label")
     p.add_argument("--cwd", help="the folder to work in (default: the current one)")
     p.add_argument("--title", default="", help="title of the conversation in Antigravity")
     p.add_argument("--brief-file", help="read the brief from this file")

@@ -168,8 +168,8 @@ msg = c.pre()
 check("tight weekly → a <quota> hint", msg.startswith('<quota source="Antigravity Plus">') and not c.err, msg)
 check("… with the numbers and the reset time", all(w in msg for w in ("Gemini Models", "week 10% left", "resets in 2 days",
                                                                       "5 h 60% left")), msg)
-check("… and the actions", all(w in msg for w in ("Model: flash", "Gemini 4 Hydrogen", "Orchestrator (Neon)",
-                                                  "quarter of Carbon", "/handoff", "rg -n", "«Claude and GPT models»"))
+check("… and the actions", all(w in msg for w in ("Model: flash", "Gemini 4 Hydrogen (Medium)", "benchmark",
+                                                  "/handoff", "rg -n", "«Claude and GPT models»"))
       and "Orchestrator (Carbon)" not in msg, msg)  # it is barely cheaper than Carbon (High): measured 2026-11-19
 raw_cache = open(CACHE, encoding="utf-8").read()
 check("the reading is cached in quota.json without the CSRF token",

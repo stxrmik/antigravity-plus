@@ -184,26 +184,30 @@ they install the saved choice.
   terminal) and Antigravity's (`delegate.py budget`: the weekly and 5-hour window of each quota group and the pace of
   spending). Its own limit running low → it hands over more, light tasks included; Antigravity's quota tight → only
   bulky work on the cheapest model; used up → it does the work itself until the reset.
-- The model is a tier or an exact id: `fast` — Gemini 4 Hydrogen (Low) for light tasks, `standard` — Gemini 4 Hydrogen
-  (High) for work from a clear spec, `strong` — Orchestrator (Neon), then Gemini 4 Neon (High), Orchestrator (Carbon)
-  and Gemini 4 Carbon (High), for multi-file features and debugging, `claude` — Claude Sonnet 5.5 (High) in Antigravity, on its separate Claude quota. Within a tier the limits left decide:
-  used-up models are skipped, a "tight" quota group (under 15% left, or spent faster than the week goes by) comes
-  last, and a quota that would reset unused soon comes first. The output says why this model.
-- Why Hydrogen for light work: on the same task Hydrogen (Low) finished in 20 s and 4 model calls, Gemini 3.8 Flash in
-  25 s and 9 calls; Hydrogen streams ~400–650 tokens/s against ~130–310 for Flash, while Gemini 4 Carbon (High) thinks
-  ~11 s before each answer. `delegate.py models` shows each model's speed in your recent conversations.
-- Orchestrator is one conversation where a strong model makes the plan (reads files, runs probing commands) and
-  Gemini 4 Hydrogen carries it out; the report shows how many calls each made. Exact ids: Orchestrator (Neon) is
-  `gemini-pro-orchestrator-neon` (`--model "orchestrator neon"`), Orchestrator (Carbon) `gemini-pro-orchestrator`
-  (`--model orchestrator`), Orchestrator (Argon) `orchestrator argon`.
-- Gemini 4 Neon (out 2026-11-18, now Antigravity's default model) leads `strong`: on a small task (a module, its CLI
-  and ~18 tests; 2026-11-19, runs one at a time, every one right), per run Orchestrator (Neon) took ~1.6–2 min of model
-  time and 0.016% of the weekly Gemini quota, Gemini 4 Neon (High) ~1.7–1.8 min and 0.013%, Orchestrator (Carbon)
-  ~3.3–4.3 min and 0.039%. Antigravity books every call at its API price — per token Hydrogen counts 1, Neon 2,
-  Carbon ~4 —, so the more of a task its Hydrogen executor carries out, the cheaper an Orchestrator gets. API prices:
-  Neon $3 / $15 per 1M tokens, Carbon and Argon $2 / $10 until 2026-11-30 and $4 / $20 from 2026-12-01. (The
-  2026-11-17 «~0.01% for Orchestrator (Carbon) against ~0.07% for Carbon (High)» was a measuring error: Antigravity
-  answers quota reads from a cache it refreshes only every ~5 minutes.)
+- The model is a tier or an exact id: `fast` — Gemini 4 Hydrogen (Low) for light tasks and lookups, `standard` —
+  Gemini 4 Hydrogen (Medium) for most work, `strong` — Gemini 4 Neon (Medium), then Hydrogen (High), Neon (High) and
+  Orchestrator (Neon), for the hardest part or a retry, `ultra` — Gemini 4 Carbon (High), then Orchestrator (Carbon),
+  for complex, specific tasks (recommended effort High), `claude` — Claude Sonnet 5.5 (High) in Antigravity, on its
+  separate Claude quota. Within a tier the limits left decide: used-up models are skipped, a "tight" quota group
+  (under 15% left, or spent faster than the week goes by) comes last, and a quota that would reset unused soon comes
+  first. The output says why this model.
+- Why these: a benchmark on Antigravity 2.33.0 (2026-11-20) — five tasks with hidden tests, from a small function to a
+  security fix in a 2,000-line module of this plugin, 48 runs on 16 models. Every run got everything right except
+  Hydrogen (Low) on the largest task (one case missed), so the models differed in time and quota. Model time per task on
+  the small tasks / the largest: Hydrogen (Low) 0.5 / 1.3 min, Hydrogen (Medium) 0.7–1.5 / 3.8, Hydrogen (High)
+  1.1–2.7 / 8.7, Neon (Medium) 2.3–2.8 / 8.0, Neon (High) 3.6–5.9 / 17, Orchestrator (Neon) 4.5–6.3 / 21, Hydrogen
+  (XHigh) 2.8–5.2 / 40, Carbon (High) and Orchestrator (Carbon) 11–21 / 26, Gemini 3.8 Flash 5.5–6.2 even on the light
+  one; Claude Sonnet 5.5 (High) 0.8–1.6 / 6.3. A task took ~0.005–0.03% of the weekly Gemini quota on Hydrogen, up to
+  0.2–0.4% on the Orchestrators, XHigh and Carbon. Antigravity books every call at its API price (per token Hydrogen
+  counts 1, Neon 2, Carbon ~4); its Claude group costs ~2.5% of its week per dollar, ~60× the Gemini quota per task.
+- So Carbon has a tier of its own after `strong`, `ultra`, for the complex and specific tasks the benchmark's ones were
+  too small to show — there it was never better, at 4–12× the time; real delegated tasks on Orchestrator (Carbon) took
+  21–76 min, and on read-only audits its planner did all the work. Every model in no tier (Neon (XHigh), Carbon (Low),
+  Argon (Low, Medium), Orchestrator (Argon), Claude Opus 5.5 (Low), GPT-OSS 120B) is listed by `delegate.py models` as
+  «Experimental», with a word on when each may fit, and taken by its exact id (`--model orchestrator` is Orchestrator
+  (Carbon), `--model "orchestrator neon"` Orchestrator (Neon); the report shows how many calls planner and Hydrogen made). API prices: Neon $3 / $15 per 1M tokens, Hydrogen $1.5 / $7.5,
+  Carbon and Argon $2 / $10 until 2026-11-30 and $4 / $20 from 2026-12-01. `delegate.py models` shows each model's
+  speed in your recent conversations.
 - The Antigravity agent works in the same folder, its conversation shows up in Antigravity ("Claude Code: …"), and
   Claude Code does its own part meanwhile. At the end Claude Code gets a short report: the agent's words, the files it
   changed (+/− lines), its commands with exit codes, and the cost — model calls, tokens, share of the weekly limit.
@@ -264,11 +268,13 @@ they install the saved choice.
   project: in new conversations the agent runs it outside the sandbox right away, without a wasted run. A command
   that works inside the sandbox twice is forgotten; with the sandbox off, the list isn't shown.
 - When the conversation's context reaches 200k tokens (150k on older models), the agent is told to keep it lean:
-  search with `rg -n`, read only the lines it needs, trim long output. Since 2026-11-17 Antigravity gives the Gemini 4
-  family (Carbon, Argon, Hydrogen, Neon, Orchestrator) a 512k window — real conversations compacted at 509k–553k — so
-  around 440k the agent hears that compaction is near and it's time to offer `/handoff` (older Gemini: ~300k limit,
-  ~250k compaction; Claude 5.5: around 840k). After it reads a whole large file: a tip
-  to read ranges (once per message). `/context` shows what fills the window (rules, session context, files, outputs).
+  search with `rg -n`, read only the lines it needs, trim long output. Antigravity compacts the history as soon as the
+  next model call won't fit the window (verified on 2.33.0): 512k for the Gemini 4 family (Neon, Carbon, Argon,
+  Hydrogen, every Orchestrator) — the last call before a compaction carried 504k–512k, never more —, 256k for Gemini
+  3.x Flash, 128k for Flash-Lite, 840k for Claude 5.5. So around 440k (220k on Gemini 3.x) the agent hears that
+  compaction is near and it's time to offer `/handoff`, or your `/compact` to compact now, at a moment you choose. After
+  it reads a whole large file: a tip to read ranges (once per message). `/context` shows what fills the window (rules,
+  session context, files, outputs).
 - **Plan-limit hints (`hooks/quota.py`).** When the current model's quota group drops under 15% weekly or 10% 5-hour
   left, spends far ahead of the week's pace, or runs out, the main agent receives `<quota>` once with the exact numbers,
   reset time and concrete ways to stretch it (`flash` subagents, Hydrogen or Orchestrator, `/handoff`).
@@ -716,8 +722,8 @@ Good to know:
   panel". While hidden, it polls nothing.
 - Limits come from Antigravity itself; the cost uses prices from `skills/usage/pricing.json` (USD per 1M tokens:
   Gemini 4 Neon / Carbon / Argon / Hydrogen, Gemini 3.8 / 3.6 Flash, Gemini 3.5 / 3.1 Flash-Lite, Gemini 3.1 Pro,
-  Claude 5.5, etc.), and the context meter reflects Antigravity's effective window and compaction threshold (~560k
-  limit and ~505k compaction for the Gemini 4 family, ~300k / ~250k for older Gemini). It's an API-equivalent estimate, not your bill — check the prices against the current ones.
+  Claude 5.5, etc.), and the context meter shows Antigravity's own window, which it compacts the history at (512k for
+  Gemini 4, 256k for Gemini 3.x Flash, 128k for Flash-Lite, 840k for Claude 5.5). It's an API-equivalent estimate, not your bill — check the prices against the current ones.
 - Orchestrator (Carbon / Argon / Neon) is priced per call: the plan at its planner's prices, Gemini 4 Hydrogen's work on
   that plan at Hydrogen's. The panel takes each call's model from Antigravity itself, `/usage` in a terminal from the
   plan hand-over markers in the transcript; the report has a per-model line («По моделям»).

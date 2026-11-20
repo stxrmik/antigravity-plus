@@ -177,8 +177,8 @@ check("top items limited to 10, sorted descending, exclude fixed rules/system, e
       and all("old_before_ckpt.py" not in t["label"] for t in top_items)
       and any("main_module.py" in t["label"] for t in top_items),
       top_items[:5])
-check("model window & compaction loaded from pricing.json",
-      data["model"] == "Gemini 4 Carbon (High)" and data["window"] == 560_000 and data["compaction"] == 505_000,  # 512k since 2026-11-17
+check("model window loaded from pricing.json (Antigravity compacts when a call won't fit it: no separate threshold)",
+      data["model"] == "Gemini 4 Carbon (High)" and data["window"] == 512_000 and data["compaction"] is None,
       (data["model"], data["window"], data["compaction"]))
 check("tips mention whole-file read and repeated read of main_module.py",
       any("main_module.py" in t and "раз" in t for t in data["tips"])

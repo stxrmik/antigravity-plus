@@ -488,11 +488,11 @@ def tips(live: List[Item], now: float, compaction: Optional[int], window: int) -
     limit = compaction or window
     warn = min(WARN, int(limit * 0.6)) if limit else WARN
     if now >= warn:
-        compact = os.path.isfile(os.path.join(SKILLS_DIR, "compact", "SKILL.md"))
-        near = f"сжатие на ≈{usage.k(compaction)}" if compaction else f"окно ≈{usage.k(window)}"
+        near = (f"сжатие на ≈{usage.k(compaction)}" if compaction else
+                f"окно ≈{usage.k(window)}; Antigravity сжимает историю, как только следующий шаг в него не помещается")
         out.append((now, f"Контекст ≈{usage.k(now)} ({near}): каждый шаг перечитывает его целиком. Когда текущая "
-                    "задача закончится, продолжайте в новом разговоре через /handoff"
-                    + (" или сожмите его через /compact." if compact else ".")))
+                    "задача закончится, продолжайте в новом разговоре через /handoff или сожмите этот сейчас "
+                    "командой /compact (её вводит пользователь, Antigravity 2.33+)."))
     out.sort(key=lambda x: -x[0])
     found = [t for _, t in out[:4]]
     return found or ["Ничего не выделяется: контекст распределён ровно, экономить не на чем."]
