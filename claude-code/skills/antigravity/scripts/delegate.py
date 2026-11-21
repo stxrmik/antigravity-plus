@@ -253,30 +253,15 @@ class LS:
         self.addr, self.token, self.exe = addr, token, exe
 
 
-def _healthy(addr: str) -> bool:
-    try:
-        with urllib.request.urlopen(f"http://{addr}/healthz", timeout=1.5) as r:
-            return json.loads(r.read().decode("utf-8") or "{}").get("status") == "ok"
-    except Exception:
-        return False
-
-
 def discover() -> Optional[LS]:
-    """Antigravity's running language server: its address, CSRF token and executable (which runs agentapi)."""
-    addr, token = os.environ.get("ANTIGRAVITY_LS_ADDRESS"), os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
-    if addr and token:
-        return LS(addr, token, os.environ.get("ANTIGRAVITY_AGENTAPI_EXE", ""))
-    for pid, line in compat.processes("language_server"):
-        if "--csrf_token" not in line or "antigravity" not in line.lower():
-            continue
-        tok = re.search(r"--csrf_token[ =]\"?([^\s\"]+)", line)
-        exe = re.match(r"\s*\"?(.*?language_server[\w.-]*)", line)
-        if not tok:
-            continue
-        for port in compat.listening_ports(pid):
-            if _healthy(f"127.0.0.1:{port}"):
-                return LS(f"127.0.0.1:{port}", tok.group(1), exe.group(1) if exe else "")
-    return None
+    """Antigravity's running language server: its address, CSRF token and executable (which runs agentapi) — from
+    the environment, the server's own ~/.gemini/antigravity/daemon/hub_*.json (Antigravity 2.34 no longer puts the
+    token on its command line) or, up to 2.33, its command line: compat.language_server()."""
+    found = compat.language_server()
+    if not found:
+        return None
+    exe = os.environ.get("ANTIGRAVITY_AGENTAPI_EXE", "") if found.source == "env" else compat.ls_executable(found.pid)
+    return LS(found.addr, found.token, exe)
 
 
 def launch() -> bool:

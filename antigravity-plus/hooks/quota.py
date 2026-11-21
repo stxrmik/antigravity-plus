@@ -75,21 +75,11 @@ def rpc(ep: Endpoint, method: str, timeout: float = TIMEOUT) -> dict:
 
 
 def discover() -> Optional[Endpoint]:
-    """Antigravity's running language server, found by its process (as doctor.py and delegate.py find it)."""
-    for pid, line in compat.processes("language_server"):
-        if "--csrf_token" not in line or "antigravity" not in line.lower():
-            continue
-        tok = re.search(r"--csrf_token[ =]\"?([^\s\"]+)", line)
-        if not tok:
-            continue
-        for port in compat.listening_ports(pid):
-            try:
-                with OPENER.open(f"http://127.0.0.1:{port}/healthz", timeout=PROBE) as r:
-                    if json.loads(r.read().decode("utf-8") or "{}").get("status") == "ok":
-                        return f"127.0.0.1:{port}", tok.group(1)
-            except Exception:
-                continue
-    return None
+    """Antigravity's running language server, as doctor.py and delegate.py find it (compat.language_server()).
+    Hooks get no ANTIGRAVITY_LS_ADDRESS / ANTIGRAVITY_CSRF_TOKEN, so on Antigravity 2.34+ this is its
+    ~/.gemini/antigravity/daemon/hub_*.json, before that the --csrf_token on its command line."""
+    found = compat.language_server(probe=PROBE)
+    return (found.addr, found.token) if found else None
 
 
 def parse(data: dict) -> List[dict]:

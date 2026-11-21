@@ -55,7 +55,7 @@ Antigravity's scheduled-automation format — `~/.gemini/config/sidecars/agp-<sl
 
 ## How `gate` works
 
-- Queries `RetrieveUserQuotaSummary` from Antigravity's Language Server (`ANTIGRAVITY_LS_ADDRESS` + `ANTIGRAVITY_CSRF_TOKEN`, or process discovery via `compat.processes` / `compat.listening_ports`).
+- Queries `RetrieveUserQuotaSummary` from Antigravity's Language Server (`ANTIGRAVITY_LS_ADDRESS` + `ANTIGRAVITY_CSRF_TOKEN`, else the server's own `~/.gemini/antigravity/daemon/hub_*.json`, else the `--csrf_token` on its command line up to Antigravity 2.33 — `compat.language_server()`).
 - If the Language Server is unreachable, falls back to `~/.gemini/antigravity-plus/quota.json` when fresh within 15 minutes.
 - Evaluates the selected quota group's `weekly` and `5h` buckets:
   - `disabled: true` buckets are ignored.

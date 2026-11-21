@@ -737,8 +737,10 @@ Good to know:
 - The skill `~/.claude/skills/antigravity` is a `SKILL.md` (when to hand work over, which model to take, how to write
   the brief and check the result) and a script, `delegate.py`. Claude Code sees only the skill's name and "when to
   use"; it reads the instructions once it decides to hand a task over.
-- `delegate.py run --model <tier or id>` finds the running Antigravity (on macOS it opens a closed one in the
-  background), takes the Antigravity project that holds the folder (or creates one), and starts the conversation
+- `delegate.py run --model <tier or id>` finds the running Antigravity (by the file its language server writes into
+  `~/.gemini/antigravity/daemon/` — since 2.34 its token isn't on the process list; before that by its command line;
+  on macOS it opens a closed Antigravity in the background), takes the Antigravity project that holds the folder (or
+  creates one), and starts the conversation
   through Antigravity's own `agentapi`. Claude Code's brief gets the run rules: Claude Code watches and answers — ask
   it with `ask`, tell it what matters with `tell` (the exact commands, with the script's path); no commits, pushes or
   deploys; check the work after the last change; end with a STATUS / CHANGED / CHECKS / NOTES report.

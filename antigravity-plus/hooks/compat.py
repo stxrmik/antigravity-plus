@@ -7,19 +7,21 @@
     with `sh -c` on macOS/Linux and `cmd /c` on Windows, where `python3` often doesn't exist);
   * Antigravity's own executable, which runs as Node with ELECTRON_RUN_AS_NODE=1;
   * Chromium-based browsers for /ui-check;
-  * the running Antigravity language server: processes with their command lines, and the ports they listen on.
+  * processes with their command lines, and the ports they listen on;
+  * the running Antigravity language server — its address and CSRF token (language_server()).
 
 Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import time
-from typing import List, Optional, Tuple
+from typing import List, NamedTuple, Optional, Tuple
 
 WINDOWS = os.name == "nt"
 MAC = sys.platform == "darwin"
@@ -197,6 +199,112 @@ def listening_ports(pid: int) -> List[int]:
         return ports
     out = run(["lsof", "-nP", "-a", "-p", str(pid), "-iTCP", "-sTCP:LISTEN"])
     return [int(p) for p in re.findall(r"127\.0\.0\.1:(\d+) \(LISTEN\)", out)]
+
+
+class LanguageServer(NamedTuple):
+    """Antigravity's running language server, as language_server() found it."""
+    addr: str          # host:port of its plain-HTTP Connect API ("127.0.0.1:59128")
+    token: str         # its CSRF token, sent as the x-codeium-csrf-token header
+    source: str        # how it was found: "env", "daemon" or "process"
+    pid: int = 0       # its process id, 0 when unknown
+    version: str = ""  # Antigravity's version ("2.34.0"), "" when unknown
+
+
+def daemon_dir() -> str:
+    """Where the language server describes itself: ~/.gemini/antigravity/daemon/hub_<httpPort>.json."""
+    return os.path.join(os.path.expanduser("~"), ".gemini", "antigravity", "daemon")
+
+
+def ls_healthy(addr: str, timeout: float = 1.5) -> bool:
+    """True when http://<addr>/healthz answers {"status": "ok"}, as Antigravity's language server does."""
+    import urllib.request
+    base = addr.strip().rstrip("/")
+    base = base if re.match(r"^https?://", base) else "http://" + base
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # local: no proxy, no slow proxy lookup
+    try:
+        with opener.open(base + "/healthz", timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", errors="replace") or "{}")
+        return isinstance(data, dict) and data.get("status") == "ok"
+    except Exception:
+        return False
+
+
+def _alive(pid: int) -> bool:
+    """False only when a POSIX process `pid` surely doesn't exist. Never probed on Windows, where os.kill(pid, 0)
+    would terminate the process."""
+    if WINDOWS or pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # PermissionError: it exists, under another user
+        pass
+    return True
+
+
+def daemon_servers() -> List[LanguageServer]:
+    """The language servers described in daemon_dir(), newest file first, not checked yet. Antigravity's language
+    server writes hub_<httpPort>.json (mode 0600) when it starts: {pid, httpsPort, httpPort, lsVersion, csrfToken}."""
+    folder = daemon_dir()
+    try:
+        names = [n for n in os.listdir(folder) if n.startswith("hub_") and n.endswith(".json")]
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        path = os.path.join(folder, name)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            when = os.path.getmtime(path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        port, token, pid = data.get("httpPort"), data.get("csrfToken"), data.get("pid")
+        if not isinstance(token, str) or not token or not isinstance(port, int) or not 0 < port < 65536:
+            continue
+        found.append((when, LanguageServer(f"127.0.0.1:{port}", token, "daemon", pid if isinstance(pid, int) else 0,
+                                           str(data.get("lsVersion") or ""))))
+    return [ls for _, ls in sorted(found, key=lambda x: x[0], reverse=True)]
+
+
+def language_server(probe: float = 1.5) -> Optional[LanguageServer]:
+    """Antigravity's running language server, or None:
+      1. ANTIGRAVITY_LS_ADDRESS + ANTIGRAVITY_CSRF_TOKEN — agent terminals and sidecars get them (hooks and the
+         plugin's MCP server don't);
+      2. daemon_servers() whose process is alive and whose /healthz answers — the only way from outside since
+         Antigravity 2.34, which hands the token to the server in its environment instead of on its command line;
+      3. the --csrf_token on its command line and the port among its own that answers /healthz (Antigravity ≤ 2.33).
+    `probe` is the /healthz timeout in seconds."""
+    addr, token = os.environ.get("ANTIGRAVITY_LS_ADDRESS"), os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
+    if addr and token:
+        return LanguageServer(addr, token, "env", 0, os.environ.get("ANTIGRAVITY_LS_VERSION", ""))
+    for ls in daemon_servers():
+        if _alive(ls.pid) and ls_healthy(ls.addr, probe):
+            return ls
+    for pid, line in processes("language_server"):
+        if "--csrf_token" not in line or "antigravity" not in line.lower():
+            continue
+        m = re.search(r"--csrf_token[ =]\"?([^\s\"]+)", line)
+        if not m:
+            continue
+        for port in listening_ports(pid):
+            if ls_healthy(f"127.0.0.1:{port}", probe):
+                return LanguageServer(f"127.0.0.1:{port}", m.group(1), "process", pid, "")
+    return None
+
+
+def ls_executable(pid: int) -> str:
+    """The executable of the language server process `pid` (it also runs agentapi), "" when unknown."""
+    if pid <= 0:
+        return ""
+    for p, line in processes("language_server"):
+        if p == pid:
+            m = re.match(r"\s*\"?(.*?language_server[\w.-]*)", line)
+            return m.group(1) if m else ""
+    return ""
 
 
 def kill_tree(pid: int) -> None:

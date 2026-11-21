@@ -265,31 +265,11 @@ def _base_url(addr: str) -> str:
     return cleaned if re.match(r"^https?://", cleaned) else f"http://{cleaned}"
 
 
-def _healthy(addr: str) -> bool:
-    try:
-        with OPENER.open(f"{_base_url(addr)}/healthz", timeout=PROBE_TIMEOUT) as r:
-            data = json.loads(r.read().decode("utf-8", errors="replace") or "{}")
-        return isinstance(data, dict) and data.get("status") == "ok"
-    except Exception:
-        return False
-
-
 def _discover_ls() -> Optional[Tuple[str, str]]:
-    addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS")
-    tok = os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
-    if addr and tok:
-        return addr, tok
-    for pid, line in compat.processes("language_server"):
-        if "--csrf_token" not in line or "antigravity" not in line.lower():
-            continue
-        m = re.search(r'--csrf_token[ =]"?([^\s"]+)', line)
-        if not m:
-            continue
-        for port in compat.listening_ports(pid):
-            cand = f"127.0.0.1:{port}"
-            if _healthy(cand):
-                return cand, m.group(1)
-    return None
+    """(address, CSRF token) of Antigravity's running language server: the environment, its
+    ~/.gemini/antigravity/daemon/hub_*.json (Antigravity 2.34+) or its command line (≤ 2.33) — compat.language_server()."""
+    found = compat.language_server(probe=PROBE_TIMEOUT)
+    return (found.addr, found.token) if found else None
 
 
 def _fetch_ls_quota(ep: Tuple[str, str]) -> Optional[dict]:

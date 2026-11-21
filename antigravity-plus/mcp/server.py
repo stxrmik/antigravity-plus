@@ -865,29 +865,11 @@ def _base_url(addr: str) -> str:
     return addr if re.match(r"^https?://", addr) else f"http://{addr}"
 
 
-def _healthy(addr: str) -> bool:
-    try:
-        with OPENER.open(f"{_base_url(addr)}/healthz", timeout=1.5) as r:
-            return json.loads(r.read().decode("utf-8", errors="replace") or "{}").get("status") == "ok"
-    except Exception:
-        return False
-
-
 def language_server() -> Optional[Tuple[str, str]]:
-    """(address, CSRF token) of Antigravity's running language server: the environment, else its process."""
-    addr, tok = os.environ.get("ANTIGRAVITY_LS_ADDRESS"), os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
-    if addr and tok:
-        return addr, tok
-    for pid, line in compat.processes("language_server"):
-        if "--csrf_token" not in line or "antigravity" not in line.lower():
-            continue
-        m = re.search(r"--csrf_token[ =]\"?([^\s\"]+)", line)
-        if not m:
-            continue
-        for port in compat.listening_ports(pid):
-            if _healthy(f"127.0.0.1:{port}"):
-                return f"127.0.0.1:{port}", m.group(1)
-    return None
+    """(address, CSRF token) of Antigravity's running language server: compat.language_server(). Antigravity gives
+    this server only PLUGIN_ROOT / PLUGIN_DATA, so on 2.34+ it is found by ~/.gemini/antigravity/daemon/hub_*.json."""
+    found = compat.language_server()
+    return (found.addr, found.token) if found else None
 
 
 def rpc(ls: Tuple[str, str], method: str, body: dict, timeout: float = 15.0) -> dict:

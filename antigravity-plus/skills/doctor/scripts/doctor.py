@@ -113,23 +113,10 @@ OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def discover_ls() -> Optional[Tuple[str, str, str]]:
-    addr, tok = os.environ.get("ANTIGRAVITY_LS_ADDRESS"), os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
-    if addr and tok:
-        return addr, tok, "env"
-    for pid, line in compat.processes("language_server"):
-        if "--csrf_token" not in line or "antigravity" not in line.lower():
-            continue
-        m = re.search(r"--csrf_token[ =](\S+)", line)
-        if not m:
-            continue
-        for port in compat.listening_ports(pid):
-            try:
-                with OPENER.open(f"http://127.0.0.1:{port}/healthz", timeout=1.5) as r:
-                    if json.loads(r.read().decode() or "{}").get("status") == "ok":
-                        return f"127.0.0.1:{port}", m.group(1), "process"
-            except Exception:
-                continue
-    return None
+    """(address, CSRF token, Antigravity's version or "") of the running language server — the environment, its
+    ~/.gemini/antigravity/daemon/hub_*.json (Antigravity 2.34+) or its command line (≤ 2.33): compat.language_server()."""
+    found = compat.language_server()
+    return (found.addr, found.token, found.version) if found else None
 
 
 def rpc(ls: Tuple[str, str, str], method: str, body: dict) -> dict:
@@ -645,8 +632,8 @@ def _drop_selftest_log() -> None:
 def antigravity_view(inv: dict, workspace: Optional[str]) -> List[str]:
     ls = discover_ls()
     if not ls:
-        return [f"{WARN} Antigravity не найден (не запущен или нет доступа к процессу/порту из песочницы). "
-                "Внутри Antigravity перезапустите проверку с `BypassSandbox: true`."]
+        return [f"{WARN} Antigravity не найден (не запущен, или из песочницы не видно ~/.gemini/antigravity/daemon "
+                "и порта его language server). Внутри Antigravity перезапустите проверку с `BypassSandbox: true`."]
     body = {"workspaceUris": ["file://" + workspace]} if workspace else {}
     try:
         data = rpc(ls, "GetAllPlugins", body)
@@ -662,7 +649,8 @@ def antigravity_view(inv: dict, workspace: Optional[str]) -> List[str]:
     if me.get("disabled"):
         out.append(f"{BAD} плагин выключен — включите его на странице [{NAME}](customization://{NAME})")
     else:
-        out.append(f"{OK} плагин загружен и включён · версия {me.get('version', '?')}")
+        out.append(f"{OK} плагин загружен и включён · версия {me.get('version', '?')}"
+                   + (f" · Antigravity {ls[2]}" if ls[2] else ""))
     seen_skills = sorted(s.get("name") for s in me.get("skills") or [])
     missing = sorted(set(inv["skills"]) - set(seen_skills))
     out.append(f"{OK if not missing else WARN} скиллы: {len(seen_skills)} — " + ", ".join(f"/{s}" for s in seen_skills)
