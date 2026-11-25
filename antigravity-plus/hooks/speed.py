@@ -15,7 +15,9 @@ model call (hooks/instructions.py):
   * context budget — once the context passes CTX_WARN, and again near compaction (CTX_HIGH): keep reads targeted,
     hand broad searches to explorer, offer /handoff when the task is done, and (near compaction, with autoMemory)
     save to memory what a future conversation needs before compaction drops it; and, once per user message, after one
-    very large read or output: read ranges, trim output;
+    very large read or output: read ranges, trim output. The thresholds follow the window Antigravity reports for the
+    model (hooks/context_window.py; read from this conversation's latest call when no reading is younger than STALE),
+    else the window known at release (ctx_limits);
   * error loops — FAIL_RUN commands or edits failing in a row: stop, read the error, change the approach.
 Setting speedHints (`memory.py config speed-hints off`). Stdlib only, Python 3.8+.
 """
@@ -37,11 +39,15 @@ AG_CONFIG = os.path.expanduser("~/.gemini/config/config.json")
 CTX_WARN = 150_000       # tokens per model call: steps get slower, details from the middle get lost
 CTX_HIGH = 220_000       # near the 256k window of Gemini 3.x Flash, where Antigravity compacts the conversation
 # Antigravity compacts a conversation when the next model call would no longer fit its window (maxContextTokens,
-# counted with the tokens the model reported; verified on 2.33.0, 2026-11-20): 512k for the Gemini 4 family (Carbon,
-# Argon, Hydrogen, Neon, every Orchestrator) since 2026-11-16 — real conversations' last calls before a compaction
-# carried 504k–512k, none more —, 256k for Gemini 3.x Flash, 128k for Flash-Lite, 840k for Claude 5.5.
+# counted with the tokens the model reported; verified on 2.33.0, 2026-11-20). Antigravity sets the window on its
+# servers and changes it without a release, so the window it reports for the model comes first (real_window()); the
+# numbers below were known at release (rechecked 2026-11-25 on 2.35.1): 512k for the Gemini 4 family (Carbon, Argon,
+# Hydrogen, Neon, every Orchestrator) since 2026-11-16 — real conversations' last calls before a compaction carried
+# 504k–512k, none more —, 256k for Gemini 3.x Flash, 128k for Flash-Lite, 840k for Claude 5.5.
 GEMINI4 = re.compile(r"gemini[-_ ]?4|orchestrator|flash[-_]worker|hydrogen|carbon|argon|neon")
 CTX4_WARN, CTX4_HIGH = 200_000, 440_000
+ASK_AGAIN = 25           # model calls before a window reading that found nothing is tried again
+EXECUTOR_RE = re.compile(r"flash[-_ ]worker|\(orchestrator\)", re.I)  # Orchestrator's executor: gemini-flash-worker-agy
 FAIL_RUN = 3             # failures in a row before the error-loop hint (again at twice that)
 FORGET_AFTER = 2         # successes inside the sandbox that make a remembered command unnecessary
 KEEP = 20                # remembered commands per project
@@ -67,10 +73,13 @@ def _parse_compact_override(raw: str, window: int) -> Optional[int]:
     return tokens if 0 < tokens < window else None
 
 
-def ctx_limits(model: str) -> Tuple[int, int, str]:
+def ctx_limits(model: str, window: Optional[int] = None) -> Tuple[int, int, str]:
     """(warn, high, note) context thresholds for `model`: Antigravity compacts when the next call wouldn't fit the
-    window — 512k for Gemini 4 and Gemini 3.5 Flash-Lite, 256k for older Gemini, 128k for 2.5/3.1 Flash-Lite, 840k for
-    Claude 5.5, 80k for GPT-OSS 120B."""
+    window. `window` is the one Antigravity reported for the model (real_window()); without it, the window known at
+    release — 512k for Gemini 4 and Gemini 3.5 Flash-Lite, 256k for older Gemini, 128k for 2.5/3.1 Flash-Lite, 840k for
+    Claude 5.5, 80k for GPT-OSS 120B. A reported window that differs moves the near-compaction threshold with it (the
+    same share of the window) and the first hint only down: a bigger window doesn't make a long context cheaper to
+    re-read."""
     m = (model or "").lower()
     if re.search(r"gemini[-_ ]?(?:2\.5|3\.1[-_ ]?flash[-_ ]?lite)", m):
         warn, high, win, note = 80_000, 110_000, 128_000, " of the model's 128k window"
@@ -83,7 +92,16 @@ def ctx_limits(model: str) -> Tuple[int, int, str]:
     elif re.search(r"(opus|sonnet)[- ]?5[.-]5", m):
         warn, high, win, note = 180_000, 720_000, 840_000, " of the model's 840k window"
     else:
-        return CTX_WARN, CTX_HIGH, ""
+        warn, high, win, note = CTX_WARN, CTX_HIGH, 0, ""
+    if isinstance(window, int) and not isinstance(window, bool) and window >= 4_000 and window != win:
+        if win:
+            high = int(window * high / win)
+            warn = warn if window >= win else max(1, int(window * warn / win))
+        else:  # a model this table doesn't know: the shares Gemini 4's thresholds have of its window
+            warn, high = min(CTX4_WARN, int(window * 0.6)), int(window * CTX4_HIGH / 512_000)
+        win, note = window, f" of the model's {round(window / 1000)}k window"
+    if not win:
+        return warn, high, ""
     override = _parse_compact_override(os.environ.get("AGY_CLI_AUTO_COMPACT_OVERRIDE", ""), win)
     if override is not None:
         warn = min(warn, max(1, int(override * 0.6)))
@@ -91,6 +109,35 @@ def ctx_limits(model: str) -> Tuple[int, int, str]:
         lim_s = f"{override // 1000}k" if override >= 1000 else str(override)
         note = f" of the {lim_s} compaction limit (Antigravity CLI AGY_CLI_AUTO_COMPACT_OVERRIDE; {win // 1000}k window)"
     return warn, high, note
+
+
+def real_window(payload: dict, calls: dict, sp: dict, model: str) -> Optional[int]:
+    """The window Antigravity reported for `model` (hooks/context_window.py), None when there is none: the newest
+    recorded reading, read again from this conversation's latest call when it is missing or older than STALE and that
+    call is recent — once per model, and again only ASK_AGAIN calls after a reading that found nothing. Not while this
+    conversation's calls weren't all counted (it began under an older version: the count can't pick the latest call).
+    An Orchestrator session takes its executor's call as its own reading. Never raises."""
+    try:
+        import context_window as cw
+        found = cw.lookup(model)
+        now = time.time()
+        if found and now - found[1] <= cw.STALE:
+            return found[0]
+        k = cw.key(model)
+        own = sp.get("win_conv") if isinstance(sp.get("win_conv"), int) else None
+        at = cw.epoch(str(calls.get("ctx_at") or ""))
+        n = int(calls.get("n_calls") or 0)
+        asked = sp.get("win_ask") if isinstance(sp.get("win_ask"), dict) else {}
+        if (k and n > 0 and not calls.get("n_partial") and at is not None and now - at <= cw.FRESH
+                and (asked.get("k") != k or n - int(asked.get("n") or 0) >= ASK_AGAIN)):
+            sp["win_ask"] = {"k": k, "n": n}
+            got = cw.refresh(str(payload.get("conversationId") or ""), n, at, now)
+            if got and k.startswith("orchestrator") and any(EXECUTOR_RE.search(name) for name in got[0]):
+                own = sp["win_conv"] = got[1]
+            found = cw.lookup(model) or found
+        return found[0] if found else own
+    except Exception:  # a missing module, an odd state, an unreadable file: the numbers known at release apply
+        return None
 
 
 def setting(key: str = "speedHints") -> bool:
@@ -294,7 +341,8 @@ def message(payload: dict, st: Optional[dict]) -> Optional[str]:
                        + (" A failure you can't explain → the `debugger` subagent." if main else "")))
 
     ctx = calls.get("ctx", 0)
-    warn, high, ctx_note = ctx_limits(str(payload.get("modelName") or ""))
+    model = str(payload.get("modelName") or "")
+    warn, high, ctx_note = ctx_limits(model, real_window(payload, calls, sp, model))
     if sp.get("ctx_cp") != len(st.get("checkpoints") or []) or ctx < warn * 0.7:
         sp["ctx_cp"], sp["ctx_level"] = len(st.get("checkpoints") or []), 0  # compacted: the context is small again
     elif sp.get("ctx_level", 0) >= 2 and ctx < high * 0.85:

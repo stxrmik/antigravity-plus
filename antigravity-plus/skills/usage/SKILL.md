@@ -9,7 +9,7 @@ description: >-
 
 # /usage — token & cost report
 
-> **On your own:** in a long conversation, check the context fill (`usage.py --conversation <id>`, read only the summary). Say nothing unless it's above ~70% (Antigravity compacts as soon as the next call won't fit the window: 512k on the Gemini 4 family and Gemini 3.5 Flash-Lite, 256k on Gemini 3.x Flash, 840k on Claude 5.5, 80k on GPT-OSS 120B, or the Antigravity CLI's own `AGY_CLI_AUTO_COMPACT_OVERRIDE` setting — it doesn't exist in the desktop app); then tell the user in one line and suggest /handoff (or their /compact).
+> **On your own:** in a long conversation, check the context fill (`usage.py --conversation <id>`, read only the summary). Say nothing unless it's above ~70% (Antigravity compacts as soon as the next call won't fit the window — the report shows the one Antigravity gave the latest call; at release 512k on the Gemini 4 family and Gemini 3.5 Flash-Lite, 256k on Gemini 3.x Flash, 840k on Claude 5.5, 80k on GPT-OSS 120B — or the Antigravity CLI's own `AGY_CLI_AUTO_COMPACT_OVERRIDE` setting, which doesn't exist in the desktop app); then tell the user in one line and suggest /handoff (or their /compact).
 
 The script [usage.py](scripts/usage.py) reads Antigravity transcripts (each model call records
 `input_tokens`, `cache_read_tokens`, `output_tokens`) and prices them with [pricing.json](pricing.json).

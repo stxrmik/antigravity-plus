@@ -64,6 +64,7 @@ POLL_TIMER = 180          # schedule timers shorter than this, set while work is
 BG_KEEP = 60              # finished entries kept in the state
 # How the steps go (hooks/speed.py).
 TOKENS = re.compile(rb'"(input_tokens|cache_read_tokens)":\s*(\d+)')
+CREATED_AT = re.compile(rb'"created_at":\s*"([0-9T:.+Z -]{10,40})"')
 EXIT = re.compile(r"Command exited with code (-?\d+)")
 SANDBOX_NOTE = "There were sandbox errors"
 SANDBOX_DENIED = re.compile(r"operation not permitted|permission denied|not permitted|could not resolve host|"
@@ -477,8 +478,11 @@ def symbol_search(cmd: str) -> List[str]:
 
 def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
     """Keep st["calls"] up to date with how the steps go (hooks/speed.py):
-    ctx — tokens the latest model call carried (input + cache reads); fail_run / fail_last / fail_step — commands or
-    edits failing in a row (a success that changes something resets it; a grep without matches isn't a failure);
+    ctx — tokens the latest model call carried (input + cache reads); n_calls / ctx_at — how many model calls were seen
+    and the latest one's created_at (hooks/context_window.py reads that call's window by them; n_partial — counted
+    from the middle of the conversation); fail_run / fail_last /
+    fail_step — commands or edits failing in a row (a success that changes something resets it; a grep without matches
+    isn't a failure);
     sbx — {command key: index} of commands that failed inside the terminal sandbox; sbx_fail — the latest such failure;
     sbx_new — keys that then worked with BypassSandbox (to remember for the project); sbx_ok — keys that worked inside
     the sandbox; big — the latest very large tool result (a whole long file, a huge output). For hooks/memory_hints.py:
@@ -489,7 +493,15 @@ def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
     if kind == b"PLANNER_RESPONSE":
         tokens = dict((k.decode(), int(v)) for k, v in TOKENS.findall(raw[:600] + raw[-600:]))
         if tokens:
+            if "n_calls" not in calls and calls.get("ctx"):
+                calls["n_partial"] = True  # counted from the middle: the conversation began under an older version
             calls["ctx"] = tokens.get("input_tokens", 0) + tokens.get("cache_read_tokens", 0)
+            calls["n_calls"] = int(calls.get("n_calls") or 0) + 1
+            head = raw[:600]
+            cut = head.find(b'"content"')
+            m = CREATED_AT.search(head[:cut] if cut >= 0 else head)
+            if m:
+                calls["ctx_at"] = m.group(1).decode("ascii", "replace")
         if b'"tool_calls"' not in raw:
             st["calls_pending"] = []
             return

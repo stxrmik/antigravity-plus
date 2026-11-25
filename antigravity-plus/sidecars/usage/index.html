@@ -657,7 +657,10 @@
       const fillColor = sev === 'crit' ? 'var(--ap-crit)' : sev === 'warn' ? 'var(--ap-warn)' : 'var(--ap-s1)';
       out.push(h('div', { class: 'card' },
         h('div', { class: 'row between' }, h('h3', { style: 'margin:0' }, 'Контекст'),
-          h('span', { class: 'num' }, `${fmtK(ctx.current)} / ${fmtK(ctx.window)} · ${fmtPct(f)}`)),
+          h('span', { class: 'num', title: ctx.window_source === 'antigravity' ? 'Окно — столько Antigravity дал последнему вызову модели'
+            : ctx.window_source === 'recorded' ? 'Окно — последнее, что Antigravity сообщал для этой модели'
+            : 'Окно — из pricing.json: Antigravity пока не сообщал его для этой модели' },
+            `${fmtK(ctx.current)} / ${fmtK(ctx.window)} · ${fmtPct(f)}`)),
         h('div', { class: 'meter', role: 'meter', 'aria-valuenow': Math.round(f * 100), 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-label': 'Заполнение контекста' },
           h('div', { class: 'track', style: `background:${fillColor}` }),
           h('div', { class: 'fill', style: `width:${(f * 100).toFixed(1)}%;background:${fillColor}` }),

@@ -12,8 +12,9 @@ messages.
 
 Token counts per item are estimates (characters → tokens: Latin ≈ 4 chars/token, code ≈ 3.5, Cyrillic ≈ 2.5),
 calibrated to the real number Antigravity recorded for the last model call (input_tokens + cache_read_tokens), so the
-categories add up to it. The fixed overhead is measured from the conversation's first model call. The window and the
-compaction threshold come from skills/usage/pricing.json.
+categories add up to it. The fixed overhead is measured from the conversation's first model call. The window is the
+one Antigravity gave the latest call (asked through usage.py), else the newest one recorded for the model
+(hooks/context_window.py), else skills/usage/pricing.json's; the compaction threshold comes from pricing.json.
 
 Usage:
   context.py --conversation <id>            # Markdown: categories, the 10 biggest items, tips
@@ -379,7 +380,8 @@ def collect(steps: List[dict], workspaces: List[str]) -> dict:
 # ─────────────────────────────── analysis ──────────────────────────────────
 
 def analyze(steps: List[dict], conv_id: str, model: str, model_guessed: bool, pricing: "usage.Pricing",
-            workspaces: Optional[List[str]] = None) -> dict:
+            workspaces: Optional[List[str]] = None, window: Optional[int] = None) -> dict:
+    """`window`: the one Antigravity gave the latest call (usage.window_of()), else the model's from pricing."""
     workspaces = workspaces or find_workspaces(steps)
     c = collect(steps, workspaces)
     items: List[Item] = c["items"]
@@ -431,8 +433,8 @@ def analyze(steps: List[dict], conv_id: str, model: str, model_guessed: bool, pr
 
     top = sorted((i for i in live if i.cat not in FIXED), key=lambda i: -i.tokens)[:10]
     last_model = model or pricing.cfg.get("default_model", "")
-    window = pricing.context_window(last_model)
-    compaction = pricing.compaction_threshold(last_model)
+    window = window or pricing.context_window(last_model)
+    compaction = pricing.compaction_threshold(last_model, window)
     ck = c["checkpoint"]
     return {
         "conversation": conv_id, "model": last_model, "model_guessed": model_guessed,
@@ -626,7 +628,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     model = a.model or (s.calls[-1].model if s.calls else "")
     guessed = not a.model and (not s.calls or s.calls[-1].guessed)
     ws_arg = [os.path.realpath(os.path.expanduser(a.workspace))] if a.workspace else None
-    r = analyze(steps, conv, model, guessed, pricing, ws_arg)
+    window = None if a.model else usage.window_of(s, pricing)[0]  # --model: that model's window
+    r = analyze(steps, conv, model, guessed, pricing, ws_arg, window)
     print(json.dumps(r, ensure_ascii=False) if a.json else render(r))
     return 0
 

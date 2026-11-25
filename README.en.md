@@ -274,10 +274,13 @@ they install the saved choice.
   that works inside the sandbox twice is forgotten; with the sandbox off, the list isn't shown.
 - When the conversation's context reaches 200k tokens (150k on older models), the agent is told to keep it lean:
   search with `rg -n`, read only the lines it needs, trim long output. Antigravity compacts the history as soon as the
-  next model call won't fit the window (verified on 2.34–2.35.1): 512k for the Gemini 4 family (Neon, Carbon, Argon,
-  Hydrogen, every Orchestrator) and **Gemini 3.5 Flash-Lite**, 256k for Gemini 3.x Flash, 128k for 2.5/3.1 Flash-Lite,
-  840k for Claude 5.5, and 80k for GPT-OSS 120B (in the Antigravity CLI the window can be narrowed with `AGY_CLI_AUTO_COMPACT_OVERRIDE`: a token count, `800K`/`0.5M` or a percentage; the desktop app ignores it). So around
-  440k (220k on 256k models) the agent hears that compaction is near and it's time to offer `/handoff`, or your
+  next model call won't fit the window. Antigravity sets the window on its servers and changes it without an app update,
+  so the plugin takes it from Antigravity itself — from each model's recent calls (`hooks/context_window.py`, kept in
+  `~/.gemini/antigravity-plus/context-windows.json`) — and the hint thresholds move with it. Until Antigravity has
+  reported a window, the numbers known at release apply (verified on 2.34–2.35.1, last on November 25, 2026): 512k for
+  the Gemini 4 family (Neon, Carbon, Argon, Hydrogen, every Orchestrator) and **Gemini 3.5 Flash-Lite**, 256k for
+  Gemini 3.x Flash, 128k for 2.5/3.1 Flash-Lite, 840k for Claude 5.5, and 80k for GPT-OSS 120B (in the Antigravity CLI the window can be narrowed with `AGY_CLI_AUTO_COMPACT_OVERRIDE`: a token count, `800K`/`0.5M` or a percentage; the desktop app ignores it). So at about
+  86% of the window (440k of 512k, 220k of 256k) the agent hears that compaction is near and it's time to offer `/handoff`, or your
   `/compact` to compact now, at a moment you choose. After it reads a whole large file: a tip to read ranges (once per
   message). `/context` shows what fills the window (rules, session context, files, outputs).
 - **Plan-limit hints (`hooks/quota.py`).** When the current model's quota group drops under 15% weekly or 10% 5-hour
@@ -728,8 +731,10 @@ Good to know:
   panel". While hidden, it polls nothing.
 - Limits come from Antigravity itself; the cost uses prices from `skills/usage/pricing.json` (USD per 1M tokens:
   Gemini 4 Neon / Carbon / Argon / Hydrogen, Gemini 3.8 / 3.6 Flash, Gemini 3.5 / 3.1 Flash-Lite, Gemini 3.1 Pro,
-  Claude 5.5, etc.), and the context meter shows Antigravity's own window, which it compacts the history at (512k for
-  Gemini 4, 256k for Gemini 3.x Flash, 128k for Flash-Lite, 840k for Claude 5.5). It's an API-equivalent estimate, not your bill — check the prices against the current ones.
+  Claude 5.5, etc.), and the context meter shows the window Antigravity gave the model's latest call (the panel asks
+  Antigravity; the tooltip on the number says where it came from), which it compacts the history at. Without an answer:
+  the last window Antigravity reported for that model, else the number in `pricing.json` (512k for Gemini 4, 256k for
+  Gemini 3.x Flash, 128k for Flash-Lite, 840k for Claude 5.5). It's an API-equivalent estimate, not your bill — check the prices against the current ones.
 - Orchestrator (Carbon / Argon / Neon) is priced per call: the plan at its planner's prices, Gemini 4 Hydrogen's work on
   that plan at Hydrogen's. The panel takes each call's model from Antigravity itself, `/usage` in a terminal from the
   plan hand-over markers in the transcript; the report has a per-model line («По моделям»).

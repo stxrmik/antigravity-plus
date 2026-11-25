@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PRICING = os.path.join(os.path.dirname(HERE), "pricing.json")
+HOOKS_DIR = os.path.abspath(os.path.join(HERE, "..", "..", "..", "hooks"))  # compat, context_window
 PRODUCT_ROOTS = ["~/.gemini/antigravity", "~/.gemini/antigravity-cli", "~/.gemini/antigravity-ide"]
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 MODEL_CHANGE_RE = re.compile(r"Model Selection`\s+from\s+(.*?)\s+to\s+(.*?)\.(?:\s|$)")
@@ -113,6 +114,7 @@ class Session:
     last_ts: Optional[dt.datetime] = None
     title: str = ""
     guessed_calls: int = 0  # calls priced with default_model because the transcript never named the model
+    window: Optional[int] = None  # the window Antigravity gave the latest call (live_window()); 0 = asked, unknown
 
 
 @dataclass
@@ -172,12 +174,25 @@ class Pricing:
     def alias(self, subagent_model_arg: str) -> Optional[str]:
         return self.cfg.get("subagent_model_aliases", {}).get(subagent_model_arg)
 
-    def context_window(self, model_name: str) -> int:
+    def listed_window(self, model_name: str) -> int:
+        """The model's window as pricing.json lists it (the number known at release)."""
         m = self.lookup(model_name)
         return (m or {}).get("context_window") or self.cfg.get("default_context_window", 200000)
 
-    def compaction_threshold(self, model_name: str) -> Optional[int]:
-        win = self.context_window(model_name)
+    def recorded_window(self, model_name: str) -> Optional[int]:
+        """The newest window Antigravity reported for the model (hooks/context_window.py), or None."""
+        cw = hook_module("context_window")
+        try:
+            return cw.window(self.override or model_name) if cw else None
+        except Exception:
+            return None
+
+    def context_window(self, model_name: str) -> int:
+        """The model's window: the newest one Antigravity reported for it, else pricing.json's `context_window`."""
+        return self.recorded_window(model_name) or self.listed_window(model_name)
+
+    def compaction_threshold(self, model_name: str, window: Optional[int] = None) -> Optional[int]:
+        win = window or self.context_window(model_name)
         override = parse_compact_override(os.environ.get("AGY_CLI_AUTO_COMPACT_OVERRIDE"), win)
         if override is not None:
             return override
@@ -347,12 +362,9 @@ def _discover_ls() -> Tuple[str, str]:
         return "", ""
     if _LS_CACHE is _LS_UNSET:
         found: Tuple[str, str] = ("", "")
-        hooks_dir = os.path.abspath(os.path.join(HERE, "..", "..", "..", "hooks"))
-        if os.path.isdir(hooks_dir):
-            if hooks_dir not in sys.path:
-                sys.path.insert(0, hooks_dir)
+        compat = hook_module("compat")
+        if compat:
             try:
-                import compat
                 for ls in compat.daemon_servers():
                     if compat._alive(ls.pid) and compat.ls_healthy(ls.addr, 0.4):
                         found = (ls.addr, ls.token)
@@ -361,6 +373,64 @@ def _discover_ls() -> Tuple[str, str]:
                 pass
         _LS_CACHE = found
     return _LS_CACHE if isinstance(_LS_CACHE, tuple) else ("", "")
+
+
+def hook_module(name: str):
+    """A module of the plugin's hooks folder (compat, context_window), or None when this script runs without it."""
+    if not os.path.isdir(HOOKS_DIR):
+        return None
+    if HOOKS_DIR not in sys.path:
+        sys.path.insert(0, HOOKS_DIR)
+    try:
+        return __import__(name)
+    except Exception:
+        return None
+
+
+def live_window(s: Session) -> Optional[int]:
+    """The window Antigravity gave the conversation's latest model call (its generator metadata, asked once per
+    process), or None when the language server can't be asked. A recent call's reading is recorded for the other
+    readers (hooks/context_window.py: the context hints, the recent list, conversations read without the server)."""
+    if s.window is not None:
+        return s.window or None
+    s.window = 0
+    cw = hook_module("context_window")
+    if not cw or not s.calls:
+        return None
+    addr, token = _discover_ls()
+    if not addr or not token:
+        return None
+    try:
+        g = cw.latest(s.conv_id, len(s.calls), (addr, token))
+        when = {c.step: c.ts.timestamp() for c in s.calls if c.ts}
+        found = cw.readings([g], when.get) if g else []
+        if found:
+            cw.record(found)
+            s.window = found[0][1]
+    except Exception:  # never let the reading break the report
+        pass
+    return s.window or None
+
+
+def recorded_sig() -> str:
+    """The windows recorded per model (not when): the recent list is computed again when one of them changes."""
+    cw = hook_module("context_window")
+    try:
+        return json.dumps({k_: v["window"] for k_, v in cw.load().items()}, sort_keys=True) if cw else ""
+    except Exception:
+        return ""
+
+
+def window_of(s: Session, pricing: "Pricing", live: bool = True) -> Tuple[int, str]:
+    """(window, where it comes from) for the conversation's latest call: «antigravity» — what Antigravity gave that very
+    call (live_window(); only when `live`), «recorded» — the newest window Antigravity reported for its model,
+    «pricing» — pricing.json's number."""
+    model = s.calls[-1].model if s.calls else pricing.cfg.get("default_model", "")
+    win = live_window(s) if live and s.calls and not pricing.override else None  # --model: that model's window
+    if win:
+        return win, "antigravity"
+    win = pricing.recorded_window(model)
+    return (win, "recorded") if win else (pricing.listed_window(model), "pricing")
 
 
 def _ls_metadata(conv_id: str) -> List[dict]:
@@ -798,8 +868,8 @@ def render_markdown(s: Session, pricing: Pricing, max_turns: int = 10) -> str:
     if s.calls:
         last = s.calls[-1]
         peak = max(s.calls, key=lambda c: c.prompt)
-        win = pricing.context_window(last.model)
-        comp = pricing.compaction_threshold(last.model)
+        win, _src = window_of(s, pricing)
+        comp = pricing.compaction_threshold(last.model, win)
         comp_note = f" (сжатие ~{k(comp)})" if comp and comp < win else ""
         out.append(f"**Контекст:** сейчас {k(last.prompt)} / {k(win)} `{bar(last.prompt / win)}` "
                    f"{last.prompt / win:.0%}{comp_note} · пик {k(peak.prompt)}")
@@ -888,8 +958,8 @@ def render_html(s: Session, pricing: Pricing) -> str:
     grand.merge(own)
     grand.merge(subagent_totals(s))
     last = s.calls[-1] if s.calls else None
-    win = pricing.context_window(last.model) if last else 200000
-    comp = pricing.compaction_threshold(last.model) if last else None
+    win = window_of(s, pricing)[0] if last else 200000
+    comp = pricing.compaction_threshold(last.model, win) if last else None
     peak = max((c.prompt for c in s.calls), default=0)
 
     # stacked bars per call
@@ -1043,7 +1113,7 @@ def render_all(roots: List[str], pricing: Pricing, days: Optional[int], limit: i
 # ─────────────────────────────── JSON (side panel) ─────────────────────────
 
 CACHE_PATH = os.path.expanduser("~/.gemini/antigravity-plus/usage-cache.json")
-CACHE_VERSION = 8  # 5: Orchestrator; 6: configurable Orchestrator & CLI override; 7: Subagents array + role parens; 8: body-anchored hand-over markers, subagent results by position
+CACHE_VERSION = 9  # 5: Orchestrator; 6: configurable Orchestrator & CLI override; 7: Subagents array + role parens; 8: body-anchored hand-over markers, subagent results by position; 9: windows Antigravity reported (window_source)
 
 
 def _iso(ts: Optional[dt.datetime]) -> Optional[str]:
@@ -1071,14 +1141,16 @@ def _call(c: Call) -> dict:
             "input": c.input, "cache_read": c.cache_read, "output": c.output, "cost": round(c.cost, 6), "tools": c.tools}
 
 
-def _context(s: Session, pricing: Pricing) -> Optional[dict]:
+def _context(s: Session, pricing: Pricing, live: bool = False) -> Optional[dict]:
+    """The context of the conversation's latest call; `live` asks Antigravity for that call's window (one
+    conversation on screen), else the newest window recorded for the model or pricing.json's (lists)."""
     if not s.calls:
         return None
     last = s.calls[-1]
-    win = pricing.context_window(last.model)
-    comp = pricing.compaction_threshold(last.model)
-    res = {"current": last.prompt, "peak": max(c.prompt for c in s.calls), "window": win, "model": last.model,
-           "fraction": round(last.prompt / win, 4) if win else None}
+    win, source = window_of(s, pricing, live)
+    comp = pricing.compaction_threshold(last.model, win)
+    res = {"current": last.prompt, "peak": max(c.prompt for c in s.calls), "window": win, "window_source": source,
+           "model": last.model, "fraction": round(last.prompt / win, 4) if win else None}
     if comp:
         res["compaction"] = comp
     return res
@@ -1106,7 +1178,7 @@ def session_json(s: Session, pricing: Pricing) -> dict:
         "conversation": s.conv_id, "title": s.title, "models": s.models,
         "first_ts": _iso(s.first_ts), "last_ts": _iso(s.last_ts), "duration": duration(s.first_ts, s.last_ts),
         "totals": _tot(grand), "own": _tot(own), "subagents_totals": _tot(subs),
-        "context": _context(s, pricing),
+        "context": _context(s, pricing, live=True),
         "turns": [{"idx": t.idx, "text": short(t.text, 160), "ts": _iso(t.ts), **_tot(totals_of(t.calls))} for t in s.turns],
         "calls": [_call(c) for c in s.calls[-400:]],
         "top_calls": [_call(c) for c in sorted(s.calls, key=lambda c: -c.cost)[:5]],
@@ -1163,7 +1235,7 @@ def recent_json(roots: List[str], pricing: Pricing, limit: int = 15, days: int =
         with open(pricing.path, "rb") as f:
             compact_ovr = os.environ.get("AGY_CLI_AUTO_COMPACT_OVERRIDE") or ""
             pricing_sig = hashlib.sha1(
-                f.read() + f"{pricing.override or ''}|{pricing.service_tier or ''}|{compact_ovr}".encode()
+                f.read() + f"{pricing.override or ''}|{pricing.service_tier or ''}|{compact_ovr}|{recorded_sig()}".encode()
             ).hexdigest()
     except OSError:
         pricing_sig = ""
