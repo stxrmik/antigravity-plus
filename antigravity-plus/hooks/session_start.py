@@ -56,9 +56,12 @@ def git(args: List[str], cwd: str, timeout: float = 4.0) -> Optional[str]:
 
 
 def to_path(p: str) -> str:
-    if p.startswith("file://"):
-        return unquote(urlparse(p).path)
-    return os.path.expanduser(p)
+    if not p.startswith("file://"):
+        return os.path.expanduser(p)
+    path = unquote(urlparse(p).path)
+    if re.match(r"^/[A-Za-z]:", path):
+        path = path[1:]
+    return os.path.normpath(path) if compat.WINDOWS else path
 
 
 def read_text(path: str, limit: int) -> str:
@@ -175,6 +178,98 @@ def same_file(a: str, b: str) -> bool:
         return False
 
 
+RULE_FILE_LIMIT = 24000      # Antigravity's per-file limit for an inline rules file (bytes)
+RULES_TOKEN_BUDGET = 20000   # its `rules-token-budget`, shared by every rules file it loads (doctor.py has the same)
+PLUGIN_NAME = "antigravity-plus"
+PLUGIN_RULES_TOKENS = "12.8k"  # what Antigravity counts for this plugin's own rule files
+
+
+def _estimate_rule_tokens(text: str) -> float:
+    """Same estimate as skills/doctor/scripts/doctor.py `_estimate_rule_tokens` (tests/test_setup.py compares them)."""
+    if not text:
+        return 0.0
+    ascii_n = len(text.encode("ascii", "ignore"))
+    rest = len(text) - ascii_n
+    cyr = len(re.findall("[\u0400-\u04ff]", text)) if rest else 0
+    wide = len(re.findall("[\u2e80-\U0010ffff]", text)) if rest > cyr else 0
+    other = max(0, rest - cyr - wide)
+    symbols = sum(text.count(ch) for ch in "{}()[];=<>/\\_|`#$*&+%^~\"'")
+    ratio = 3.5 if ascii_n and symbols / ascii_n > 0.05 else 4.0
+    return ascii_n / ratio + cyr / 2.5 + wide + other / 2.5
+
+
+def _rule_files_for_budget(root: str) -> List[str]:
+    """The rule files Antigravity loads inline: every installed plugin's rules/*.md (this plugin's own from its
+    source folder when it isn't installed), the global AGENTS.md / GEMINI.md, and the project's. As doctor.py."""
+    paths: List[str] = []
+    plugins_dir = os.path.expanduser("~/.gemini/config/plugins")
+    has_self = False
+    if os.path.isdir(plugins_dir):
+        for name in sorted(os.listdir(plugins_dir)):
+            rdir = os.path.join(plugins_dir, name, "rules")
+            if os.path.isdir(rdir):
+                if name == PLUGIN_NAME:
+                    has_self = True
+                paths += [os.path.join(rdir, fn) for fn in sorted(os.listdir(rdir)) if fn.endswith(".md")]
+    if not has_self:
+        rdir = os.path.join(PLUGIN, "rules")
+        if os.path.isdir(rdir):
+            paths += [os.path.join(rdir, fn) for fn in sorted(os.listdir(rdir)) if fn.endswith(".md")]
+    for g in ("~/.gemini/config/AGENTS.md", "~/.gemini/config/GEMINI.md", "~/.gemini/GEMINI.md"):
+        paths.append(os.path.expanduser(g))
+    for n in ("AGENTS.md", "GEMINI.md"):
+        paths.append(os.path.join(root, n))
+    return paths
+
+
+def _combined_rule_tokens(root: str) -> int:
+    """Estimated tokens of all inline rules (always_on only, each wrapped in <RULE[path]> like Antigravity does)."""
+    total = 0.0
+    seen = set()
+    for p in _rule_files_for_budget(root):
+        if not os.path.isfile(p):
+            continue
+        real = os.path.realpath(p)
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        m = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.S)
+        if m:
+            tm = re.search(r"^trigger:\s*(.+)$", m.group(1), re.M)
+            if tm and tm.group(1).strip().strip("'\"") != "always_on":
+                continue
+            text = text[m.end():]
+        total += _estimate_rule_tokens(f"<RULE[{p}]>\n{text.lstrip()}\n</RULE[{p}]>\n")
+    return int(round(total))
+
+
+def _rules_note(root: str, found: Dict[str, str], native: List[str]) -> str:
+    """One line when Antigravity may leave the project's AGENTS.md / GEMINI.md out of the inline rules (its own
+    message then says «…exceeded the rules token budget and were excluded from inline injection»): the sizes and
+    the command that reads them. Empty when they fit."""
+    sizes: Dict[str, int] = {}
+    for n in native:
+        try:
+            sizes[n] = os.path.getsize(found[n])
+        except OSError:
+            continue
+    over_file = any(sz > RULE_FILE_LIMIT for sz in sizes.values())
+    est = _combined_rule_tokens(root)
+    if not (over_file or est > RULES_TOKEN_BUDGET):
+        return ""
+    names = ", ".join(f"`{n}` ({sizes[n]:,} bytes)" if n in sizes else f"`{n}`" for n in native)
+    reads = ", ".join(f"`read_file {found[n]}`" for n in native)
+    return (f"Project rules: {names} — Antigravity may leave {'it' if len(native) == 1 else 'them'} out of the inline "
+            f"rules ({RULE_FILE_LIMIT:,}-byte limit per file; {RULES_TOKEN_BUDGET:,}-token budget shared with the "
+            f"plugin's own rule files, which Antigravity counts at ~{PLUGIN_RULES_TOKENS} tokens; estimated total "
+            f"≈{est:,}). If its rules aren't in your context, read {'it' if len(native) == 1 else 'them'}: {reads}.")
+
+
 def project_files(ws: str, top: Optional[str]) -> Tuple[List[str], List[str]]:
     """(summary lines, Claude Code bridge lines) for the workspace's instruction files."""
     roots = [ws] + ([top] if top and top != ws else [])
@@ -188,7 +283,8 @@ def project_files(ws: str, top: Optional[str]) -> Tuple[List[str], List[str]]:
     summary: List[str] = []
     native = [n for n in ("AGENTS.md", "GEMINI.md") if n in found]
     if native:
-        summary.append("Project rules: " + ", ".join(f"`{n}`" for n in native) + " (loaded by Antigravity).")
+        summary.append(_rules_note(top or ws, found, native)
+                       or "Project rules: " + ", ".join(f"`{n}`" for n in native) + " (loaded by Antigravity).")
     elif "CLAUDE.md" in found or "CLAUDE.local.md" in found:
         summary.append("Project rules: Claude Code's CLAUDE.md (below); no AGENTS.md.")
     else:
@@ -448,7 +544,12 @@ def ci_section(ws: str) -> List[str]:
 
 def is_subagent(payload: dict) -> bool:
     """A subagent's transcript has no user message: its first step is this hook's own message, while a
-    conversation the user started already holds the user's request as step 0 when the hook runs."""
+    conversation the user started already holds the user's request as step 0 when the hook runs. Antigravity 2.34+
+    also sets parentConversationId on subagent hook payloads."""
+    parent = payload.get("parentConversationId")
+    own = payload.get("conversationId")
+    if isinstance(parent, str) and parent.strip() and parent.strip() != (own.strip() if isinstance(own, str) else None):
+        return True  # (a parent equal to the conversation's own id is no parent: a main conversation)
     if isinstance(payload.get("lastUserInput"), str) and payload["lastUserInput"].strip():
         return False
     tp = conv.transcript_path(payload)

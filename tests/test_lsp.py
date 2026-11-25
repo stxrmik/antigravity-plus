@@ -396,17 +396,19 @@ for mode in ("ping", "run"):
           code == 0 and "class XpService" in out and "no background server" not in out and states(), (code, out, states()))
     lsp("stop", "--all")
 
-# a broken server binary fails fast with exit 1 instead of hanging 15 s or printing a traceback
+# a broken server command that fails on startup fails fast with exit 1 instead of hanging 15 s or printing a traceback
 CFG = os.path.join(HOME, ".gemini", "antigravity-plus", "lsp.json")
 with open(CFG, encoding="utf-8") as f:
     cfg_saved = f.read()
 with open(CFG, "w", encoding="utf-8") as f:
-    json.dump({"python": {"name": "fakepy", "command": ["/nonexistent/fake-lsp-bin"]}}, f)
+    json.dump({"python": {"name": "fakepy", "command": [sys.executable, "-c", "import sys; sys.exit(1)"]}}, f)
 t0 = time.time(); code, out = lsp("symbols", "pkg/service.py"); fail_took = time.time() - t0
 with open(CFG, "w", encoding="utf-8") as f:
     f.write(cfg_saved)
-check("missing server binary: fails fast cleanly with exit 1 and no traceback",
-      code == 1 and fail_took < 8 and "Traceback" not in out and "can't start" in out, (round(fail_took, 2), code, out))
+check("broken server command: fails fast cleanly with exit 1 and no traceback",
+      code == 1 and fail_took < 8 and "Traceback" not in out
+      and ("stopped while answering initialize" in out or "didn't start" in out or "can't start" in out),
+      (round(fail_took, 2), code, out))
 lsp("stop", "--all")
 
 # --no-daemon, a language with no server, the session context
@@ -458,6 +460,85 @@ check("the second rg for a symbol: the language server's commands, with the serv
 run('rg -n "helper_name" pkg/')
 hint, err = pre()
 check("…once per conversation", hint == "", hint)
+
+# a custom lsp.json entry whose script path does not exist is skipped by server_command() instead of shadowing a working server
+missing_script = os.path.join(SP, "nonexistent_lsp_server.py")
+saved_py_lang = dict(L.LANGS["python"])
+saved_servers = dict(L.SERVERS)
+with open(CFG, encoding="utf-8") as f:
+    cfg_saved2 = f.read()
+try:
+    L.SERVERS["fakepy"] = {"command": [sys.executable, FAKE], "ready": "pyright", "startup": 30, "open": True}
+    L.LANGS["python"] = dict(L.LANGS["python"], servers=("fakepy",))
+    with open(CFG, "w", encoding="utf-8") as f:
+        json.dump({"python": {"name": "missing-script-py", "command": [sys.executable, missing_script]}}, f)
+    L._FOUND.clear()
+    L.apply_config()
+    check("custom lsp.json with missing script path is skipped by server_command() and does not shadow fakepy",
+          L.server_command("missing-script-py") is None and L.pick_server("python") == "fakepy",
+          (L.server_command("missing-script-py"), L.pick_server("python"), L.LANGS["python"]["servers"]))
+    with open(CFG, "w", encoding="utf-8") as f:
+        json.dump({"python": {"name": "missing-bin-py", "command": ["/nonexistent/fake-lsp-bin"]}}, f)
+    L._FOUND.clear()
+    L.apply_config()
+    check("custom lsp.json with missing binary is skipped by server_command() and does not shadow fakepy",
+          L.server_command("missing-bin-py") is None and L.pick_server("python") == "fakepy",
+          (L.server_command("missing-bin-py"), L.pick_server("python"), L.LANGS["python"]["servers"]))
+finally:
+    with open(CFG, "w", encoding="utf-8") as f:
+        f.write(cfg_saved2)
+    L.LANGS["python"] = saved_py_lang
+    L.SERVERS.clear()
+    L.SERVERS.update(saved_servers)
+    L._FOUND.clear()
+
+# command_problem(): a valid command of your own is never rejected; only a missing executable, or an absolute (or ~)
+# path argument that doesn't exist, is — relative scripts, flags and flag values are left alone
+cmd_dir = os.path.join(SP, "cmdcheck")
+cmd_js, cmd_jar = os.path.join(cmd_dir, "server.js"), os.path.join(cmd_dir, "x.jar")
+for fp in (cmd_js, cmd_jar, os.path.join(HOME, "bin", "xlsp")):
+    write(fp, "stub\n")
+os.chmod(os.path.join(HOME, "bin", "xlsp"), 0o755)
+valid = {
+    "relative script + --stdio": [sys.executable, "server.js", "--stdio"],
+    "java -jar with a relative jar": [sys.executable, "-jar", "x.jar"],
+    "relative executable ./bin/srv": ["./bin/srv", "--stdio"],
+    "existing absolute script + --log=…": [sys.executable, cmd_js, "--log=" + os.path.join(cmd_dir, "x.log")],
+    "existing absolute jar": [sys.executable, "-jar", cmd_jar],
+    "a flag's value that doesn't exist yet": [sys.executable, cmd_js, "--log-file", os.path.join(cmd_dir, "new.log")],
+    "a URL argument": [sys.executable, cmd_js, "--server", "https://example.invalid/x"],
+    "~/bin/xlsp": ["~/bin/xlsp", "--stdio"],
+    "a Windows-style path as a flag value": [sys.executable, cmd_js, "--root", "C:\\\\work\\\\nope"],
+}
+if os.name != "nt":
+    valid["/usr/bin/env python3 -m pylsp"] = ["/usr/bin/env", "python3", "-m", "pylsp"]
+for label, cmd in valid.items():
+    check(f"command_problem accepts {label}", L.command_problem(cmd) == "", L.command_problem(cmd))
+invalid = {
+    "an absolute executable that doesn't exist": ["/nonexistent/fake-lsp-bin", "--stdio"],
+    "an executable that is not on PATH": ["no-such-lsp-binary-xyz"],
+    "a missing absolute script": [sys.executable, os.path.join(cmd_dir, "gone.js")],
+    "a missing ~ script": [sys.executable, "~/gone-lsp-script.js"],
+    "a missing absolute jar after -jar": [sys.executable, "-jar", os.path.join(cmd_dir, "gone.jar")],
+}
+for label, cmd in invalid.items():
+    check(f"command_problem rejects {label}", L.command_problem(cmd) != "", L.command_problem(cmd))
+# …and the user is told why, instead of the config being ignored in silence
+saved_py_lang3, saved_servers3 = dict(L.LANGS["python"]), dict(L.SERVERS)
+try:
+    L.SERVERS["broken-py"] = {"command": ["/nonexistent/fake-lsp-bin", "--stdio"], "install": "your lsp.json"}
+    L.LANGS["python"] = dict(L.LANGS["python"], servers=("broken-py",))
+    L._FOUND.clear()
+    hint = L.install_hint("python")
+    check("a refused lsp.json command is named in the install hint, with the reason and the file to fix",
+          L.pick_server("python") is None and "broken-py" in hint and "/nonexistent/fake-lsp-bin" in hint
+          and "lsp.json" in hint, hint)
+finally:
+    L.LANGS["python"] = saved_py_lang3
+    L.SERVERS.clear()
+    L.SERVERS.update(saved_servers3)
+    L._FOUND.clear()
+    L._REJECTED.clear()
 
 lsp("stop", "--all")
 check("nothing left running", not states(), states())

@@ -614,7 +614,7 @@
                          'aria-valuemin': 0, 'aria-valuemax': 100, onpointermove: tipOn, onpointerleave: hideTip },
                 h('div', { class: 'track', style: `background:${color}` }),
                 h('div', { class: 'fill', style: `width:${(used * 100).toFixed(1)}%;background:${color}` })),
-              h('span', { class: 'v num' }, `${fmtPct(used)} · ${fresh ? 'не начат' : `сброс через ${fmtIn(b.resetTime)}`}`),
+              h('span', { class: 'v num' }, `${fmtPct(used)} · ${fresh ? 'не начат' : (b.resetTime ? `сброс через ${fmtIn(b.resetTime)}` : 'сброс позже')}`),
             ];
           })));
       }),

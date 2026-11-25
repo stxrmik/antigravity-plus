@@ -121,8 +121,71 @@ VERIFY_PLAN_RE = re.compile(  # in words: «run the tests», «проверит�
 )
 MAX_REMEMBERED = 20   # plan hashes refused once per conversation
 
-HANDOFF_OFF_RE = re.compile(r"(?:^|<SYSTEM_MESSAGE>\s*)Plan mode is off:\s*this turn runs on the execution model", re.I)
-PLAN_MODE_OFF_RE = re.compile(r"(?:^|<SYSTEM_MESSAGE>\s*)Plan mode is off\b", re.I)
+# Matched with .match() against _body(content): only a message that BEGINS with the marker is a phase change — a
+# subagent [Message] or a quoted note that merely contains it somewhere is not.
+HANDOFF_OFF_RE = re.compile(r"Plan mode is off:\s*this turn runs on\s+(.+?)(?:\.(?=\s|<|$)|\n|<|$)", re.I)
+PLAN_MODE_OFF_RE = re.compile(r"Plan mode is off\b", re.I)
+PLAN_REVIEW_RE = re.compile(r"\[plan review\]", re.I)
+_PRODUCT_ROOTS = ("~/.gemini/antigravity", "~/.gemini/antigravity-cli", "~/.gemini/antigravity-ide")
+_PBTXT_STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"')
+_PLAN_EXECUTE_PBTXT_RE = re.compile(r"(?:^|[\s{}])plan_execute\s*:\s*true\b", re.I)
+_WRAPPER_RE = re.compile(r"^[ \t]*<SYSTEM_MESSAGE>[ \t]*\r?$", re.M)
+_PREAMBLE = "The following is a <SYSTEM_MESSAGE>"
+_ROLE_OK_RE = re.compile(r"[\w .()/+-]+")
+MAX_ROLE = 60
+
+
+def _body(content: object) -> str:
+    """The text of a SYSTEM_MESSAGE step after its wrapper: Antigravity sends «The following is a <SYSTEM_MESSAGE> not
+    actually sent by the user…\\n\\n<SYSTEM_MESSAGE>\\n<body>\\n</SYSTEM_MESSAGE>» (the preamble itself names the tag
+    mid-line), so the body follows the first <SYSTEM_MESSAGE> that stands on its own line — when only that preamble
+    (or nothing) precedes it, so a subagent report that quotes the tag on a line of its own is not unwrapped. Content
+    without such a wrapper (or one that opens with the tag) is the body itself."""
+    if not isinstance(content, str):
+        return ""
+    m = _WRAPPER_RE.search(content)
+    if m and (not content[:m.start()].strip() or content[:m.start()].lstrip().startswith(_PREAMBLE)):
+        return content[m.end():].strip()
+    text = content.lstrip()
+    if text.startswith("<SYSTEM_MESSAGE>"):
+        text = text[len("<SYSTEM_MESSAGE>"):]
+    return text.strip()
+
+
+def _clean_role(raw: str) -> str:
+    """The executor named in «this turn runs on <role>»: «the execution model» → «» (no name worth showing),
+    «the execution model (X)» → X; anything unbounded or odd (> 60 chars, other characters) → «»."""
+    role = (raw or "").strip()
+    m = re.match(r"^the execution model\s*\((.+)\)$", role, re.I)
+    if m:
+        role = m.group(1).strip()
+    if (not role or role.lower() == "the execution model" or len(role) > MAX_ROLE
+            or not _ROLE_OK_RE.fullmatch(role)):
+        return ""
+    return role
+
+
+def _handoff_role(content: object) -> Optional[str]:
+    """None when the step is no hand-over to the executor; else its role («» when unknown)."""
+    m = HANDOFF_OFF_RE.match(_body(content))
+    return _clean_role(m.group(1)) if m else None
+
+
+def _is_plan_off(content: object) -> bool:
+    return bool(PLAN_MODE_OFF_RE.match(_body(content)))
+
+
+def _is_plan_review(content: object) -> bool:
+    return bool(PLAN_REVIEW_RE.match(_body(content)))
+
+
+def _since_user(steps: List[dict]) -> List[dict]:
+    """The steps after the latest USER_INPUT (all of them when there is none): the current turn only —
+    _read_turn_steps returns the whole 64 KB chunk holding that message, with the end of the previous turn."""
+    for i in range(len(steps) - 1, -1, -1):
+        if steps[i].get("type") == "USER_INPUT":
+            return steps[i + 1:]
+    return steps
 
 
 def _auto_verify() -> bool:
@@ -314,6 +377,68 @@ def check_plan(payload: dict, st: Optional[dict], users: List[dict], args: dict)
     return None
 
 
+def _pbtxt_plan_execute(text: str) -> bool:
+    """`plan_execute:true` as a field of the annotation. Quoted strings go first: a conversation TITLED
+    «fix plan_execute:true parsing» has the words in its `title:"…"` and is no plan-execute conversation."""
+    return bool(_PLAN_EXECUTE_PBTXT_RE.search(_PBTXT_STRING_RE.sub('""', text or "")))
+
+
+def _annotation_plan_execute(payload: dict) -> bool:
+    """True when Antigravity's annotation file for this conversation marks `plan_execute:true`."""
+    cid = str((payload or {}).get("conversationId") or "").strip()
+    if not cid or not re.fullmatch(r"[\w-]{8,80}", cid):
+        return False
+    roots: List[str] = []
+    for raw in (conv.transcript_path(payload), (payload or {}).get("artifactDirectoryPath")):
+        if not isinstance(raw, str) or not raw:
+            continue
+        p = os.path.realpath(conv.to_path(raw))
+        marker = f"{os.sep}brain{os.sep}"
+        idx = p.find(marker)
+        if idx > 0:
+            app_dir = p[:idx]
+            if app_dir not in roots:
+                roots.append(app_dir)
+    for r in _PRODUCT_ROOTS:
+        exp = os.path.expanduser(r)
+        if exp not in roots:
+            roots.append(exp)
+    for app_dir in roots:
+        pbtxt = os.path.join(app_dir, "annotations", f"{cid}.pbtxt")
+        try:
+            if not os.path.isfile(pbtxt) or os.path.getsize(pbtxt) > 16384:
+                continue
+            with open(pbtxt, encoding="utf-8", errors="replace") as f:
+                if _pbtxt_plan_execute(f.read()):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _step_has_plan_execute(d: dict) -> bool:
+    typ = d.get("type")
+    if typ == "PLANNER_RESPONSE":
+        for tc in d.get("tool_calls") or []:
+            if isinstance(tc, dict) and tc.get("name") in ("exit_plan_mode", "enter_plan_mode"):
+                return True
+    elif typ == "SYSTEM_MESSAGE" and d.get("source") != "SYSTEM_SDK":
+        content = d.get("content")
+        if _is_plan_off(content) or _is_plan_review(content):
+            return True
+    return False
+
+
+def is_plan_execute(payload: dict, steps: Optional[List[dict]] = None) -> bool:
+    """True for classic Orchestrator models, configurable Orchestrator (`plan_execute:true` annotation), or `/plan` turns.
+    `steps` are the current turn's steps only (see _since_user): a plan tool call left over from the previous turn
+    says nothing about this one."""
+    model = str((payload or {}).get("modelName") or "").lower()
+    if "orchestrator" in model or _annotation_plan_execute(payload):
+        return True
+    return bool(steps and any(_step_has_plan_execute(d) for d in steps))
+
+
 def handoff_message(payload: dict, st: Optional[dict]) -> Optional[str]:
     """Emit one-time `<orchestrator_handoff>` or `<orchestrator_review>` tags when Orchestrator changes phase."""
     steps, _hit_cap = _read_turn_steps(payload)
@@ -323,6 +448,7 @@ def handoff_message(payload: dict, st: Optional[dict]) -> Optional[str]:
     latest_user_step = -1
     latest_handoff_step = -1
     latest_review_step = -1
+    handoff_role = ""
     for idx, d in enumerate(steps):
         step_idx = d.get("step_index")
         if not isinstance(step_idx, int):
@@ -331,10 +457,12 @@ def handoff_message(payload: dict, st: Optional[dict]) -> Optional[str]:
         if typ == "USER_INPUT":
             latest_user_step = max(latest_user_step, step_idx)
         elif typ == "SYSTEM_MESSAGE" and d.get("source") != "SYSTEM_SDK":
-            content = d.get("content") or ""
-            if HANDOFF_OFF_RE.search(content):
+            content = d.get("content")
+            role = _handoff_role(content)
+            if role is not None:
                 latest_handoff_step = max(latest_handoff_step, step_idx)
-            if "[plan review]" in content.lower():
+                handoff_role = role
+            if _is_plan_review(content):
                 latest_review_step = max(latest_review_step, step_idx)
         elif typ == "PLANNER_RESPONSE":
             for tc in d.get("tool_calls") or []:
@@ -369,9 +497,10 @@ def handoff_message(payload: dict, st: Optional[dict]) -> Optional[str]:
         others = coord.others(payload)
         if not (bans or access or others):
             return None
+        who = f"execution model ({handoff_role})" if handoff_role else "execution model"
         lines = [
             '<orchestrator_handoff source="Antigravity Plus">',
-            "Hand-off to execution model (Hydrogen): keep these active constraints in view while carrying out the plan:",
+            f"Hand-off to {who}: keep these active constraints in view while carrying out the plan:",
         ]
         for kind, info in bans.items():
             what = "push / deploy / upload to servers" if kind == "push" else "git commit"
@@ -392,27 +521,40 @@ def handoff_message(payload: dict, st: Optional[dict]) -> Optional[str]:
 
 
 def in_plan_mode(payload: dict, st: Optional[dict] = None) -> bool:
-    """True when the conversation uses an Orchestrator model and the current turn is in planning/review mode."""
-    model = str((payload or {}).get("modelName") or "").lower()
-    if "orchestrator" not in model:
-        return False
+    """True when the conversation uses Orchestrator / plan-execute and the current turn is in planning/review mode."""
     steps, hit_cap = _read_turn_steps(payload)
-    if hit_cap:
+    turn = _since_user(steps)
+    if hit_cap or not is_plan_execute(payload, turn):
         return False
-    if not steps:
-        return True
-    for d in reversed(steps):
+    for d in reversed(turn):
         typ = d.get("type")
         if typ == "PLANNER_RESPONSE":
             for tc in d.get("tool_calls") or []:
                 if isinstance(tc, dict) and tc.get("name") == "enter_plan_mode":
                     return True
         elif typ == "SYSTEM_MESSAGE" and d.get("source") != "SYSTEM_SDK":
-            content = d.get("content") or ""
-            if "[plan review]" in content.lower():
+            content = d.get("content")
+            if _is_plan_review(content):
                 return True
-            if PLAN_MODE_OFF_RE.search(content):
+            if _is_plan_off(content):
                 return False
-        elif typ == "USER_INPUT":
-            return True
-    return True
+    return True  # no phase change in this turn: every user message starts a planning turn
+
+
+def handed_over(payload: dict) -> bool:
+    """The turn ended by handing the plan over: its last tool call is `exit_plan_mode` (and no [plan review] or
+    hand-over message came after it). The executor carries on from there, so nobody nudges the planner."""
+    steps, hit_cap = _read_turn_steps(payload)
+    if hit_cap:
+        return False
+    for d in reversed(_since_user(steps)):
+        typ = d.get("type")
+        if typ == "PLANNER_RESPONSE":
+            names = [tc.get("name") for tc in d.get("tool_calls") or [] if isinstance(tc, dict) and tc.get("name")]
+            if names:
+                return names[-1] == "exit_plan_mode"
+        elif typ == "SYSTEM_MESSAGE" and d.get("source") != "SYSTEM_SDK":
+            content = d.get("content")
+            if _is_plan_review(content) or _is_plan_off(content):
+                return False
+    return False

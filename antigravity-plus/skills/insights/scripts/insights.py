@@ -56,7 +56,12 @@ CANDIDATES = 15
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 MODEL_CHANGE_RE = re.compile(r"Model Selection`\s+from\s+(.*?)\s+to\s+(.*?)\.(?:\s|$)")  # = usage.py
 WORKSPACE_RE = re.compile(r"^## Workspace: (.+?)\s*$", re.M)                         # = session_start.py
-SUBAGENT_RE = re.compile(r"Created the following subagent:\s*(\{.*\})", re.S)
+SUBAGENT_HEAD_RE = re.compile(r"Created the following subagents?:")
+SUBAGENT_RESULT_RE = re.compile(  # a result that IS an invoke_subagent's: its timestamp lines, then the header (= usage.py)
+    r"\A(?:[ \t]*(?:Created|Completed) At:[^\n]*\n)*\s*Created the following subagents?:")
+SUBAGENT_OBJ_START_RE = re.compile(r'\{\s*"conversationId"\s*:')
+SUBAGENT_ID_RE = re.compile(r'\{\s*"conversationId"\s*:\s*"([^"]+)"')
+SUBAGENT_WINDOW, SUBAGENT_MAX = 65536, 64
 HINT_TAG = re.compile(r'<([a-z_]+) source="Antigravity Plus">')
 HINT_KINDS = {  # tag → the hook that injects it
     "user_instructions": "instructions.py: the user's messages re-shown",
@@ -171,8 +176,8 @@ def parse_ts(s: Optional[str]) -> Optional[dt.datetime]:
     if not s:
         return None
     try:
-        s = re.sub(r"\.(\d{6})\d+", r".\1", s)
-        t = dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        s = re.sub(r"(?<=:\d\d)\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s.replace("Z", "+00:00"))
+        t = dt.datetime.fromisoformat(s)
     except ValueError:
         return None
     return t.astimezone(dt.timezone.utc) if t.tzinfo else t.astimezone().astimezone(dt.timezone.utc)
@@ -281,9 +286,37 @@ def _uri_to_path(uri: str) -> str:
     if not uri.startswith("file://"):
         return uri
     p = unquote(urlparse(uri).path or "")
-    if re.match(r"^/[A-Za-z]:/", p):
-        p = p[1:]
-    return p
+    return re.sub(r"^/([A-Za-z]:)", r"\1", p)
+
+
+def _parse_subagent_infos(content: str) -> List[dict]:
+    """The `{"conversationId": …, "workspaceUris": […]}` objects an invoke_subagent result lists after «Created the
+    following subagent(s):». Only that block is read (its first 64 KB, at most 64 objects): the rest of a big result
+    — a command's output, a file — says nothing about the subagents, and scanning it must stay linear."""
+    m = SUBAGENT_HEAD_RE.search(content)
+    if not m:
+        return []
+    block = content[m.end():m.end() + SUBAGENT_WINDOW]
+    infos: List[dict] = []
+    pos, tries, dec = 0, 0, json.JSONDecoder()
+    for start in SUBAGENT_OBJ_START_RE.finditer(block):
+        if start.start() < pos:  # inside an object already read
+            continue
+        tries += 1
+        if tries > SUBAGENT_MAX:
+            break
+        try:
+            obj, end = dec.raw_decode(block, start.start())
+        except ValueError:  # cut off or malformed: the id is still readable
+            idm = SUBAGENT_ID_RE.match(block, start.start())
+            if idm:
+                infos.append({"conversationId": idm.group(1)})
+                pos = idm.end()
+            continue
+        if isinstance(obj, dict) and obj.get("conversationId"):
+            infos.append(obj)
+        pos = end
+    return infos
 
 
 def _unwrap_sys(content: str) -> str:
@@ -381,18 +414,18 @@ def scan(cid: str, path: str) -> Conv:
             name = str(call.get("name") or "")
             c.calls.append({"step": i, "ts": ts, "tool": name, "subject": call_subject(call), "outcome": outcome,
                             "error": err})
-            m = SUBAGENT_RE.search(content) if name == "invoke_subagent" or "Created the following subagent" in content else None
-            if m:
-                try:
-                    info = json.loads(m.group(1))
-                except ValueError:
-                    info = {}
-                child = str(info.get("conversationId") or "")
+            if name == "invoke_subagent" or SUBAGENT_RESULT_RE.match(content):
+                infos = _parse_subagent_infos(content)
                 args = call.get("args") if isinstance(call.get("args"), dict) else {}
-                uris = [u for u in info.get("workspaceUris") or [] if isinstance(u, str)]
-                wss = [_uri_to_path(u) for u in uris]
-                if child:
-                    c.children.append((child, str(args.get("Model") or ""), i, wss))
+                sub_args = args.get("Subagents") if isinstance(args.get("Subagents"), list) else None
+                for idx, info in enumerate(infos):
+                    child = str(info.get("conversationId") or "")
+                    if not child:
+                        continue
+                    item_args = sub_args[idx] if sub_args and idx < len(sub_args) and isinstance(sub_args[idx], dict) else args
+                    uris = [u for u in info.get("workspaceUris") or [] if isinstance(u, str)]
+                    wss = [_uri_to_path(u) for u in uris]
+                    c.children.append((child, str(item_args.get("Model") or ""), i, wss))
     c.hints = [(i, k, ts, c.step_model.get(i, "")) for i, k, ts, _m in c.hints]
     return c
 

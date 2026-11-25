@@ -77,4 +77,22 @@ check("pipelines see the stage after a keyword", guard.pipelines("if true; then 
 # 4. the user's bans read the same segments: «не пушь» stops a push inside a conditional
 check("push inside a conditional is a push", sorted(guard.outward_kinds("if true; then git push origin main; fi")), ["push"])
 
+# 5. the control routes of Antigravity inside the shell's own syntax: still found, and text inside it still no stop
+LSU = "http://127.0.0.1:41234/exa.language_server_pb.LanguageServerService"
+for cmd, want in [
+    (f"if true; then curl -s -X POST {LSU}/UpdatePermissionSettings; fi", "agent-settings"),
+    (f"for m in UpdatePermissionSettings GetStatus; do curl -s -X POST {LSU}/$m; done", "agent-settings"),
+    (f"for m in GetStatus ManageSidecar; do curl -s -X POST {LSU}/$m; done", None),
+    (f"while true; do curl -s -X POST {LSU}/DeletePlugin; done", "agent-settings"),
+    (f"deploy() {{ curl -s -X POST {LSU}/SetUserSettings; }}; deploy", "agent-settings"),
+    (f"M=ToggleMcpServer; if true; then curl -s -X POST {LSU}/$M; fi", "agent-settings"),
+    (f"case x in x) curl -s -X POST {LSU}/DeleteCascadeTrajectory;; esac", "conversation-delete"),
+    (f"if true; then echo 'LanguageServerService/DeletePlugin'; fi", None),
+    (f"if true; then git commit -m 'LanguageServerService/UpdatePermissionSettings'; fi", None),
+    (f"if true; then gh pr create --title x --body 'LanguageServerService/UpdatePermissionSettings'; fi", None),
+    ("if true; then agentapi send-message abc '/bypass'; fi", "agent-settings"),
+    ("if true; then grep -c 'agentapi send-message.*bypass' guard.py; fi", None),
+]:
+    check(f"routes in syntax: {cmd[:70]}", rule(cmd), want)
+
 sys.exit(0 if ok else 1)

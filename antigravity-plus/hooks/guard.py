@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import functools
 import json
 import os
 import posixpath
@@ -186,6 +187,24 @@ SEGMENT_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
 # Only these two, so a project's own `localhost:3000/api/settings` is not taken for the panel.
 SIDECAR_API = re.compile(r"(?:localhost\.?|0\.0\.0\.0|127(?:\.\d+){1,3}|\[::1?\]|::1):\d+/+api/+(?:toggle|lsp/+stop)\b", I)
 SIDECAR_API_REASON = "команда обращается к управляющему API боковой панели Antigravity Plus (настройки или LSP)."
+# The language server's control plane, protected by verb rather than by a list of names (the 2.35.1 server has some 40
+# of them, and new ones come with every release): every Set*, Update*, Install*, Uninstall*, Toggle*, Revoke*, Grant*,
+# Disconnect* and Reset*, the UI's approve/deny of a permission prompt (HandleCascadeUserInteraction), customization
+# files, plugins and every Delete* but the one that removes a conversation (CONVERSATION_DELETE_API). The Get*, List*,
+# Retrieve*, WaitFor*, Stream*, ManageSidecar, CancelCascadeInvocation and SendUserCascadeMessage an agent uses stay
+# free. Method names are case-sensitive on the wire, so the verb is matched as written (`Set` + a capital: not `Setup`).
+LS_CONTROL_API = re.compile(
+    r"LanguageServerService/+(?-i:(?:(?:Set|Update|Install|Uninstall|Toggle|Revoke|Grant|Disconnect|Reset)(?:[A-Z]\w*)?"
+    r"|HandleCascadeUserInteraction|CreateCustomizationFile|Delete(?!CascadeTrajectory\b)(?:[A-Z]\w*)?)\b)",
+    I,
+)
+LS_CONTROL_REASON = ("команда меняет настройки Antigravity через API языкового сервера: разрешения, плагины, MCP-серверы, "
+                     "флаги, ответ на запрос разрешения — или удаляет его данные.")
+CONVERSATION_DELETE_API = re.compile(r"(?:ConversationService/+DeleteConversation|LanguageServerService/+DeleteCascadeTrajectory)\b", I)
+CONVERSATION_DELETE_REASON = ("команда безвозвратно удаляет разговор Antigravity и всю его историю "
+                              "(`DeleteConversation` / `DeleteCascadeTrajectory`).")
+API_GLOB_REASON = ("в адресе столько шаблонов {a,b} и [a-z], что guard не может проверить, к какому методу API "
+                   "Antigravity обращается команда.")
 SCHEDULE_REASON = "команда создаёт или удаляет расписание Antigravity: по нему агент будет сам запускаться без вас."
 
 
@@ -199,17 +218,234 @@ def schedule_change(seg: str) -> bool:
     return False
 
 
-def _sidecar_api_hit(seg: str) -> bool:
-    if SIDECAR_API.search(seg):
+# ── the commands that reach Antigravity's own API, read as the shell and curl would read them ──
+# A message that switches Bypass Mode / full access on (only the user's own message may): sent to a conversation by
+# `agentapi new-conversation|send-message` or by the language server's CreateConversation / SendUserCascadeMessage /
+# StartCascade. Words after the call (its body), or — for the API routes — before it (`curl -d '…' <url>`).
+SWITCH_WORDS = re.compile(r"/bypass\b|\bbypass\b|байпас|полн\w*\s+доступ|full[\s-]*access", I)
+SWITCH_AGENTAPI = re.compile(r"\bagentapi\b[^\n]{0,4000}?\b(?:new-conversation|send-message)\b", I)
+SWITCH_API = re.compile(r"(?:ConversationService/+CreateConversation|LanguageServerService/+(?:SendUserCascadeMessage|StartCascade))\b", I)
+
+
+def switch_head(text: str) -> bool:
+    return bool(SWITCH_AGENTAPI.search(text) or SWITCH_API.search(text))
+
+
+def switch_hit(text: str) -> bool:
+    heads = [m for m in (SWITCH_AGENTAPI.search(text), SWITCH_API.search(text)) if m]
+    if heads and SWITCH_WORDS.search(text, min(m.end() for m in heads)):
         return True
-    unquoted = seg.replace('"', "").replace("'", "")
-    if SIDECAR_API.search(unquoted):
+    last = None
+    for last in SWITCH_API.finditer(text):
+        pass
+    word = SWITCH_WORDS.search(text) if last else None
+    return bool(word and last and word.start() < last.start())
+
+
+_ANSI_C = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.S)
+_ANSI_ESC = re.compile(r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|.)", re.S)
+_ANSI_ONE = {"n": "\n", "t": "\t", "r": "\r", "a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "v": "\v",
+             "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_ASSIGN = re.compile(r"(?:^|(?<=[\s;&|(]))(?:(?:export|declare|local|readonly|typeset)\s+(?:-\w+\s+)*)?([A-Za-z_]\w*)="
+                     r"((?:\"(?:\\.|[^\"\\])*\"|'[^']*'|\\.|[^\s;&|'\"\\])*)", re.S)
+_VAR = re.compile(r"\$(?:\{(\w+)(?::?[-=]([^{}]*))?\}|(\w+))")
+_PCT = re.compile(r"%([0-9A-Fa-f]{2})")
+_DOT = re.compile(r"/\.(?=/|$|\s)")
+_DOTDOT = re.compile(r"/[^/\s]+/\.\.(?=/|$|\s)")
+_GROUP = re.compile(r"\{([^{}]*)\}|\[([^\[\]]*)\]")
+VARS_MAX = 64        # NAME=value assignments of one command line that are remembered
+GLOB_WORDS = 16      # words with {a,b} / [a-c] groups that are expanded
+GLOB_VARIANTS = 256  # expansions of all of them together (more: the command is asked about, if it is an address)
+# A word that names a server: a scheme, a local host, an IP, a port or an API path (curl's default scheme needs none).
+GLOB_ADDRESS = re.compile(r"://|localhost|\b\d{1,3}(?:\.\d{1,3}){3}\b|\[::|:\d{2,5}(?:/|$)|/api\b|Service/", re.I)
+
+
+def _ansi_escape(m: "re.Match[str]") -> str:
+    e = m.group(1)
+    try:
+        if e[0] in "xuU" and len(e) > 1:
+            return chr(int(e[1:], 16))
+        if e[0] in "01234567":
+            return chr(int(e, 8) & 0xFF)
+    except (ValueError, OverflowError):
+        return ""
+    return _ANSI_ONE.get(e, "\\" + e)
+
+
+def _unquote(s: str) -> str:
+    return re.sub(r"\\(.)", r"\1", s.replace('"', "").replace("'", ""), flags=re.S)
+
+
+def _assignments(text: str, base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """The NAME=value assignments in the text (`M=Update…; curl …/$M`, `env M=x curl`), each value with the earlier
+    variables put in; the first VARS_MAX of them."""
+    out = dict(base or {})
+    for n, m in enumerate(_ASSIGN.finditer(text)):
+        if n >= VARS_MAX:
+            break
+        out[m.group(1)] = _subst_vars(_unquote(m.group(2)), out)[:256]
+    return out
+
+
+def _subst_vars(text: str, env: Dict[str, str]) -> str:
+    if "$" not in text:
+        return text
+
+    def repl(m: "re.Match[str]") -> str:
+        name = m.group(1) or m.group(3)
+        val = env.get(name)
+        if m.group(2) is not None:  # ${NAME:-word}: the word when NAME is empty or unset
+            return val if val else m.group(2)
+        return m.group(0) if val is None else val
+    out = _VAR.sub(repl, text)
+    return out if len(out) < 8_000_000 else text
+
+
+def _glob_words(word: str) -> Optional[List[str]]:
+    """What curl's URL globbing (and the shell's brace expansion) makes of `{a,b}` and `[a-c]` in one word; None when
+    it would be too many."""
+    pieces: List[List[str]] = []
+    last = 0
+    for m in _GROUP.finditer(word):
+        pieces.append([word[last:m.start()]])
+        if m.group(1) is not None:
+            pieces.append(m.group(1).split(","))
+        else:
+            chars: List[str] = []
+            body, i = m.group(2), 0
+            while i < len(body) and len(chars) < 64:
+                if i + 2 < len(body) and body[i + 1] == "-" and ord(body[i + 2]) - ord(body[i]) < 64:
+                    chars += [chr(c) for c in range(ord(body[i]), ord(body[i + 2]) + 1)]
+                    i += 3
+                else:
+                    chars.append(body[i])
+                    i += 1
+            pieces.append(chars or [""])
+        last = m.end()
+    pieces.append([word[last:]])
+    outs = [""]
+    for alts in pieces:
+        outs = [o + a for o in outs for a in alts]
+        if len(outs) > GLOB_VARIANTS:
+            return None
+    return outs
+
+
+def _join_plus(s: str) -> str:
+    if "+" not in s:
+        return s
+    parts = s.split("+")
+    return "".join([parts[0].rstrip()] + [p.strip() for p in parts[1:-1]] + [parts[-1].lstrip()])
+
+
+def _dot_segments(s: str) -> str:
+    for _ in range(8):
+        n = _DOTDOT.sub("", _DOT.sub("", s))
+        if n == s:
+            break
+        s = n
+    return s
+
+
+@functools.lru_cache(maxsize=256)
+def _api_variants(text: str, avars: Tuple[Tuple[str, str], ...] = ()) -> Tuple[Tuple[str, ...], bool]:
+    """The ways a command's text can spell an API address once the shell and curl have read it: ANSI-C quotes
+    (`$'\\x55'`), variables set earlier (`M=Update…; …/$M`, `${M}`), curl globs (`{Update…}`, `[U]pdate…`), quotes and
+    `"a"+"b"` joins, backslashes, %XX, `/./` and `/x/../`. Every step is one linear pass; globs are expanded for the
+    first GLOB_WORDS words with a group, GLOB_VARIANTS in all (the flag says: more than that)."""
+    t = re.sub(r"\$(?=[\"'])", "", _ANSI_C.sub(lambda m: _ANSI_ESC.sub(_ansi_escape, m.group(1)), text))
+    t = _subst_vars(t, _assignments(t, dict(avars)))
+    texts, overflow, budget, seen = [t], False, GLOB_VARIANTS, 0
+    for w in re.finditer(r"\S+", t):  # (a pattern like \S*[{[]\S* would be quadratic on one long word)
+        word = w.group(0)
+        if "{" not in word and "[" not in word:
+            continue
+        core = word.strip("\"'")
+        if seen >= GLOB_WORDS or '"' in core or "'" in core or "$(" in core or "`" in core or not _GROUP.search(core):
+            continue  # a quoted JSON body or code is no URL
+        seen += 1
+        alts = _glob_words(core)
+        if alts is None or len(alts) > budget:
+            # only an address is asked about: a sed/awk regex like `s/[A-Za-z0-9._%+-]+@…/<email>/g` is no URL
+            overflow = overflow or bool(GLOB_ADDRESS.search(core))
+            continue
+        budget -= len(alts)
+        texts += [t[max(0, w.start() - 4000):w.start()] + a + t[w.end():w.end() + 4000] for a in alts]  # the words around it
+    out: List[str] = [text]
+    for x in texts:
+        unq = x.replace('"', "").replace("'", "")
+        full = _dot_segments(_PCT.sub(lambda m: chr(int(m.group(1), 16)), re.sub(r"\\(.)", r"\1", _join_plus(unq), flags=re.S)))
+        out += [x, unq, full]
+    return tuple(dict.fromkeys(out)), overflow
+
+
+def _api_stop(text: str, keep, avars: Tuple[Tuple[str, str], ...] = (),
+              switch: bool = True) -> Optional[Tuple[str, str]]:
+    """The first stop of this text for Antigravity's own control routes: the usage panel's API, the language server's
+    control plane, a message that switches Bypass Mode on (agent-settings: asks even in Bypass Mode), and the removal
+    of a conversation (conversation-delete)."""
+    variants, overflow = _api_variants(text, avars)
+    if keep("agent-settings"):
+        if overflow:
+            return "agent-settings", API_GLOB_REASON
+        for rx, reason in ((SIDECAR_API, SIDECAR_API_REASON), (LS_CONTROL_API, LS_CONTROL_REASON)):
+            if any(rx.search(v) for v in variants):
+                return "agent-settings", reason
+        if switch and any(switch_hit(v) for v in variants):
+            return "agent-settings", SELF_SWITCH_REASON
+    if keep("conversation-delete") and any(CONVERSATION_DELETE_API.search(v) for v in variants):
+        return "conversation-delete", CONVERSATION_DELETE_REASON
+    return None
+
+
+# gh / glab options whose value is text for a pull request, issue, release or comment: never a command or an address.
+TEXT_OPTIONS = {"--title", "-t", "--body", "-b", "--notes", "-n", "--message", "-m"}
+GLAB_TEXT_OPTIONS = {"--description", "-d", "-N"}
+# git options and subcommands that hand text to a program (`git -c alias.x='!cmd'`, `rebase --exec cmd`, `bisect run cmd`,
+# `config core.sshCommand cmd`, `clone --upload-pack cmd`, `filter-branch --tree-filter cmd`): git is no text-only
+# program there. Any `NAME=value` before git (GIT_SSH_COMMAND, GIT_CONFIG_VALUE_0, PAGER, …) counts too.
+GIT_EXEC_OPT = re.compile(r"^(?:-c|-x|-u|--config-env|--exec|--exec-path|--upload-pack|--receive-pack|--ssh-command"
+                          r"|--[\w-]*-filter)(?:=.*)?$", re.S)
+GIT_EXEC_SUB = {"config", "bisect", "filter-branch", "submodule", "for-each-repo", "difftool", "mergetool", "alias"}
+
+
+def git_is_text_only(seg: str) -> bool:
+    """`git commit -m "…"`, `git log --grep …`: git's own words are text — an address in them is not a command."""
+    tokens = tokenize(seg)
+    rest = strip_prefixes(tokens)
+    if not rest:
         return True
-    if ":" in seg:
-        collapsed = re.sub(r"['\"\s]*\+['\"\s]*", "", unquoted)
-        if SIDECAR_API.search(collapsed):
-            return True
-    return False
+    at = len(tokens) - len(rest)
+    lead = tokens[:at]
+    if tokens[at:] != rest or "env" in lead or any(re.match(r"^\w+=", t) for t in lead):
+        return False
+    return not any(GIT_EXEC_OPT.match(t) or t.startswith("!") or t in GIT_EXEC_SUB for t in rest[1:])
+
+
+def api_view(seg: str) -> str:
+    """The segment as the API rules read it: the values of gh / glab text options taken out (`gh pr create --body
+    "… LanguageServerService/UpdatePermissionSettings …"` only documents it) — but not for `gh api`, which calls a URL."""
+    tokens = tokenize(seg)
+    rest = strip_prefixes(tokens)
+    if not rest:
+        return seg
+    prog = re.sub(r"\.exe$", "", os.path.basename(rest[0]).lower())
+    at = len(tokens) - len(rest)
+    if prog not in ("gh", "glab") or tokens[at:] != rest or "api" in rest[1:4]:
+        return seg
+    opts = TEXT_OPTIONS | (GLAB_TEXT_OPTIONS if prog == "glab" else set())
+    kept, i = tokens[:at + 1], at + 1
+    while i < len(tokens):
+        t = tokens[i]
+        if t in opts:
+            i += 2
+        elif t.startswith("--") and t.split("=", 1)[0] in opts and "=" in t:
+            i += 1
+        else:
+            kept.append(t)
+            i += 1
+    return " ".join(shlex.quote(t) for t in kept)
+
 
 # SQL is checked only when a DB client is the program being run (so `rg "DROP TABLE"` stays quiet).
 SQL_PROGRAMS = {"psql", "mysql", "mariadb", "sqlite3", "sqlcmd", "clickhouse", "clickhouse-client", "cockroach",
@@ -248,10 +484,12 @@ SYSTEM_RULES = {"disk-format", "disk-format-win", "system-power", "system-power-
 # only the recursive chmod/chown of / or a top-level folder stays there.
 LOCAL_RULES = {"system-files", "protected-file", "sudo", "run-as-admin", "autostart", "security-off",
                "security-off-win", "agent-settings", "agent-tools", "protection-off", "claude-permissions",
-               "scheduled-sidecar"}
+               "scheduled-sidecar", "conversation-delete"}
 
 # Programs whose arguments are just text (a commit message or a search pattern can mention `rm -rf /`).
 TEXT_PROGRAMS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "git-grep", ":", "true", "test", "["}
+# Programs that send what they are fed to a socket or an address: text piped into them is a request (analyze_command).
+NET_SINKS = {"nc", "ncat", "netcat", "socat", "telnet", "curl", "curl.exe", "wget", "wget.exe", "http", "https", "xh", "openssl"}
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "ssh", "eval", "xargs", "su", "sudo", "doas",
           "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe", "iex", "invoke-expression"}
 # When the command hands text to another interpreter, quoted text is code, not data (`env -S '…'` splits its string
@@ -280,9 +518,11 @@ PROTECTED_FILE = re.compile(
 # installed plugins (this guard among them), Antigravity Plus's settings (full access, Bypass Mode, secret protection)
 # and the script whose «ask|tell» the guard approves for Claude Code's delegated agents.
 AGENT_CONTROL = re.compile(r"/\.gemini/config/(config\.json|mcp_config\.json|projects/|plugins/)"
-                           r"|/\.gemini/antigravity/mcp_config\.json$|/\.gemini/antigravity-plus/settings\.json$"
+                           r"|/\.gemini/(?:antigravity(?:-cli|-ide)?|config)/settings\.json$"
+                           r"|/\.gemini/antigravity(?:-cli|-ide)?/mcp_config\.json$"
+                           r"|/\.gemini/antigravity-plus/(?:settings|lsp)\.json$"
                            r"|/\.claude/skills/antigravity/")
-AGENT_CONTROL_DIR = re.compile(r"/\.gemini(/config(/(projects|plugins)(/antigravity-plus)?)?|/antigravity-plus)?/?$"
+AGENT_CONTROL_DIR = re.compile(r"/\.gemini(/config(/(projects|plugins)(/antigravity-plus)?)?|/antigravity(?:-cli|-ide)?|/antigravity-plus)?/?$"
                                r"|/\.claude/skills/antigravity/?$")  # a whole folder of them (rm -rf, mv, chmod -R)
 # Antigravity's own sidecars (`<configDir>/sidecars/<id>/sidecar.json`; jetski = an older path in its docs): a command it
 # starts by itself, or a `"builtin": "schedule"` automation that starts agent conversations on a cron schedule.
@@ -313,8 +553,6 @@ RECURSIVE_OWNERS = {"chmod", "chown", "chgrp", "chflags", "setfacl"}  # -R on / 
 REDIRECT_TARGET = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|(?<![<>&\d])(?:\d|&)?>{1,2}\|?\s*('[^']*'|"(?:\\.|[^"\\])*"|[^\s;|&<>()'"]+)""")
 # An Antigravity conversation started or messaged from the terminal with words that switch Bypass Mode or full access
 # on: only the user's own message may do that (hooks/conversation.py).
-SELF_SWITCH = re.compile(r"\bagentapi\b[^\n]*?\b(new-conversation|send-message)\b.*?(/bypass\b|\bbypass\b|байпас"
-                         r"|полн\w*\s+доступ|full[\s-]*access)", re.I | re.S)
 SELF_SWITCH_REASON = ("команда пишет в разговор Antigravity сообщение, которое включает Bypass Mode или полный доступ: "
                       "их включает только сам пользователь своим сообщением.")
 
@@ -1010,6 +1248,11 @@ SH_RUNNERS = {"sh", "bash", "zsh", "dash", "ksh", "fish"}
 CODE_RUNNERS = {"python", "node", "ruby", "perl", "php"}
 
 
+def code_runner(prog: str) -> bool:
+    """python3, python3.13, node, ruby, perl, php (and their .exe): programs that run the code they are given."""
+    return re.sub(r"(\d+(\.\d+)*)?(\.exe)?$", "", prog.lower()) in CODE_RUNNERS
+
+
 def runs_stdin(prog: str, args: List[str]) -> bool:
     """Does `prog args` run the program it reads on stdin (`sh`, `bash -s`, `python3 -`) — rather than code or a
     script named in its arguments (`python3 -c '…'`, `python3 -m json.tool`, `node script.js`, `bash -c '…'`)?"""
@@ -1275,7 +1518,8 @@ def runs_there(seg: str) -> str:
 
 
 def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
-                    known: Optional[Dict[str, str]] = None, remote: bool = False) -> Optional[Tuple[str, str]]:
+                    known: Optional[Dict[str, str]] = None, remote: bool = False,
+                    avars: Tuple[Tuple[str, str], ...] = ()) -> Optional[Tuple[str, str]]:
     """The command's first stop as (rule id, reason), or None. system_only (Bypass Mode): only the stops that hold
     there (SYSTEM_RULES), looked for in the whole command — past any project-level match. known: what the command
     around this one set (its variables and current folder: `cd / && bash -c 'rm -rf *'`, `x=$(rm -rf $S/y)`).
@@ -1289,8 +1533,7 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
     if compat.WINDOWS:  # PowerShell/cmd: backslashes are path separators, also inside quotes
         cmd = cmd.replace("\\", "/")
     cmd = re.sub(r"\\\r?\n", " ", cmd)
-    if keep("agent-settings") and SELF_SWITCH.search(cmd):
-        return "agent-settings", SELF_SWITCH_REASON
+    avars = tuple(sorted(_assignments(cmd, dict(avars)).items()))  # NAME=value set anywhere in the command line
     cmd, heredocs = _heredocs(cmd)
     # Quoted text is data (commit messages, search patterns) unless it is handed to an interpreter.
     text = cmd if INTERPRETER.search(cmd) else QUOTED.sub("''", cmd)
@@ -1300,10 +1543,19 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
     if keep("curl-pipe-shell") and pipe_runs_download(cmd):
         return "curl-pipe-shell", CURL_REASON
     known = dict(known or {})
+    # Text handed to a program that talks to a socket is a request, not text: `printf 'POST /…/SetUserSettings …' | nc h p`,
+    # `echo '{"text":"…"}' | curl -d @- <url>`, `printf … > /dev/tcp/h/p` — read together with the program it feeds.
+    for stages in pipelines(cmd):
+        for k in range(len(stages) - 1):
+            if program(stages[k]) in TEXT_PROGRAMS and program(stages[k + 1]).lower() in NET_SINKS:
+                hit = _api_stop(stages[k] + " | " + stages[k + 1], keep, avars)
+                if hit:
+                    return hit
+    sockets = "/dev/tcp/" in cmd or "/dev/udp/" in cmd
     deeper = depth < 2  # what a segment runs inside — $(…), a quoted command string — is analysed on its own
     for seg in split_unquoted(cmd):
         for sub in _substitutions(seg):  # a subshell of this shell: the same variables and folder
-            hit = analyze_command(sub, depth + 1, system_only, known, remote)
+            hit = analyze_command(sub, depth + 1, system_only, known, remote, avars)
             if hit:
                 return hit
         note_assignments(seg, known)
@@ -1312,6 +1564,10 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
             w = check_writes(seg, known, remote)
             if w:
                 return w
+            if sockets:  # …or a socket: `exec 3<>/dev/tcp/h/p; printf '…' >&3`
+                hit = _api_stop(seg, keep, avars)
+                if hit:
+                    return hit
             continue
         if keep("sql-destructive") and (prog in SQL_PROGRAMS or prog in ("docker", "kubectl", "ssh")
                                          and SQL_IN_EXEC.search(seg)) and SQL_DESTRUCTIVE.search(seg):
@@ -1332,9 +1588,13 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
         for rid, rx, reason in SEGMENT_RULES:
             if keep(rid) and rx.search(here if rid in LOCAL_RULES else target):
                 return rid, reason
-        # the panel's routes in all the words: `ssh -R 9999:localhost:…` brings a server's request to this computer
-        if keep("agent-settings") and prog.lower() not in ("git", "git.exe") and _sidecar_api_hit(seg):
-            return "agent-settings", SIDECAR_API_REASON
+        # the panel's routes, the language server's control plane, a message that switches Bypass Mode on, and the
+        # removal of a conversation — in all the words (`ssh -R 9999:localhost:…` brings a server's request here);
+        # git's own words are text unless it runs one (git_is_text_only), and so are a gh pull request's title and body
+        if not (prog.lower() in ("git", "git.exe") and git_is_text_only(seg)):
+            hit = _api_stop(api_view(seg), keep, avars)
+            if hit:
+                return hit
         if keep("scheduled-sidecar") and schedule_change(there[0] if there else seg):
             return "scheduled-sidecar", SCHEDULE_REASON
         w = check_writes(seg, known, remote)  # a redirection outside quotes writes here: `ssh h cat x > /etc/y`
@@ -1345,12 +1605,12 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
             cwd = {"__cwd__": known["__cwd__"]} if "__cwd__" in known else None
             elsewhere = remote or runs_elsewhere(seg)  # `ssh host "…"`, `docker exec app sh -c '…'`
             for line in command_strings(seg):
-                hit = analyze_command(line, depth + 1, system_only, cwd, elsewhere)
+                hit = analyze_command(line, depth + 1, system_only, cwd, elsewhere, avars)
                 if hit:
                     return hit
                 analysed += [line] if elsewhere and not cwd else []
         if there and deeper and there[1] not in analysed:  # there, neither this shell's variables nor its folder apply
-            hit = analyze_command(there[1], depth + 1, system_only, remote=True)
+            hit = analyze_command(there[1], depth + 1, system_only, remote=True, avars=avars)
             if hit:
                 return hit
     for before, rest, body in heredocs:  # bodies fed to a shell or a DB client are code
@@ -1363,6 +1623,24 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
             hit = analyze_command(body, depth + 1, system_only, remote=remote or far)
             if hit:
                 return hit
+        elif code_runner(prog):  # `python3 - <<EOF`, `node <<'EOF'`: the body is a program that may call the API
+            hit = _api_stop(body, keep, avars)
+            if hit:
+                return hit
+        if prog.lower() not in ("git", "git.exe") and prog not in TEXT_PROGRAMS:
+            line = before + rest
+            if switch_head(line) and keep("agent-settings") and any(switch_hit(v) for v in _api_variants(line + "\n" + body, avars)[0]):
+                return "agent-settings", SELF_SWITCH_REASON  # `agentapi send-message <<EOF`, `curl -d @- <url> <<EOF`
+        # `cat <<EOF | python3 -`: what the heredoc is piped into runs it
+        stages = _split(rest)
+        for k in range(len(stages) - 1):
+            if stages[k][1] not in ("|", "|&"):
+                break
+            nxt = program(stages[k + 1][0])
+            if code_runner(nxt) or nxt in SHELLS:
+                hit = _api_stop(body, keep, avars)
+                if hit:
+                    return hit
     return None
 
 
@@ -1990,6 +2268,54 @@ def names_only(stage: str) -> bool:
         and bool(re.fullmatch(r"s(.)=\.\*\$?\1(?:(?!\1)[^&\\])*\1g?", script[0]))  # no & or \1: no value comes back
 
 
+def command_words(toks: List[str]) -> List[str]:
+    """The words of the program a simple command runs, with what only starts it taken off: `NAME=value` assignments,
+    `builtin`, `noglob`, `nohup`, `time -p`, `nice -n 5`, `timeout 5`, `sudo`/`doas` and their options (`-u user`), `exec -a
+    name`, `command`, `env` with its options (`env -i`, `env -u X`, `env -S 'printenv'`, `/usr/bin/env`). The program
+    is its bare lower-case name: `/usr/bin/printenv` → `printenv`. `command -v env` looks a program up: no words. An
+    `env` that runs nothing prints the environment: the words are just `env`."""
+    idx, env_invoked, raw = 0, False, []
+    while idx < len(toks):
+        t = toks[idx]
+        if re.match(r"^[A-Za-z_]\w*=", t) or t in ("builtin", "noglob", "nohup"):
+            idx += 1
+        elif t in ("time", "nice", "timeout"):
+            idx += 1
+            while idx < len(toks) and toks[idx].startswith("-"):
+                idx += 2 if toks[idx] in ("-f", "-o", "-n", "--format", "--output", "-k", "-s") and idx + 1 < len(toks) else 1
+            if t == "timeout" and idx < len(toks):
+                idx += 1  # its duration
+        elif t in ("sudo", "doas", "exec", "command"):
+            idx += 1
+            while idx < len(toks) and toks[idx].startswith("-"):
+                flag = toks[idx]
+                if t == "command" and flag in ("-v", "-V"):
+                    return []  # a lookup, nothing runs
+                if t in ("sudo", "doas") and flag in ("-u", "-g", "-h", "-p", "-r", "-t", "-C", "-D", "-R", "-T", "-U") \
+                        and idx + 1 < len(toks):
+                    idx += 2
+                elif t == "exec" and flag == "-a" and idx + 1 < len(toks):
+                    idx += 2
+                elif flag == "--":
+                    idx += 1
+                    break
+                else:
+                    idx += 1
+        elif os.path.basename(t).lower() in ("env", "env.exe"):
+            env_invoked = True
+            if any(a in ("--help", "--version") for a in toks[idx + 1:idx + 3]):
+                return []  # prints its usage or version, not the environment
+            raw = strip_prefixes(["env"] + toks[idx + 1:])
+            break
+        else:
+            raw = toks[idx:]
+            break
+    if env_invoked and not raw:
+        return ["env"]
+    return [os.path.basename(raw[0]).lower()] + raw[1:] if raw else []
+
+
+
 def secret_print(cmd: str) -> Optional[Tuple[str, str]]:
     """A command that would print secrets: cat .env, a private key, the whole environment (not when piped straight
     into a filter that keeps only the names: names_only), echo $TOKEN (not `${TOKEN:+set}`: _value_free)."""
@@ -1998,11 +2324,16 @@ def secret_print(cmd: str) -> Optional[Tuple[str, str]]:
     for k, (seg, op) in enumerate(parts):
         if not seg:
             continue
-        raw = [t for t in tokenize(seg) if t not in ("sudo", "command", "builtin")]
+        words = tokenize(seg)
+        # the program with what runs it taken off (command_words), and the 0.27.1 reading — every `sudo`, `command` and
+        # `builtin` word dropped — kept beside it: a stop of the old reading is never lost
+        raw = command_words(words)
+        old = [t for t in words if t not in ("sudo", "command", "builtin")]
         low = [t.lower() for t in raw]
+        old_low = [t.lower() for t in old]
         names = op in ("|", "|&") and k + 1 < len(parts) and names_only(parts[k + 1][0])  # printenv | cut -d= -f1
-        if raw in ENV_DUMPS and not names \
-                or (len(low) == 2 and low[0] in ENV_LISTERS and low[1].rstrip("/*") in ("env:", "env:\\")) \
+        if (raw in ENV_DUMPS or old in ENV_DUMPS) and not names \
+                or any(len(w) == 2 and w[0] in ENV_LISTERS and w[1].rstrip("/*") in ("env:", "env:\\") for w in (low, old_low)) \
                 or "[environment]::getenvironmentvariables" in seg.lower():
             return "secret-print", ("команда выведет все переменные окружения, а среди них бывают токены и пароли. "
                                     "Нужна одна переменная — `printenv NAME`; проверить, что она задана — "

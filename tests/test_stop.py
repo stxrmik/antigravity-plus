@@ -90,7 +90,8 @@ ord_cont, _ = run({"fullyIdle": False})
 print(f"{'✅' if ord_cont else '❌'} open ordinary items while a task runs → nudge → {'continue' if ord_cont else 'stop'}")
 ok &= ord_cont
 
-# orchestrator.in_plan_mode skips broken/unverified/setup/review/bg, keeps announced & facts_check
+# orchestrator.in_plan_mode skips broken/unverified/setup/review/bg and keeps facts_check, task.md and announcement();
+# a planning turn that ended by handing the plan over (last tool call exit_plan_mode) also skips task.md and announcement()
 ws_plan = os.path.join(art, "ws_plan"); os.makedirs(ws_plan, exist_ok=True)
 bad_py = os.path.join(ws_plan, "bad.py"); open(bad_py, "w", encoding="utf-8").write("def f(:\n    pass\n")
 now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 60))
@@ -114,15 +115,72 @@ def run_plan(reply, rows_extra=()):
     return json.loads(r.stdout or "{}")
 plan_skip = not run_plan("План готов.")
 plan_facts = "facts" in (run_plan("Все тесты проходят.").get("reason") or "")
-plan_ann = "ended your turn without doing it" in (run_plan("Сейчас запущу тесты.").get("reason") or "")
+HAND = [{"step_index": 3, "type": "PLANNER_RESPONSE", "created_at": now, "content": "",
+         "tool_calls": [{"name": "exit_plan_mode", "args": {"plan": "1. Fix bad.py\\n2. Run pytest"}}]}]
+plan_ann = "ended your turn without doing it" in (run_plan("Сейчас запущу тесты.").get("reason") or "")  # not handed over: as in 0.27.1
+plan_ann_handed = not run_plan("Сейчас запущу тесты.", HAND)  # handed over: the executor carries on
 exec_reason = run_plan("План готов.", [
     {"step_index": 3, "type": "SYSTEM_MESSAGE", "created_at": now,
      "content": "<SYSTEM_MESSAGE>\nPlan mode is off: this turn runs on the execution model\n</SYSTEM_MESSAGE>"}
 ]).get("reason") or ""
 plan_exec = "ran no check" in exec_reason
-plan_ok = plan_skip and plan_facts and plan_ann and plan_exec
-print(f"{'✅' if plan_ok else '❌'} orchestrator.in_plan_mode skips edit/verify → skip={plan_skip}, facts={plan_facts}, ann={plan_ann}, exec={plan_exec}")
+plan_ok = plan_skip and plan_facts and plan_ann and plan_ann_handed and plan_exec
+print(f"{'✅' if plan_ok else '❌'} classic Orchestrator: skips edit/verify, keeps ann unless handed over → skip={plan_skip}, facts={plan_facts}, ann={plan_ann}, ann_handed_skip={plan_ann_handed}, exec={plan_exec}")
 ok &= plan_ok
+
+# stop.ci_command strips leading VAR=val and env flags/prefixes
+for ci_cmd in ("GIT_TERMINAL_PROMPT=0 git push -q", "AGY_ACCOUNT=work git push",
+               "env -i git push", "env -i AGY_ACCOUNT=work git push", "env -u FOO git push"):
+    ci_hit = stop_mod.ci_command(ci_cmd)
+    ci_good = isinstance(ci_hit, dict) and ci_hit.get("push") is True
+    ok &= ci_good
+    print(f"{'✅' if ci_good else '❌'} ci_command('{ci_cmd}') → {ci_hit}")
+
+# configurable Orchestrator (plan_execute:true annotation) in plan mode: open task.md & announcement() are checked unless
+# the plan was handed over; facts_check always
+pe_cid = "agp-stop-pe-0001"
+pe_root = os.path.join(SP, "stop_pe_root")
+pe_logs = os.path.join(pe_root, "brain", pe_cid, ".system_generated", "logs")
+pe_ann = os.path.join(pe_root, "annotations")
+pe_art = os.path.join(pe_root, "art")
+os.makedirs(pe_logs, exist_ok=True); os.makedirs(pe_ann, exist_ok=True); os.makedirs(pe_art, exist_ok=True)
+pe_tp = os.path.join(pe_logs, "transcript_full.jsonl")
+pe_task = os.path.join(pe_art, "task.md")
+pe_state = os.path.join(conv.STATE_DIR, pe_cid + ".json")
+with open(os.path.join(pe_ann, f"{pe_cid}.pbtxt"), "w", encoding="utf-8") as f:
+    f.write('title:"PE" plan_execute:true')
+with open(pe_task, "w", encoding="utf-8") as f:
+    f.write("## План\n- [ ] Открытый пункт 1\n- [/] Открытый пункт 2\n")
+def run_pe_decide(reply, handed=False):
+    if os.path.exists(pe_state):
+        os.remove(pe_state)
+    rows = [{"step_index": 0, "type": "USER_INPUT", "created_at": now, "content": "<USER_REQUEST>Спланируй задачу</USER_REQUEST>"}]
+    if handed:
+        rows.append({"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": now, "content": "",
+                     "tool_calls": [{"name": "exit_plan_mode", "args": {"plan": "1. Edit a.py\\n2. Run pytest"}}]})
+    rows.append({"step_index": len(rows), "type": "PLANNER_RESPONSE", "created_at": now, "content": reply})
+    with open(pe_tp, "w", encoding="utf-8") as f:
+        f.write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+    return stop_mod.decide({
+        "conversationId": pe_cid, "transcriptPath": pe_tp, "artifactDirectoryPath": pe_art,
+        "workspacePaths": [ws_plan], "modelName": "Claude Opus 5.5 (High)",
+        "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 0,
+    })
+pe_open = "Открытый пункт" in (run_pe_decide("План готов.") or "")
+pe_ann = "ended your turn without doing it" in (run_pe_decide("Сейчас запущу тесты.") or "")
+pe_open_skip = run_pe_decide("План готов.", handed=True) is None
+pe_ann_skip = run_pe_decide("Сейчас запущу тесты.", handed=True) is None
+pe_facts_ok = "facts" in (run_pe_decide("Все тесты проходят.", handed=True) or "")
+with open(pe_task, "w", encoding="utf-8") as f:  # (with open items the task.md nudge comes first)
+    f.write("## План\n- [x] Пункт 1\n- [x] Пункт 2\n")
+pe_facts_ok &= "facts" in (run_pe_decide("Все тесты проходят.") or "")
+pe_ok = pe_open and pe_ann and pe_open_skip and pe_ann_skip and pe_facts_ok
+ok &= pe_ok
+print(f"{'✅' if pe_ok else '❌'} plan_execute:true: task.md & ann checked unless the plan was handed over, facts always → "
+      f"task={pe_open}, ann={pe_ann}, task_skip_handed={pe_open_skip}, ann_skip_handed={pe_ann_skip}, facts={pe_facts_ok}")
+shutil.rmtree(pe_root, ignore_errors=True)
+if os.path.exists(pe_state):
+    os.remove(pe_state)
 
 shutil.rmtree(art); os.path.exists(state) and os.remove(state)
 print("ALL OK" if ok else "FAILURES")

@@ -268,7 +268,8 @@ def _elapsed(started: str, ended: str = "") -> str:
         if not ts or ts.startswith("0001-01-01"):
             return None
         try:
-            return dt.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            s = re.sub(r"(?<=:\d\d)\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], ts.replace("Z", "+00:00"))
+            return dt.datetime.fromisoformat(s).timestamp()
         except ValueError:
             return None
 

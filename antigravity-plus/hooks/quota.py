@@ -85,7 +85,8 @@ def discover() -> Optional[Endpoint]:
 def parse(data: dict) -> List[dict]:
     """RetrieveUserQuotaSummary → [{name, models (lower-case families), buckets {window: {left, reset, disabled}}}]."""
     groups = []
-    for g in ((data.get("response") or {}).get("groups") or []):
+    raw = data.get("response") if isinstance(data, dict) and isinstance(data.get("response"), dict) else data
+    for g in (raw.get("groups") or [] if isinstance(raw, dict) else []):
         if not isinstance(g, dict):
             continue
         desc = str(g.get("description") or "")
@@ -156,8 +157,13 @@ def groups_now(now: Optional[float] = None, fresh: bool = False) -> List[dict]:
 # ─────────────────────────────── judging them ───────────────────────────────
 
 def parse_ts(ts: str) -> Optional[float]:
-    m = re.match(r"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)", ts or "")
-    return float(calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0))) if m else None
+    m = re.match(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})", ts or "")
+    if not m:
+        return None
+    try:
+        return float(calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0)))
+    except (ValueError, OverflowError):  # a month 13
+        return None
 
 
 def span(seconds: float) -> str:

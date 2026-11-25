@@ -12,6 +12,7 @@ sys.path.insert(0, HOOKS)
 import conversation as conv  # type: ignore[import-not-found]
 import coord  # type: ignore[import-not-found]
 import orchestrator  # type: ignore[import-not-found]
+import stop  # type: ignore[import-not-found]
 
 ws = os.path.realpath(os.path.join(SP, "orch_ws"))
 art = os.path.join(SP, "orch_art")
@@ -35,6 +36,12 @@ def check(name: str, cond: object, detail: object = "") -> None:
 def write_transcript(rows, path=tp):
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+
+
+def real(body):
+    """A SYSTEM_MESSAGE step's content as Antigravity writes it: a preamble that names the tag itself, then the wrapper."""
+    return ("The following is a <SYSTEM_MESSAGE> not actually sent by the user. It is provided by the system as important "
+            f"information to pay attention to.\n\n<SYSTEM_MESSAGE>\n{body}\n</SYSTEM_MESSAGE>")
 
 
 def run_guard(plan_text, extra=None, extra_args=None):
@@ -216,6 +223,104 @@ check("in_plan_mode returns True after [plan review] SYSTEM_MESSAGE", orchestrat
 check("handoff_message emits <orchestrator_review> on [plan review]",
       bool(rmsg2) and "<orchestrator_review" in rmsg2, rmsg2)
 
+# Configurable Orchestrator (2.34+/2.35): modelName is the planner's own model, annotations/<cid>.pbtxt has plan_execute:true,
+# and handoff names a configured executor (e.g. Claude Sonnet 5.5 (High)). Subagent [Message] mentioning [plan review] or
+# [plan review due] must NOT trigger handback or <orchestrator_review>.
+cfg_cid = "agp-orch-cfg-0001"
+cfg_root = os.path.join(SP, "ag_cfg_root")
+cfg_logs = os.path.join(cfg_root, "brain", cfg_cid, ".system_generated", "logs")
+cfg_ann = os.path.join(cfg_root, "annotations")
+os.makedirs(cfg_logs, exist_ok=True)
+os.makedirs(cfg_ann, exist_ok=True)
+cfg_tp = os.path.join(cfg_logs, "transcript_full.jsonl")
+with open(os.path.join(cfg_ann, f"{cfg_cid}.pbtxt"), "w", encoding="utf-8") as f:
+    f.write('title:"Configurable Orch" plan_execute:true')
+cfg_payload = {"conversationId": cfg_cid, "transcriptPath": cfg_tp, "workspacePaths": [ws], "modelName": "Claude Opus 5.5 (High)"}
+write_transcript([
+    {"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>Build feature, не коммить</USER_REQUEST>"},
+    {"step_index": 2, "type": "PLANNER_RESPONSE", "content": "", "tool_calls": [{"name": "read_file", "args": {}}]},
+], path=cfg_tp)
+st_cfg = conv.load(cfg_payload)
+check("configurable Orchestrator (plan_execute:true annotation): in_plan_mode is True before handoff",
+      orchestrator.in_plan_mode(cfg_payload, st_cfg))
+write_transcript([
+    {"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>Build feature, не коммить</USER_REQUEST>"},
+    {"step_index": 2, "type": "PLANNER_RESPONSE", "content": "", "tool_calls": [{"name": "exit_plan_mode", "args": {"plan": "1. Edit a.py\n2. Run pytest"}}]},
+    {"step_index": 3, "type": "SYSTEM_MESSAGE", "source": "SYSTEM",
+     "content": "<SYSTEM_MESSAGE>\nPlan mode is off: this turn runs on Claude Sonnet 5.5 (High). Carry out the plan below now.\n</SYSTEM_MESSAGE>"},
+    {"step_index": 4, "type": "SYSTEM_MESSAGE", "source": "SYSTEM",
+     "content": "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-24T10:00:04Z sender=sub1 priority=MESSAGE_PRIORITY_HIGH content=Subagent checked [plan review] strings.\n</SYSTEM_MESSAGE>"},
+    {"step_index": 5, "type": "SYSTEM_MESSAGE", "source": "SYSTEM",
+     "content": "<SYSTEM_MESSAGE>\n[plan review due] 5 invocations have run.\n</SYSTEM_MESSAGE>"},
+], path=cfg_tp)
+st_cfg = conv.load(cfg_payload)
+h_cfg = orchestrator.handoff_message(cfg_payload, st_cfg)
+check("configurable Orchestrator: in_plan_mode is False during execution (ignores [Message] & [plan review due])",
+      not orchestrator.in_plan_mode(cfg_payload, st_cfg))
+check("configurable Orchestrator: <orchestrator_handoff> captures versioned executor role (Claude Sonnet 5.5 (High))",
+      bool(h_cfg) and "<orchestrator_handoff" in h_cfg and "Claude Sonnet 5.5 (High)" in h_cfg and "<orchestrator_review" not in h_cfg, h_cfg)
+m_single = orchestrator._handoff_role("<SYSTEM_MESSAGE>Plan mode is off: this turn runs on Claude Sonnet 5.5 (High).</SYSTEM_MESSAGE>")
+check("hand-over role drops the trailing </SYSTEM_MESSAGE> on a single-line handoff", m_single == "Claude Sonnet 5.5 (High)", m_single)
+# In plan_execute:true plan mode (in_plan=True), stop.decide() skips open task.md & announcement() while keeping facts_check
+cfg_art = os.path.join(cfg_root, "art")
+os.makedirs(cfg_art, exist_ok=True)
+with open(os.path.join(cfg_art, "task.md"), "w", encoding="utf-8") as f:
+    f.write("## Plan\n- [ ] Pending step\n")
+def clear_cfg_state():
+    for sf in os.listdir(conv.STATE_DIR):
+        if sf.startswith(cfg_cid):
+            os.remove(os.path.join(conv.STATE_DIR, sf))
+
+
+def cfg_stop(rows, label, want):
+    """stop.decide() for the configurable-Orchestrator conversation; want(res) says what it must have answered."""
+    clear_cfg_state()
+    write_transcript(rows, path=cfg_tp)
+    res = stop.decide({"conversationId": cfg_cid, "transcriptPath": cfg_tp, "artifactDirectoryPath": cfg_art,
+                       "workspacePaths": [ws], "modelName": "Claude Opus 5.5 (High)",
+                       "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 0})
+    check(f"plan_execute:true stop.decide() ({label})", want(res), res)
+
+
+U = {"step_index": 0, "type": "USER_INPUT", "created_at": "2026-11-24T10:00:00Z", "content": "<USER_REQUEST>Plan feature</USER_REQUEST>"}
+reply_row = lambda text, i=9: {"step_index": i, "type": "PLANNER_RESPONSE", "created_at": "2026-11-24T10:00:09Z", "content": text}
+hand_row = {"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-11-24T10:00:01Z", "content": "",
+            "tool_calls": [{"name": "exit_plan_mode", "args": {"plan": "1. Edit a.py\n2. Run pytest"}}]}
+review_row = {"step_index": 3, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "created_at": "2026-11-24T10:00:03Z",
+              "content": real("[plan review] Plan mode is on: this turn runs on the planning model. the execution model handed back.")}
+# a planning turn that ends WITHOUT handing the plan over, and a [plan review] turn: task.md, announcements and facts are
+# checked as in 0.27.1; only a turn that ended by handing the plan over (last tool call exit_plan_mode) skips task.md
+# and announcements, because the executor carries on
+cfg_stop([U, reply_row("План готов.", 1)], "planning turn, open task.md: nudged",
+         lambda r: bool(r) and "Pending step" in r)
+cfg_stop([U, reply_row("Сейчас запущу тесты.", 1)], "planning turn, announcement: nudged",
+         lambda r: bool(r) and "ended your turn without doing it" in r)
+with open(os.path.join(cfg_art, "task.md"), "w", encoding="utf-8") as f:  # (with open items the task.md nudge comes first)
+    f.write("## Plan\n- [x] Done step\n")
+cfg_stop([U, reply_row("Все тесты проходят.", 1)], "planning turn, unbacked claim: facts check", lambda r: "facts" in (r or ""))
+with open(os.path.join(cfg_art, "task.md"), "w", encoding="utf-8") as f:
+    f.write("## Plan\n- [ ] Pending step\n")
+cfg_stop([U, hand_row, reply_row("План готов.", 2)], "plan handed over, open task.md: not nudged", lambda r: r is None)
+cfg_stop([U, hand_row, reply_row("Сейчас запущу тесты.", 2)], "plan handed over, announcement: not nudged", lambda r: r is None)
+cfg_stop([U, hand_row, reply_row("Все тесты проходят.", 2)], "plan handed over, unbacked claim: facts check", lambda r: "facts" in (r or ""))
+cfg_stop([U, hand_row, review_row, reply_row("План готов.", 4)], "[plan review] turn, open task.md: nudged",
+         lambda r: bool(r) and "Pending step" in r)
+cfg_stop([U, hand_row, review_row, reply_row("Сейчас запущу тесты.", 4)], "[plan review] turn, announcement: nudged",
+         lambda r: bool(r) and "ended your turn without doing it" in r)
+cfg_stop([U, hand_row, review_row, {"step_index": 4, "type": "PLANNER_RESPONSE", "content": "", "tool_calls": [{"name": "exit_plan_mode", "args": {"plan": "x"}}]},
+          reply_row("План готов.", 5)], "[plan review] turn that hands a new plan over: not nudged", lambda r: r is None)
+check("handed_over: the last tool call of the turn is exit_plan_mode",
+      (write_transcript([U, hand_row, reply_row("x", 2)], path=cfg_tp), orchestrator.handed_over(cfg_payload))[1])
+check("handed_over: not before the plan is handed over",
+      (write_transcript([U, reply_row("x", 1)], path=cfg_tp), not orchestrator.handed_over(cfg_payload))[1])
+check("handed_over: not once the executor handed back ([plan review] after exit_plan_mode)",
+      (write_transcript([U, hand_row, review_row], path=cfg_tp), not orchestrator.handed_over(cfg_payload))[1])
+check("handed_over: not when a later tool call is something else",
+      (write_transcript([U, hand_row, {"step_index": 2, "type": "PLANNER_RESPONSE", "content": "", "tool_calls": [{"name": "read_file", "args": {}}]}],
+                        path=cfg_tp), not orchestrator.handed_over(cfg_payload))[1])
+check("handed_over: an exit_plan_mode of the previous turn does not count",
+      (write_transcript([U, hand_row, {**U, "step_index": 5}], path=cfg_tp), not orchestrator.handed_over(cfg_payload))[1])
+
 # Large (>64 KB) Hydrogen execution turn must still stay in execution mode (in_plan_mode == False)
 write_transcript([
     {"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>Build large feature</USER_REQUEST>"},
@@ -239,6 +344,152 @@ st_new = {"users": [{"step": 0, "ts": "", "text": "Task 1"}, {"step": 7, "ts": "
 check("new USER_INPUT turn starts back in plan mode", orchestrator.in_plan_mode(base_payload, st_new))
 check("new USER_INPUT turn does not fire old turn's enter_plan_mode review",
       orchestrator.handoff_message(base_payload, st_new) is None)
+
+# ── regressions of the 0.28.0 detection ──
+def fresh_state(c):
+    for sf in os.listdir(conv.STATE_DIR):
+        if sf.startswith(c):
+            os.remove(os.path.join(conv.STATE_DIR, sf))
+
+
+# the annotation: a field, not the words in a title
+for title, want in [('fix plan_execute:true parsing', False), ('say \\"x\\" plan_execute:true', False)]:
+    txt = f'title:"{title}" last_user_view_time:{{seconds:1795440871 nanos:731000000}}'
+    check(f"annotation titled «{title}» is no plan_execute", orchestrator._pbtxt_plan_execute(txt) is want, txt)
+check("annotation with the real field after a title that quotes it is plan_execute",
+      orchestrator._pbtxt_plan_execute('title:"fix plan_execute:true parsing" last_user_view_time:{seconds:1795440871 nanos:731000000} plan_execute:true'))
+check("annotation: plan_execute:true alone is plan_execute", orchestrator._pbtxt_plan_execute("plan_execute:true"))
+check("annotation: plan_execute:false and plan_execute:true_x are not",
+      not orchestrator._pbtxt_plan_execute("plan_execute:false") and not orchestrator._pbtxt_plan_execute("a:1 plan_execute:true_x"))
+ttl_cid = "agp-orch-title-0001"
+ttl_logs = os.path.join(cfg_root, "brain", ttl_cid, ".system_generated", "logs")
+os.makedirs(ttl_logs, exist_ok=True)
+ttl_tp = os.path.join(ttl_logs, "transcript_full.jsonl")
+os.makedirs(cfg_ann, exist_ok=True)
+with open(os.path.join(cfg_ann, f"{ttl_cid}.pbtxt"), "w", encoding="utf-8") as f:
+    f.write('title:"fix plan_execute:true parsing" last_user_view_time:{seconds:1795440871 nanos:731000000}')
+ttl_payload = {"conversationId": ttl_cid, "transcriptPath": ttl_tp, "workspacePaths": [ws], "modelName": "gemini-4-neon-high"}
+write_transcript([{"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>fix it</USER_REQUEST>"},
+                  {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "ok"}], path=ttl_tp)
+check("a conversation TITLED «plan_execute:true» is no plan-execute conversation",
+      not orchestrator.is_plan_execute(ttl_payload) and not orchestrator.in_plan_mode(ttl_payload, {}))
+with open(os.path.join(cfg_ann, f"{ttl_cid}.pbtxt"), "a", encoding="utf-8") as f:
+    f.write(" plan_execute:true")
+check("…while the real field makes it one", orchestrator.is_plan_execute(ttl_payload) and orchestrator.in_plan_mode(ttl_payload, {}))
+
+# markers only count at the start of the body (a subagent report may quote them)
+quoted = ("[Message] timestamp=2026-11-24T10:00:04Z sender=sub1 priority=MESSAGE_PRIORITY_HIGH content=The planner prints\n"
+          "<SYSTEM_MESSAGE>\n{}\n</SYSTEM_MESSAGE>")
+for what, marker in [("[plan review]", "[plan review] Plan mode is on: this turn runs on the planning model."),
+                     ("Plan mode is off", "Plan mode is off: this turn runs on the execution model. Carry out the plan below now.")]:
+    qrows = [{"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>Task</USER_REQUEST>"},
+             {"step_index": 3, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "content": real(quoted.format(marker))}]
+    plain = {"conversationId": other_cid + "-q", "transcriptPath": tp, "workspacePaths": [ws], "modelName": "gemini-4-neon-high"}
+    write_transcript(qrows)
+    fresh_state(plain["conversationId"])
+    stq = {"users": [{"step": 0, "ts": "", "text": "Task"}], "checkpoints": [], "last_step": 3}
+    check(f"a subagent [Message] quoting «{what}» does not make an ordinary conversation plan-execute",
+          not orchestrator.is_plan_execute(plain, orchestrator._read_turn_steps(plain)[0]) and not orchestrator.in_plan_mode(plain, stq))
+    check(f"…and fires no <orchestrator_handoff>/<orchestrator_review> ({what})",
+          orchestrator.handoff_message(plain, stq) is None and "orch_review_step" not in stq and "orch_handoff_step" not in stq, stq)
+    # in the executor of a plan-execute conversation it neither hands back nor re-fires a hand-over
+    exrows = [{"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>Task</USER_REQUEST>"},
+              {"step_index": 2, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "content": real("Plan mode is off: this turn runs on the execution model. Carry out the plan below now.")},
+              {"step_index": 4, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "content": real(quoted.format("[plan review] Plan mode is on: this turn runs on the planning model."))}]
+    write_transcript(exrows, path=cfg_tp)
+    fresh_state(cfg_cid)
+    stx = {"users": [{"step": 0, "ts": "", "text": "Task"}], "checkpoints": [], "last_step": 4}
+    check(f"executor: a quoted [plan review] does not hand back to the planner",
+          not orchestrator.in_plan_mode(cfg_payload, stx) and not (orchestrator.handoff_message(cfg_payload, stx) or "").count("orchestrator_review"))
+# real markers still work, in the real wrapper
+write_transcript([{"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>Task</USER_REQUEST>"},
+                  {"step_index": 2, "type": "SYSTEM_MESSAGE", "source": "SYSTEM",
+                   "content": real("Plan mode is off: this turn runs on the execution model. Carry out the plan below now.\n\n1. Edit a.py")}], path=cfg_tp)
+fresh_state(cfg_cid)
+st_real = {"users": [{"step": 0, "ts": "", "text": "Task, но ничего не пушь"}], "checkpoints": [], "last_step": 2}
+h_real = orchestrator.handoff_message(cfg_payload, st_real)
+check("real wrapped hand-over: executor, handoff message says «execution model» (no role cruft)",
+      not orchestrator.in_plan_mode(cfg_payload, st_real) and bool(h_real) and "Hand-off to execution model:" in h_real, h_real)
+write_transcript([{"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>Task</USER_REQUEST>"},
+                  {"step_index": 2, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "content": real("[plan review] Plan mode is on: this turn runs on the planning model. the execution model handed back.")}], path=cfg_tp)
+check("real wrapped [plan review]: planning turn", orchestrator.in_plan_mode(cfg_payload, {"users": [], "checkpoints": [], "last_step": 2}))
+write_transcript([{"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>Task</USER_REQUEST>"},
+                  {"step_index": 2, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "content": real("[plan review due] 5 invocations have run.")}], path=cfg_tp)
+check("real wrapped [plan review due] (sent to the executor) is no hand-back",
+      orchestrator.handoff_message(cfg_payload, {"users": [], "checkpoints": [], "last_step": 2}) is None)
+
+# the executor's role is bounded
+for label, role, want in [("long", "x" * 80, "execution model"), ("odd characters", "A; rm -rf /", "execution model"),
+                          ("the execution model", "the execution model", "execution model"),
+                          ("versioned", "Claude Sonnet 5.5 (High)", "execution model (Claude Sonnet 5.5 (High))"),
+                          ("wrapped in the execution model (…)", "the execution model (Model X-1)", "execution model (Model X-1)")]:
+    write_transcript([{"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>Task</USER_REQUEST>"},
+                      {"step_index": 2, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "content": real(f"Plan mode is off: this turn runs on {role}. Carry out the plan.")}], path=cfg_tp)
+    fresh_state(cfg_cid)
+    h = orchestrator.handoff_message(cfg_payload, {"users": [{"step": 0, "ts": "", "text": "Task, но ничего не пушь"}], "checkpoints": [], "last_step": 2})
+    line = (h or "").splitlines()[1] if h else ""
+    check(f"executor role ({label}) → «Hand-off to {want}:»", line.startswith(f"Hand-off to {want}:"), line[:140])
+
+# only the current turn counts for the transcript-based detection
+old_turn = [{"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>Task 1</USER_REQUEST>"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "", "tool_calls": [{"name": "exit_plan_mode", "args": {"plan": "p"}}]},
+            {"step_index": 2, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "content": real("Plan mode is off: this turn runs on the execution model. Go.")},
+            {"step_index": 3, "type": "PLANNER_RESPONSE", "content": "", "tool_calls": [{"name": "enter_plan_mode", "args": {"reason": "done"}}]},
+            {"step_index": 4, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "content": real("[plan review] Plan mode is on: this turn runs on the planning model. the execution model handed back.")}]
+new_user = {"step_index": 5, "type": "USER_INPUT", "content": "<USER_REQUEST>Task 2, plain question</USER_REQUEST>"}
+plain2 = {"conversationId": "agp-orch-plain-0001", "transcriptPath": tp, "workspacePaths": [ws], "modelName": "gemini-4-neon-high"}
+write_transcript(old_turn + [new_user, {"step_index": 6, "type": "PLANNER_RESPONSE", "content": "Answer."}])
+check("an ordinary question after a plan-execute turn (no annotation, ordinary model): not plan mode",
+      not orchestrator.in_plan_mode(plain2, {}))
+write_transcript(old_turn)
+check("…while the same steps in the CURRENT turn make it plan mode (a /plan turn without an annotation)",
+      orchestrator.in_plan_mode(plain2, {}))
+write_transcript(old_turn + [new_user, {"step_index": 6, "type": "PLANNER_RESPONSE", "content": "", "tool_calls": [{"name": "exit_plan_mode", "args": {"plan": "p"}}]}])
+check("…and an exit_plan_mode after the new message counts for the new turn", orchestrator.in_plan_mode(plain2, {}))
+# Two shapes seen in real classic-Orchestrator transcripts (Stop payload without modelName: the transcript decides)
+shape_cid = "agp-orch-shape-0001"
+shape_art = os.path.join(cfg_root, "shape_art")
+os.makedirs(shape_art, exist_ok=True)
+with open(os.path.join(shape_art, "task.md"), "w", encoding="utf-8") as f:
+    f.write("## Plan\n- [x] Done step\n- [ ] Pending shape step\n")
+def shape_stop(rows):
+    fresh_state(shape_cid)
+    write_transcript(rows)
+    return stop.decide({"conversationId": shape_cid, "transcriptPath": tp, "artifactDirectoryPath": shape_art, "workspacePaths": [ws],
+                        "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 0})
+T0 = "2026-11-24T10:00:00Z"
+usr = lambda i, text="Build it": {"step_index": i, "type": "USER_INPUT", "created_at": T0, "content": f"<USER_REQUEST>{text}</USER_REQUEST>"}
+exit_plan = lambda i: {"step_index": i, "type": "PLANNER_RESPONSE", "created_at": T0, "content": "",
+                       "tool_calls": [{"name": "exit_plan_mode", "args": {"plan": "1. Edit a.py\n2. Run pytest"}}]}
+sysm = lambda i, body: {"step_index": i, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "created_at": T0, "content": real(body)}
+said = lambda i, text: {"step_index": i, "type": "PLANNER_RESPONSE", "created_at": T0, "content": text}
+HAND = "Plan mode is off: this turn runs on the execution model. Carry out the plan below now."
+REVIEW = "[plan review] Plan mode is on: this turn runs on the planning model. the execution model handed back."
+sub_report = ("[Message] timestamp=2026-11-24T10:05:00Z sender=agp-orch-sub-0001 priority=MESSAGE_PRIORITY_HIGH content=The log says:\n"
+              f"<SYSTEM_MESSAGE>\n{REVIEW}\n</SYSTEM_MESSAGE>\nand earlier:\n<SYSTEM_MESSAGE>\n{HAND}\n</SYSTEM_MESSAGE>")
+# 1. the executor phase (after «Plan mode is off», before it hands back): the executor keeps every check — open task.md items
+#    send it back, even when a subagent's report quotes the markers
+r1 = shape_stop([usr(0), exit_plan(1), sysm(2, HAND), said(3, "Done with step 1.")])
+check("classic Orchestrator, executor phase, transcript only: open task.md items send the executor back",
+      bool(r1) and "Pending shape step" in r1, r1)
+r1b = shape_stop([usr(0), exit_plan(1), sysm(2, HAND), sysm(3, sub_report), said(4, "Done with step 1.")])
+check("…also after a subagent report that quotes «[plan review]» and «Plan mode is off»", bool(r1b) and "Pending shape step" in r1b, r1b)
+check("…and it is no plan mode, nothing handed over",
+      (write_transcript([usr(0), exit_plan(1), sysm(2, HAND), sysm(3, sub_report)]), not orchestrator.in_plan_mode(
+          {"conversationId": shape_cid, "transcriptPath": tp, "workspacePaths": [ws]}, {}))[1])
+# 2. a planning turn after an earlier plan-execute turn that ends WITHOUT handing a plan over: an announcement is sent back
+prev = [usr(0), exit_plan(1), sysm(2, HAND), said(3, "Done."), usr(4, "do everything yourself")]
+for label, rows in [("ordinary model, no marker in this turn", prev + [said(5, "Сейчас запущу тесты.")]),
+                    ("after a hand-back in the previous turn", [usr(0), exit_plan(1), sysm(2, HAND), sysm(3, REVIEW), usr(4, "go on"),
+                                                                said(5, "Сейчас запущу тесты.")])]:
+    r2 = shape_stop(rows)
+    check(f"a planning turn that ends with an announcement is sent back ({label})",
+          bool(r2) and "ended your turn without doing it" in r2, r2)
+r2c = shape_stop(prev + [exit_plan(5), said(6, "Сейчас запущу тесты.")])
+check("…but not when this turn's plan was handed over (the executor carries on)", r2c is None, r2c)
+shutil.rmtree(cfg_root, ignore_errors=True)
+for c in (cfg_cid, ttl_cid, other_cid + "-q", "agp-orch-plain-0001", shape_cid):
+    fresh_state(c)
 
 # 4. guard.py exit_plan_mode (including Bypass Mode & full access)
 for f in os.listdir(conv.STATE_DIR):

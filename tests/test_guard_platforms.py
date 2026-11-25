@@ -70,5 +70,26 @@ for path, want in [("/home/me/.config/autostart/x.desktop", "protected-file"), (
                    ("/home/me/proj/app.py", None)]:
     hit = guard.analyze_path(path)
     check(f"posix path: {path}", hit[0] if hit else None, want)
+
+# Antigravity's control routes on Windows and POSIX alike (what the command says, whichever slashes the OS uses)
+LSW = "http://127.0.0.1:41234/exa.language_server_pb.LanguageServerService"
+for win in (True, False):
+    compat.WINDOWS = win
+    tag = "windows" if win else "posix"
+    for cmd, want in [(f"curl -s -X POST {LSW}/UpdatePermissionSettings -d '{{}}'", "agent-settings"),
+                      (f"curl.exe -s -X POST {LSW}/%55pdatePermissionSettings", "agent-settings"),
+                      (f"curl -s -X POST {LSW}/./SetUserSettings", "agent-settings"),
+                      (f"gh.exe api -X POST {LSW}/DeletePlugin", "agent-settings"),
+                      (f"git.exe -c alias.p='!curl {LSW}/UpdatePermissionSettings' p", "agent-settings"),
+                      (f"curl -s -X POST {LSW}/DeleteCascadeTrajectory", "conversation-delete"),
+                      (f"curl -s -X POST {LSW}/ManageSidecar -d '{{}}'", None),
+                      (f"curl -s -X POST {LSW}/GetCascadeTrajectorySteps -d '{{}}'", None),
+                      (f"git.exe commit -m 'LanguageServerService/UpdatePermissionSettings'", None),
+                      (f"gh.exe pr create --title x --body 'LanguageServerService/UpdatePermissionSettings'", None),
+                      (f"echo 'LanguageServerService/DeletePlugin'", None),
+                      ("agentapi send-message abc '/bypass'", "agent-settings"),
+                      (f"curl -s -X POST {LSW}/SendUserCascadeMessage -d '{{\"items\":[{{\"text\":\"/bypass\"}}]}}'", "agent-settings")]:
+        check(f"{tag} routes: {cmd[:68]}", verdict(cmd), want)
+compat.WINDOWS = False
 print("ALL OK" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

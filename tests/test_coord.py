@@ -127,12 +127,26 @@ expect("A overwrites util.py it never read, B wrote it just now", pre(A, "write_
 h = os.path.join(ws, "old.py"); write(h, "z = 1\n")
 expect("A writes old.py nobody touched (never read)", pre(A, "write_file", h), False)
 expect("A creates a new file", pre(A, "write_file", os.path.join(ws, "new.py")), False)
-# family: S is A's subagent
-with coord.Registry(ws) as data:
-    coord._agent(data, S)["parent"] = A
-post(S, "read_file", f); post(A, "read_file", f)
-write(f, "x = 4  # by subagent S\n"); post(S, "edit_file", f)
+def check(name, cond, detail=""):
+    global ok
+    ok &= bool(cond)
+    print(f"{'✅' if cond else '❌'} {name}" + (f" — {str(detail)[:300]}" if not cond and detail != "" else ""))
+
+# family: S is A's subagent — immediately linked via parentConversationId/rootConversationId/agentName in payload (no DB lag)
+sub_payload = {"conversationId": S, "workspacePaths": [ws], "parentConversationId": A, "rootConversationId": A, "agentName": "explorer"}
+hook("check_edit.py", S, {"toolCall": {"name": "read_file", "args": {"Path": f}}, "error": "", "parentConversationId": A, "rootConversationId": A, "agentName": "explorer"})
+post(A, "read_file", f)
+write(f, "x = 4  # by subagent S\n"); hook("check_edit.py", S, {"toolCall": {"name": "edit_file", "args": {"Path": f}}, "error": "", "parentConversationId": A, "rootConversationId": A, "agentName": "explorer"})
 expect("A after its own subagent changed the file (stale → re-read)", pre(A, "edit_file", f), True)
+with coord.Registry(ws, write=False) as data_s:
+    s_entry = data_s["agents"].get(S, {})
+check("subagent S got parent and agentName from HookArgsCommon without DB",
+      s_entry.get("parent") == A and s_entry.get("title") == "explorer" and s_entry.get("title_from") == "payload", s_entry)
+# Also verify session_start.is_subagent detects parentConversationId immediately
+sys.path.insert(0, HOOKS)
+import session_start  # noqa: E402
+check("session_start.is_subagent detects parentConversationId",
+      session_start.is_subagent({"conversationId": S, "parentConversationId": A, "lastUserInput": ""}))
 # awareness
 hook("instructions.py", B, {"lastUserInput": "x"})
 st = {}
@@ -148,10 +162,6 @@ m3 = coord.others_message({"conversationId": A, "workspacePaths": [ws]}, st2)
 ok &= m3 is None
 print(f"{'✅' if m3 is None else '❌'} B idle for 11 min → not listed")
 print("mine(A):", [os.path.basename(p) for p in coord.mine(ws, A)], " mine(B):", [os.path.basename(p) for p in coord.mine(ws, B)])
-def check(name, cond, detail=""):
-    global ok
-    ok &= bool(cond)
-    print(f"{'✅' if cond else '❌'} {name}" + (f" — {str(detail)[:300]}" if not cond and detail != "" else ""))
 
 # ── the text an agent saw lies beside the registry (every hook call of every agent rewrites the registry) ──
 L = "agp-coord-agent-L1"
@@ -299,6 +309,107 @@ check("the conversation's calls are counted", st3.get("others_calls") == coord.O
 st4 = {"users": [], "checkpoints": [], "last_step": 20, "others_key": f"{P}:p2.py"}
 check("an earlier build's key naming the same agents: no repeat", msg2(st4) is None and "others_key" not in st4
       and set(st4.get("others_shown") or {}) == {P}, st4)
+
+# ── family(): two unrelated main agents never become one family ──
+now_t = time.time()
+def ent(**kw): return {"title": "", "parent": "", "last": now_t, "files": {}, **kw}
+def fam(agents, cid, payload=None): return coord.family({"agents": agents, "seen": {}}, cid, payload)
+X1, X2, XS1, XS2, XS3, XR = ("agp-fam-main-0001", "agp-fam-main-0002", "agp-fam-subs-0001", "agp-fam-subs-0002",
+                             "agp-fam-subs-0003", "agp-fam-root-0001")
+check("two main agents with nothing linking them: separate families",
+      fam({X1: ent(), X2: ent()}, X1) == {X1} and fam({X1: ent(), X2: ent()}, X2) == {X2})
+check("…whatever an empty / missing / odd parent or root holds",
+      all(fam({X1: ent(parent=v, root=v), X2: ent(parent=v, root=v)}, X1) == {X1}
+          for v in ("", "  ", None, 0, 5, [], {}, "x"))
+      and fam({X1: ent(parent=X1, root=X1), X2: ent()}, X1) == {X1})
+check("…an empty conversation id never matches the empty parent of other entries",
+      fam({X1: ent(), X2: ent(parent="")}, "") == {""} and fam({X1: ent()}, None) == {None})
+check("…a root shared by both (kept in the entry) joins nothing",
+      fam({X1: ent(root=XR), X2: ent(root=XR), XR: ent()}, X1) == {X1}
+      and fam({X1: ent(root=XR), X2: ent(root=XR)}, X1, {"rootConversationId": XR}) == {X1})
+check("…nor a payload's empty / own / missing parent and root",
+      all(fam({X1: ent(), X2: ent()}, X1, pl) == {X1} for pl in
+          ({}, {"parentConversationId": "", "rootConversationId": ""}, {"parentConversationId": X1, "rootConversationId": X1},
+           {"parentConversationId": None, "rootConversationId": 7}, {"parentConversationId": "   "})))
+check("a parent in the payload (not yet in the registry) is the family's head",
+      fam({X1: ent(), X2: ent()}, XS1, {"parentConversationId": X1}) == {XS1, X1})
+check("a subagent, its parent, its siblings and a subagent's subagent are one family",
+      fam({X1: ent(), XS1: ent(parent=X1), XS2: ent(parent=XS1), XS3: ent(parent=X1), X2: ent()}, XS2) == {X1, XS1, XS2, XS3}
+      and fam({X1: ent(), XS1: ent(parent=X1), XS2: ent(parent=XS1), X2: ent()}, X1) == {X1, XS1, XS2})
+check("…a cycle in a damaged registry ends", fam({X1: ent(parent=X2), X2: ent(parent=X1)}, X1) == {X1, X2})
+check("…a main agent (index: titled, no parent) is no one's subagent whatever its entry says",
+      fam({X1: ent(), X2: ent(main=True, parent=X1)}, X1) == {X1})
+# the subagents a conversation tracked itself (state "bg") — except those known to be someone else's
+bg_state = {"transcript": "", "offset": 0, "users": [], "checkpoints": [], "last_step": 0, "injected": {},
+            "bg": {XS1: {"k": "agent", "st": "run"}, XS2: {"k": "agent", "st": "done"}, XS3: {"k": "agent", "st": "run"},
+                   "agp-fam-cmd-0001": {"k": "cmd", "st": "run"}, "swarm:builder": {"k": "swarm", "st": "run"}, "": {"k": "agent"},
+                   X2: {"k": "agent", "st": "run"}, "agp-fam-gone-0001": {"k": "agent", "st": "done"}, X1: {"k": "agent"}}}
+conv.store(X1, bg_state)
+bg_fam = fam({X1: ent(), X2: ent(main=True), XS1: ent(parent=X1), XS2: ent(parent=XR), XS3: ent()}, X1)
+check("tracked subagents join (a new one still without parent, one the registry has not seen); another agent's subagent, "
+      "a known main agent, a command, a swarm member, an empty id and the conversation's own id don't",
+      bg_fam == {X1, XS1, XS3, "agp-fam-gone-0001"}, sorted(bg_fam))
+conv.store(X1, {k: v for k, v in bg_state.items() if k != "bg"})
+# the registry: unrelated main agents in one workspace still see each other and guard each other's files
+ws4 = os.path.realpath(os.path.join(SP, "coord_ws4")); shutil.rmtree(ws4, ignore_errors=True); os.makedirs(ws4)
+f4 = os.path.join(ws4, "shared.py"); write(f4, "x = 1\n")
+for c in (X1, X2):
+    coord.record({"conversationId": c, "workspacePaths": [ws4], "rootConversationId": XR}, "read_file", f4)
+write(f4, "x = 2  # by X2\n"); coord.record({"conversationId": X2, "workspacePaths": [ws4], "rootConversationId": XR}, "edit_file", f4)
+with coord.Registry(ws4, write=False) as data4:
+    w4 = coord._writer(data4, X1, os.path.realpath(f4), {"conversationId": X1, "rootConversationId": XR})
+seen4 = [a["id"] for a in coord.others({"conversationId": X1, "workspacePaths": [ws4], "rootConversationId": XR})]
+refused = coord.check_write({"conversationId": X1, "workspacePaths": [ws4], "rootConversationId": XR}, os.path.realpath(f4), "x = 3\n")
+check("two unrelated main agents sharing a payload root: X2 is another agent to X1 (listed, its write guarded)",
+      w4[0] == X2 and seen4 == [X2] and bool(refused), (w4[0], seen4, bool(refused)))
+shutil.rmtree(ws4, ignore_errors=True)
+for p4 in (os.path.join(coord.COORD_DIR, coord.slug(ws4) + ".json"), os.path.join(coord.COORD_DIR, coord.slug(ws4) + ".json.lock")):
+    if os.path.exists(p4): os.remove(p4)
+shutil.rmtree(coord._snap_root(ws4), ignore_errors=True)
+
+# ── _agent(): what HookArgsCommon says (usually nothing) never beats Antigravity's index ──
+N1, N2, N3, N4 = "agp-agent-main-0001", "agp-agent-main-0002", "agp-agent-main-0003", "agp-agent-sub-0004"
+index("INSERT INTO conversation_summaries VALUES (?, ?, '', '')", N1, "Index title one")  # titled, no parent: a main agent
+index("INSERT INTO conversation_summaries VALUES (?, ?, '', ?)", N4, "Index title sub", N1)
+with coord.Registry(ws) as data:
+    n1 = dict(coord._agent(data, N1, {"parentConversationId": X2, "agentName": "worker"}))
+    n1b = dict(coord._agent(data, N1, {"parentConversationId": X2, "agentName": "worker"}))
+check("a main agent (the index titles it, no parent): a payload's parent is ignored, agentName never replaces the index title",
+      n1.get("parent") == "" and n1b.get("parent") == "" and n1.get("main") is True and n1.get("title") == "Index title one"
+      and n1.get("title_from") == "index" and n1b.get("title") == "Index title one", (n1, n1b))
+check("…so its family is itself alone", fam({N1: n1, X2: ent()}, N1, {"parentConversationId": X2}) == {N1})
+with coord.Registry(ws) as data:
+    n4 = dict(coord._agent(data, N4, {"agentName": "worker"}))
+check("a subagent: the index's parent and title win over the payload's agentName",
+      n4.get("parent") == N1 and n4.get("title") == "Index title sub" and n4.get("title_from") == "index" and not n4.get("main"), n4)
+# the same agentName for every main agent: provisional only — the request names them, the index names them for good
+conv.store(N2, {"transcript": "", "offset": 0, "users": [{"step": 0, "ts": "", "text": "Add a dark mode toggle"}], "checkpoints": [],
+                "last_step": 0, "injected": {}})
+with coord.Registry(ws) as data:
+    n2 = dict(coord._agent(data, N2, {"agentName": "worker"}))
+    n3 = dict(coord._agent(data, N3, {"agentName": "worker"}))
+check("agentName 'worker' for every main agent: the first user message names the one that has one (not blocked) …",
+      n2.get("title") == "Add a dark mode toggle" and n2.get("title_from") == "request", n2)
+check("… and the one nothing else names keeps agentName as a provisional title", n3.get("title") == "worker" and n3.get("title_from") == "payload", n3)
+index("INSERT INTO conversation_summaries VALUES (?, ?, '', '')", N3, "Index title three")
+with coord.Registry(ws) as data:
+    data["agents"][N3]["looked"] -= coord.LOOK_EVERY + 1
+    n3b = dict(coord._agent(data, N3, {"agentName": "worker"}))
+check("… until the index names it: the index title replaces it, and agentName comes back no more",
+      n3b.get("title") == "Index title three" and n3b.get("title_from") == "index", n3b)
+with coord.Registry(ws) as data:
+    odd = [dict(coord._agent(data, f"agp-agent-odd-000{i}", pl)) for i, pl in enumerate(
+        [{"agentName": 7, "parentConversationId": 5, "rootConversationId": []}, {"agentName": "  ", "parentConversationId": "  "},
+         {"parentConversationId": "agp-agent-odd-0002"}, {"agentName": None}], start=0)]
+check("an odd payload (numbers, blanks, a parent equal to its own id) breaks nothing and links nothing",
+      all(not o.get("parent") for o in odd) and all(o.get("title_from") != "payload" for o in odd), odd)
+index("INSERT INTO conversation_summaries VALUES (?, ?, '', ?)", "agp-agent-self-0001", "Self parent", "agp-agent-self-0001")
+with coord.Registry(ws) as data:
+    sp = dict(coord._agent(data, "agp-agent-self-0001"))
+check("an index row whose parent is the conversation itself is no parent", not sp.get("parent") and sp.get("main") is True, sp)
+for c in (N1, N2, N3, N4, X1):
+    pth = os.path.join(conv.STATE_DIR, c + ".json")
+    if os.path.exists(pth): os.remove(pth)
 
 shutil.rmtree(ws); [os.remove(p) for p in (reg, reg + ".lock") if os.path.exists(p)]
 reg2 = os.path.join(coord.COORD_DIR, coord.slug(ws2) + ".json")

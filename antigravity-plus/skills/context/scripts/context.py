@@ -3,8 +3,9 @@
 
 /usage says how full the context is; this says what it is made of. It reads the conversation's transcript
 (~/.gemini/<product>/brain/<id>/.system_generated/logs/transcript_full.jsonl), keeps only what the model still sees —
-the part since the last compaction (a CHECKPOINT step) plus that compaction's summary, and hook messages only while
-they are live (they last one step) — and splits it into categories: the fixed overhead (system prompt and tool
+the part since the last compaction (a CHECKPOINT step) plus that compaction's summary — systemMessage hook blocks
+from SessionStart/PreInvocation persist until compaction (Antigravity 2.32+), while only legacy EPHEMERAL_MESSAGE
+steps drop after one step — and splits it into categories: the fixed overhead (system prompt and tool
 definitions, rules files, the skills list), the session context, user messages, the model's text and thinking, tool
 call arguments, tool outputs per tool, messages from agents and background tasks, hook messages by tag, system
 messages.
@@ -539,9 +540,10 @@ def render(r: dict) -> str:
            "proportional": "пропорционально подогнаны под реальное число последнего вызова",
            "estimate": "без подгонки — в транскрипте нет чисел вызова модели"}[cal["method"]]
     note = (f"<sub>Токены по категориям — оценка: символы → токены (латиница ≈ 4 символа на токен, код ≈ 3.5, "
-            f"кириллица ≈ 2.5), {how}. Подсказки хуков живут один шаг: считаются только текущие")
+            f"кириллица ≈ 2.5), {how}. Блоки хуков systemMessage (SessionStart/PreInvocation, Antigravity 2.32+) "
+            f"остаются в контексте до сжатия; один шаг живут только устаревшие EPHEMERAL_MESSAGE")
     if r["hooks_dropped"]:
-        note += f" (≈{k(r['hooks_dropped'])} прошлого шага уже выпали)"
+        note += f" (≈{k(r['hooks_dropped'])} из EPHEMERAL_MESSAGE прошлого шага уже выпали)"
     out.append(note + ".</sub>")
     return "\n".join(out)
 

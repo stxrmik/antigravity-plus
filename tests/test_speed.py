@@ -1,7 +1,7 @@
 """Speed and context: the sandbox memory, the context budget, very large reads and loops of failing commands."""
 import json, os, shutil, subprocess, sys, time
 PLUGIN, SP = sys.argv[1], sys.argv[2]; HOOKS = os.path.join(PLUGIN, "hooks")
-sys.path.insert(0, HOOKS); import conversation as conv
+sys.path.insert(0, HOOKS); import conversation as conv, speed  # noqa: E402
 MEMORY = os.path.join(PLUGIN, "skills", "memory", "scripts", "memory.py")
 STORE = os.path.expanduser("~/.gemini/antigravity-plus/sandbox.json")
 AG_CONFIG = os.path.expanduser("~/.gemini/config/config.json")
@@ -260,8 +260,29 @@ think(15_000, 440_000)
 check("Orchestrator's executor (gemini-flash-worker-agy) → the Gemini 4 window", pre("gemini-flash-worker-agy"),
       ["~455k", "512k window"])
 start("ctxflashlite", main=False)
+think(10_000, 440_000)
+check("Flash-Lite subagent (3.5) → warns near its 512k window", pre("gemini-3.5-flash-lite"), ["~450k", "512k window"], ["128k"])
+start("ctxflashlite25", main=False)
 think(10_000, 105_000)
-check("Flash-Lite subagent → warns near its 128k window", pre("flash_lite"), ["~115k", "128k window"], ["168k", "/compact"])
+check("Gemini 2.5 Flash-Lite → warns near its 128k window", pre("gemini-2.5-flash-lite"), ["~115k", "128k window"], ["512k"])
+start("ctxgptoss", main=False)
+think(10_000, 62_000)
+check("GPT-OSS 120B → warns near its 80k window", pre("gpt-oss-120b-medium"), ["~72k", "80k window"])
+start("ctxoverride")
+think(10_000, 350_000)
+old_ov = os.environ.get("AGY_CLI_AUTO_COMPACT_OVERRIDE")
+os.environ["AGY_CLI_AUTO_COMPACT_OVERRIDE"] = "400K"
+check("AGY_CLI_AUTO_COMPACT_OVERRIDE=400K warns near 400k limit", pre("gemini-4-neon-high"), ["~360k", "400k compaction limit"])
+os.environ["AGY_CLI_AUTO_COMPACT_OVERRIDE"] = "500"
+ov500 = speed.ctx_limits("gemini-4-neon-high")
+same("AGY_CLI_AUTO_COMPACT_OVERRIDE=500 formats '500' (not '0k')",
+     ("500" in ov500[2] and "0k" not in ov500[2], ov500[:2]), (True, (300, 440)))
+if old_ov is None:
+    os.environ.pop("AGY_CLI_AUTO_COMPACT_OVERRIDE", None)
+else:
+    os.environ["AGY_CLI_AUTO_COMPACT_OVERRIDE"] = old_ov
+for m25 in ("gemini-2.5-flash", "gemini-2.5-pro"):
+    same(f"ctx_limits('{m25}') → 128k window", speed.ctx_limits(m25), (80_000, 110_000, " of the model's 128k window"))
 start("ctxclaude55")
 think(20_000, 210_000)
 check("Claude Opus 5.5 at 230k → lean hint, not near-compaction yet", pre("claude-opus-5-5-high"), ["~230k", "rg -n"], ["compacts"])

@@ -44,7 +44,7 @@ resets soon, or far behind pace) or "ok". A tier skips exhausted models, takes t
 and strong — a group with quota to spend first. Claude Code's own limits (5-hour and weekly use, from the desktop
 app's get_usage or a terminal's statusLine data) don't change the model; they change how much to hand over.
 
-How it talks to Antigravity (verified on Antigravity 2.29): the language server's own `agentapi new-conversation
+How it talks to Antigravity (verified on Antigravity 2.29–2.35.1): the language server's own `agentapi new-conversation
 --model=<model id> --title=<title> <prompt>` and `agentapi send-message <id> <text>` (environment
 ANTIGRAVITY_LS_ADDRESS, ANTIGRAVITY_CSRF_TOKEN, ANTIGRAVITY_PROJECT_ID), and its RPCs GetCascadeModelConfigData,
 RetrieveUserQuotaSummary, WaitForConversationFullyIdle (blocks until the conversation and its background work are
@@ -112,44 +112,41 @@ WATCH_TIMEOUT = 1780  # `watch` stops on its own just before the Monitor tool's 
 IDLE_PROBE = float(os.environ.get("AGP_DELEGATE_IDLE_PROBE") or 2)  # seconds: does work it started still run?
 NOT_OVER = ("running", "question", "approval", "background", "timeout")  # a task record's states until it is over
 
-# Tiers → model ids, best first; the limits left reorder them (see the docstring). Chosen by a benchmark on Antigravity
-# 2.33.0 (2026-11-20): five tasks with hidden tests — a function with tests, a feature across four files, five bugs in a
-# calendar library (DST, time zones), a version resolver with backtracking, and a security fix in a 2,000-line module of
-# this plugin — run through this script on 16 models (48 runs). Every run got every hidden test right but one
-# (Hydrogen (Low) missed a nested case of the largest task); what differed was time and quota. Model time per task
-# on the four small tasks / on the 2,000-line fix, and the share of the weekly Gemini quota (Antigravity books each
-# call at its API price: ~0.042% of the week per dollar for Hydrogen and Neon, ~0.125% for Carbon and Argon):
-#   Gemini 4 Hydrogen (Low)       0.5–0.6 / 1.3 min      ~0.004–0.006% / 0.010%
-#   Gemini 4 Hydrogen (Medium)    0.7–1.5 / 3.8 min      ~0.005–0.010% / 0.028%
-#   Gemini 4 Hydrogen (High)      1.1–2.7 / 8.7 min      ~0.007–0.016% / 0.074%
-#   Gemini 4 Neon (Medium)        2.3–2.8 / 8.0 min      ~0.019–0.021% / 0.073%
-#   Gemini 4 Neon (High)          3.6–5.9 / 17 min       ~0.025–0.042% / 0.14%
-#   Orchestrator (Neon)           4.5–6.3 / 21 min       ~0.033–0.042% / 0.20%
-#   Gemini 4 Hydrogen (XHigh)     2.8–5.2 / 40 min       ~0.018–0.033% / 0.38% (it started two reviewer subagents)
-#   Gemini 4 Carbon (High), Orchestrator (Carbon)  11–21 / 26 min  ~0.09–0.21% / 0.38%
-#   Gemini 3.8 Flash              5.5–6.2 min even on the light task
-# So Hydrogen carries fast and standard, and Neon (Medium) — a stronger model at about Hydrogen (High)'s time and
-# quota — leads strong. Gemini 4 Carbon, Google's strongest model for long-horizon work, has a tier of its own after
-# strong, ultra, for the complex and specific tasks that the benchmark's ones were too small to show: there it was never
-# better, at 4–12× the time and up to 14× the quota (and Carbon's price doubles on 2026-12-01). Its recommended effort
-# is High — every step at full depth is what ultra is for (Google: pick Carbon directly «where every intermediate step
-# needs maximum reasoning depth»); Orchestrator (Carbon), where Carbon plans and Hydrogen carries the plan out, comes
-# next — about as good and 10–15% cheaper per task, but real delegated tasks on it took 21–76 min, and on read-only
-# audits its planner did all the work, with no Hydrogen calls at all. Plans without Carbon (Google AI Pro) fall back to
-# Argon (High) and Neon (High). Higher effort levels than a tier names only took longer. Claude Sonnet 5.5 (High) was the fastest on the hard tasks (0.8–1.6 / 6.3 min), but
-# Antigravity's Claude group costs ~2.5% of its week per dollar (12% of it for this benchmark's $5 of Claude runs) —
-# ~60× the Gemini quota per task —, so it stays the `claude` tier and a fallback. All Gemini models share one quota
-# group, so a Gemini fallback only helps where a plan lacks a model; Gemini 3.8 Flash is there for plans without
-# Gemini 4.
+# Tiers → model ids, best first; the limits left reorder them (see the docstring). Chosen from two benchmarks:
+# 1) 2026-11-20 (Antigravity 2.33.0): five tasks with hidden tests (from a small function to a security fix in guard.py,
+#    48 runs on 16 models). Every run passed except Hydrogen (Low) on one nested case of the largest task. Model time on
+#    the four small tasks / largest task, and share of the weekly Gemini quota (~0.042%/$ for Hydrogen/Neon, ~0.125%/$
+#    for Carbon): Hydrogen (Low) 0.5–0.6 / 1.3 min (~0.005%), Hydrogen (Medium) 0.7–1.5 / 3.8 (~0.005–0.028%), Hydrogen
+#    (High) 1.1–2.7 / 8.7, Neon (Medium) 2.3–2.8 / 8.0, Neon (High) 3.6–5.9 / 17, Orchestrator (Neon) 4.5–6.3 / 21,
+#    Hydrogen (XHigh) 2.8–5.2 / 40, Carbon (High) & Orchestrator (Carbon) 11–21 / 26 (~0.1–0.4%), Claude Sonnet 5.5
+#    (High) 0.8–1.6 / 6.3 (~2.5% of Claude's week per $, ~60× Gemini per task).
+# 2) 2026-11-24 (Antigravity 2.35.0): 20 runs on two hidden-test tasks (A: DAG scheduler with backfilling/retries/cycles,
+#    14 hidden tests; B: 4 bugs in command-line segmenter, UTF-8 byte offsets, quota window, clause negation; the 20 runs
+#    cost ~$10.5 at API prices in all). Model time & API cost (Task A / Task B):
+#    Hydrogen (Low)     23.7 / 36.5 s   $0.12 / $0.15  (14/14, 4/4)
+#    Hydrogen (Medium)  52.6 / 71.5 s   $0.17 / $0.30  (14/14, 4/4)
+#    Neon (Low)         70.3 / 74.8 s   $0.30 / $0.31  (14/14, 4/4 — 2× faster than Hydrogen (High) at same quota cost)
+#    Hydrogen (High)   124.6 / 159.7 s  $0.31 / $0.36  (14/14, 4/4)
+#    Neon (Medium)     128.4 / 163.3 s  $0.43 / $0.49  (14/14, 4/4)
+#    Hydrogen (XHigh)  202.2 / 463.2 s  $0.49 / $1.03  (14/14, 4/4; also what Antigravity's own `pro` subagent alias uses)
+#    Neon (High)       277.5 / 334.1 s  $0.73 / $1.00  (14/14, 4/4)
+#    Orchestrator (Neon) 327.3 s on A (3 Neon + 4 Hydrogen calls, $0.95, 14/14); B & Carbon/Orchestrator (Carbon) hit the
+#    benchmark's 540 s (9 min) cap — every Carbon (High) and Orchestrator (Carbon) run did (Carbon (Medium) still
+#    finished 4/4 hidden tests at 499.6 s before cutoff).
+# Reclassification: `gemini-4-neon-low` enters `standard` right after Hydrogen (Medium); `gemini-4-hydrogen-xhigh` moves
+# ahead of `orchestrator-neon` in `strong`; all models leaving on 2026-11-30 (Gemini 3.8 Flash, Gemini 4 Argon,
+# Orchestrator (Argon), GPT-OSS 120B) move out of `TIERS` into `EXPERIMENTAL` (paid Pro includes Neon & Carbon since
+# 2.34, Free/Plus includes Hydrogen). Orchestrator default Planner/Executor effort changed to High on 2.35.0, and
+# Planner/Executor roles are configurable in Settings > Models (`plan_execute:true` in annotations). `--timeout` defaults to
+# 1800 s: don't lower it when delegating to `ultra` or Orchestrator models (on 2026-11-20 Carbon (High) took 11–26 min).
 TIERS: Dict[str, List[str]] = {
-    "fast": ["gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-neon-low", "gemini-3.8-flash-low",
-             "gemini-3.8-flash-medium", "claude-sonnet-5-5-low"],
-    "standard": ["gemini-4-hydrogen-medium", "gemini-4-hydrogen-high", "gemini-4-neon-medium", "gemini-3.8-flash-high",
+    "fast": ["gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-neon-low", "claude-sonnet-5-5-low"],
+    "standard": ["gemini-4-hydrogen-medium", "gemini-4-neon-low", "gemini-4-hydrogen-high", "gemini-4-neon-medium",
                  "claude-sonnet-5-5-medium"],
-    "strong": ["gemini-4-neon-medium", "gemini-4-hydrogen-high", "gemini-4-neon-high", "gemini-pro-orchestrator-neon",
-               "gemini-4-hydrogen-xhigh", "claude-sonnet-5-5-high", "claude-opus-5-5-high"],
-    "ultra": ["gemini-4-carbon-high", "gemini-pro-orchestrator", "gemini-4-carbon-medium", "gemini-4-argon-high",
-              "gemini-4-neon-high", "claude-opus-5-5-high"],
+    "strong": ["gemini-4-neon-medium", "gemini-4-hydrogen-high", "gemini-4-neon-high", "gemini-4-hydrogen-xhigh",
+               "gemini-pro-orchestrator-neon", "claude-sonnet-5-5-high", "claude-opus-5-5-high"],
+    "ultra": ["gemini-4-carbon-high", "gemini-pro-orchestrator", "gemini-4-carbon-medium", "gemini-4-neon-high",
+              "claude-opus-5-5-high"],
     "claude": ["claude-sonnet-5-5-high", "claude-opus-5-5-high", "claude-sonnet-5-5-medium", "claude-opus-5-5-medium",
                "gemini-4-neon-medium"],
 }
@@ -157,30 +154,41 @@ TIER_USE = {
     "fast": "light tasks and lookups: a small function with its test, a rename, a lint fix, docs, «where is X used», "
             "summaries of files or logs, babysitting a long command — ~0.5 min, ~0.005% of the weekly Gemini quota",
     "standard": "most work: implementation from a spec, tests for existing code, refactors and fixes across files, "
-                "debugging with a repro, read-only reviews and audits — ~1–4 min, ~0.005–0.03%",
+                "debugging with a repro, read-only reviews and audits — ~1–4 min (~0.005–0.015%) on Hydrogen (Medium) / Neon (Low)",
     "strong": "the hardest parts, or a retry after `standard` got it wrong: subtle bugs, design-heavy changes in "
               "unfamiliar code — ~2–8 min, ~0.02–0.07%",
     "ultra": "complex, specific tasks where every step needs the deepest reasoning: architecture across many modules, "
              "concurrency or protocol bugs, big migrations, niche domains, or a retry after `strong` failed — Gemini 4 "
-             "Carbon at its recommended High effort, ~11–26 min, ~0.1–0.4% of the weekly Gemini quota",
+             "Carbon at its recommended High effort (slow: on 2026-11-24 every Carbon (High) and Orchestrator (Carbon) run hit "
+             "that benchmark's 9-minute cap, on 2026-11-20 they took 11–26 min, ~0.1–0.4% of weekly Gemini quota; "
+             "don't lower --timeout, it defaults to 1800 s)",
     "claude": "Claude-quality work on Antigravity's separate Claude quota — quick, but ~0.5–3% of that quota's week "
               "per task",
 }
 # Experimental: the models Antigravity offers that are in no tier — an exact `--model <id>` still takes them. `models`
 # and `budget` list every such model under «Experimental» with a word on when it may fit; one Antigravity adds later
-# shows up there too, with Antigravity's own description until it gets one here. Numbers from the 2026-11-20 benchmark
-# where a model ran in it.
+# shows up there too, with Antigravity's own description until it gets one here. Numbers from the 2026-11-20 &
+# 2026-11-24 benchmarks where a model ran in them.
 EXPERIMENTAL = {
     "gemini-4-neon-xhigh": "Neon at its Extra High reasoning budget — the deepest Neon: a hard debugging task took it "
                            "7.7 min against Neon (Medium)'s 2.6, same result; for a problem Neon (High) left unsure",
     "gemini-4-carbon-low": "Carbon with little thinking — its knowledge and long-horizon habits at less time: a "
-                           "question in a niche domain that needs Carbon's knowledge more than its depth (untested here)",
-    "gemini-4-argon-low": "Argon, the original Gemini 4 model, with little thinking: a second opinion from another Gemini "
-                          "4 line (untested here; ~4× Hydrogen's quota per token)",
-    "gemini-4-argon-medium": "Argon at medium effort: on plans without Carbon (Google AI Pro) the closest to it; ultra "
-                             "falls back to Argon (High) (untested here; ~4× Hydrogen's quota per token)",
-    "gemini-pro-orchestrator-argon": "Orchestrator with Argon planning and Hydrogen carrying the plan out — the Carbon "
-                                     "Orchestrator's stand-in on Google AI Pro, for long edit-heavy work (untested here)",
+                           "question in a niche domain that needs Carbon's knowledge more than its depth",
+    "gemini-4-argon-high": "Argon at high effort (the original Gemini 4 pro model, ~4× Hydrogen's quota per token); "
+                           "Antigravity removes Argon on 2026-11-30 — prefer Carbon (High) or Neon (High)",
+    "gemini-4-argon-medium": "Argon at medium effort (~4× Hydrogen's quota per token); Antigravity removes Argon on "
+                             "2026-11-30 — prefer Neon (Medium) or Carbon (Medium)",
+    "gemini-4-argon-low": "Argon with little thinking (~4× Hydrogen's quota per token); Antigravity removes Argon on "
+                          "2026-11-30 — prefer Neon (Low) or Hydrogen",
+    "gemini-pro-orchestrator-argon": "Orchestrator with Argon planning and Hydrogen executing; Antigravity removes Argon on "
+                                     "2026-11-30 and hasn't said what happens to Orchestrator (Argon) — prefer Orchestrator "
+                                     "(Carbon) or Orchestrator (Neon)",
+    "gemini-3.8-flash-high": "Gemini 3.8 Flash (High), 256k context window, 5–6 min even on light tasks; Antigravity "
+                             "removes 3.8 Flash on 2026-11-30 — prefer Gemini 4 Hydrogen",
+    "gemini-3.8-flash-medium": "Gemini 3.8 Flash (Medium), 256k context window, slower than Gemini 4 Hydrogen at "
+                               "similar cost; Antigravity removes 3.8 Flash on 2026-11-30 — prefer Gemini 4 Hydrogen",
+    "gemini-3.8-flash-low": "Gemini 3.8 Flash (Low), 256k context window; Antigravity removes 3.8 Flash on 2026-11-30 "
+                            "— prefer Gemini 4 Hydrogen (Low)",
     "claude-opus-5-5-low": "Claude Opus with little thinking: a quick Claude-quality review, wording or answer on "
                            "Antigravity's Claude quota (~2.5% of its week per API dollar)",
     "gpt-oss-120b-medium": "OpenAI's open-weight GPT-OSS 120B on the «Claude and GPT models» quota, 80k context window "
@@ -401,8 +409,9 @@ def quota(ls: LS) -> List[dict]:
             continue
     if d is None:
         return []
+    raw = d.get("response") if isinstance(d, dict) and isinstance(d.get("response"), dict) else d
     groups = []
-    for g in ((d.get("response") or {}).get("groups") or []):
+    for g in (raw.get("groups") or [] if isinstance(raw, dict) else []):
         if not isinstance(g, dict):
             continue
         desc = str(g.get("description") or "")
@@ -496,13 +505,12 @@ def experimental(ms: List[dict]) -> List[Tuple[dict, str]]:
 
 def generic(tier: str, ms: List[dict], default: str) -> List[dict]:
     """When Antigravity has renamed its models: the closest ones by label, best first."""
-    pats = {"fast": [r"hydrogen.*\(low\)", r"hydrogen.*\(medium\)", r"neon.*\(low\)", r"flash(?!.*lite).*\(low\)",
-                     r"flash(?!.*lite)"],
-            "standard": [r"hydrogen.*\(medium\)", r"hydrogen.*\(high\)", r"neon.*\(medium\)", ""],
-            "strong": [r"neon.*\(medium\)", r"hydrogen.*\(high\)", r"neon.*\(high\)", r"^orchestrator \(neon\)",
-                       r"\(high\)"],
-            "ultra": [r"carbon.*\(high\)", r"^orchestrator \(carbon\)", r"carbon.*\(medium\)", r"argon.*\(high\)",
-                      r"neon.*\(high\)", r"\(high\)"],
+    pats = {"fast": [r"hydrogen.*\(low\)", r"hydrogen.*\(medium\)", r"neon.*\(low\)", r"claude.*sonnet.*\(low\)"],
+            "standard": [r"hydrogen.*\(medium\)", r"neon.*\(low\)", r"hydrogen.*\(high\)", r"neon.*\(medium\)", ""],
+            "strong": [r"neon.*\(medium\)", r"hydrogen.*\(high\)", r"neon.*\(high\)", r"hydrogen.*\(xhigh\)",
+                       r"^orchestrator \(neon\)", r"\(high\)"],
+            "ultra": [r"carbon.*\(high\)", r"^orchestrator \(carbon\)", r"carbon.*\(medium\)", r"neon.*\(high\)",
+                      r"\(high\)"],
             "claude": [r"claude.*sonnet.*\(high\)", r"claude.*opus.*\(high\)", r"claude"]}[tier]
     out: List[dict] = []
     for p in pats:
@@ -1264,8 +1272,13 @@ def nobody_watches(cid: str) -> bool:
 # ─────────────────────────────── the report ───────────────────────────────
 
 def parse_ts(ts: str) -> Optional[float]:
-    m = re.match(r"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)", ts or "")
-    return float(calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0))) if m else None
+    m = re.match(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})", ts or "")
+    if not m:
+        return None
+    try:
+        return float(calendar.timegm(tuple(int(x) for x in m.groups()) + (0, 0, 0)))
+    except (ValueError, OverflowError):  # a month 13
+        return None
 
 
 def span(seconds: float) -> str:
@@ -1381,7 +1394,7 @@ def usage(ls: LS, cid: str, turn: int) -> dict:
         name = str(cm.get("responseModel") or "")
         if name and name not in tot["models"]:
             tot["models"].append(name)
-        label = str(cm.get("modelDisplayName") or name)  # Orchestrator: «Orchestrator (Carbon)» plans, Hydrogen carries out
+        label = str(cm.get("modelDisplayName") or name)  # Orchestrator: configurable Planner (Carbon/Neon/Opus) + Executor (Hydrogen/Sonnet)
         if label:
             tot["by_label"][label] = tot["by_label"].get(label, 0) + 1
     return tot
@@ -1389,7 +1402,7 @@ def usage(ls: LS, cid: str, turn: int) -> dict:
 
 def split_text(by_label: Dict[str, int]) -> str:
     """« (3 on Orchestrator (Carbon), 11 on Gemini 4 Hydrogen (Orchestrator))» when more than one model made the
-    calls — Orchestrator's planner and the Hydrogen that carries out its plan; "" otherwise."""
+    calls — Orchestrator's planner and its executor (Hydrogen or Claude Sonnet 5.5); "" otherwise."""
     if len(by_label) < 2:
         return ""
     return " (" + ", ".join(f"{n} on {label}" for label, n in by_label.items()) + ")"

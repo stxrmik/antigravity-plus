@@ -322,14 +322,45 @@ def dev_tools() -> bool:
     return _DEV_TOOLS[0]
 
 
+_REJECTED: Dict[str, str] = {}  # configured server id → why server_command() refused its command (shown to the user)
+
+
+def command_problem(cmd: List[str]) -> str:
+    """Why a command of your own (lsp.json) can't start, or "" when it can — or when we can't tell. Only certain
+    things reject: an executable that is neither a file (after `~`) nor on PATH, and an absolute (or `~`) path
+    argument that does not exist (the script or jar). A relative argument (`server.js`) is never checked: the server
+    starts with the project root as its working directory, which isn't known here. Flags (`--stdio`, `--log=/x`)
+    and the value of a flag (`--log-file /tmp/x.log`, which may be created) are left alone; `-jar x.jar` is checked."""
+    exe = os.path.expanduser(cmd[0])
+    relative_path = (os.sep in exe or "/" in exe) and not os.path.isabs(exe)  # «./bin/x»: against the project root
+    if not (relative_path or os.path.isfile(exe) or which(cmd[0]) is not None or which(exe) is not None):
+        return f"{cmd[0]} isn't a file or on PATH"
+    for prev, arg in zip(cmd[:-1], cmd[1:]):
+        if arg.startswith("-") or "://" in arg or ("=" in arg and not os.path.isabs(os.path.expanduser(arg))):
+            continue
+        if prev.startswith("-") and "=" not in prev and prev != "-jar":
+            continue
+        path = os.path.expanduser(arg)
+        if os.path.isabs(path) and not os.path.exists(path):
+            return f"{arg} doesn't exist"
+    return ""
+
+
 def server_command(sid: str) -> Optional[List[str]]:
-    """The command line that starts server `sid` here, or None when it isn't installed."""
+    """The command line that starts server `sid` here, or None when it isn't installed (or its lsp.json command
+    can't start: the reason is kept in _REJECTED, and install_hint() tells the user)."""
     if sid in _FOUND:
         return _FOUND[sid]
     spec = SERVERS.get(sid) or {}
     cmd = None
     if spec.get("command"):
-        cmd = list(spec["command"])
+        raw_cmd = [str(x) for x in spec["command"]]
+        why = command_problem(raw_cmd)
+        if why:
+            _REJECTED[sid] = why
+        else:
+            _REJECTED.pop(sid, None)
+            cmd = raw_cmd
     else:
         for name in spec.get("bin") or ():
             exe = which(name)
@@ -371,7 +402,13 @@ def pick_server(lang: str) -> Optional[str]:
 
 def install_hint(lang: str) -> str:
     first = LANGS[lang]["servers"][0]
-    return SERVERS[first].get("install", "")
+    hint = SERVERS[first].get("install", "")
+    for sid in LANGS[lang]["servers"]:  # a server of your own that was refused: say so, don't just ignore the config
+        server_command(sid)
+        if sid in _REJECTED:
+            cfg = f"{sid} from your lsp.json can't start: {_REJECTED[sid]}"
+            return f"{cfg}; fix ~/.gemini/antigravity-plus/lsp.json" + (f" or install: {hint}" if sid != first else f" — {hint}")
+    return hint
 
 
 def git_top(path: str) -> Optional[str]:

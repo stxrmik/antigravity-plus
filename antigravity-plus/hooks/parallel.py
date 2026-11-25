@@ -63,7 +63,8 @@ def setting() -> bool:
 
 def _ts(value) -> Optional[float]:
     try:
-        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        s = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], str(value).replace("Z", "+00:00"))
+        return dt.datetime.fromisoformat(s).timestamp()
     except (ValueError, AttributeError, TypeError):
         return None
 

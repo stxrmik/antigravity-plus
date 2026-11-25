@@ -245,8 +245,9 @@ def setup_left(payload: dict, turn: dict, st: dict, answer: str) -> List[str]:
 
 def timestamp(value: str) -> Optional[float]:
     try:
-        return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
-    except (ValueError, AttributeError):
+        s = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], str(value).replace("Z", "+00:00"))
+        return dt.datetime.fromisoformat(s).timestamp()
+    except (ValueError, AttributeError, OverflowError, OSError):
         return None
 
 
@@ -314,7 +315,8 @@ MOBILE_TESTS = re.compile(r"\bxcodebuild\b.*\s(test|test-without-building)(\s|$)
 _QUOTED_ARG = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"")
 _SHELL_WRAP = re.compile(r"\b(?:sh|bash|zsh|dash)\s+-c\b|\bcmd(?:\.exe)?\s+/c\b", re.I)
 CI_PUSH = re.compile(
-    r"(?:^|[;&|\n]\s*)(?:(?:cd|pushd)\s+[^;&|\n]+(?:&&|;)\s*)*(?:env\s+\S+=\S+\s+)*"
+    r"(?:^|[;&|\n]\s*)(?:(?:cd|pushd)\s+[^;&|\n]+(?:&&|;)\s*)*"
+    r"(?:env\s+|-[i0]\s+|-[uC]\s+\S+\s+|[A-Za-z_]\w*=\S*\s+)*"
     r"(?:git(?:\.exe)?\s+(?:-[^\s;|&]+\s+(?:Q\s+)?)*push\b(?!.*\s(?:-n|--dry-run|--delete|-d|--tags)\b)(?!.*\s:[\w./-]+)"
     r"|gh(?:\.exe)?\s+pr\s+create\b|glab(?:\.exe)?\s+mr\s+create\b)", re.I
 )
@@ -497,8 +499,10 @@ def turn_changes(tp: str, since_step: int, payload: dict) -> dict:
                 args = c.get("args") or {}
                 name = str(c.get("name") or "")
                 waiting.append([])
-                if name == "invoke_subagent" and REVIEWERS.search(str(args.get("TypeName") or "")):
-                    reviewed = True
+                if name == "invoke_subagent":
+                    specs = args.get("Subagents") if isinstance(args.get("Subagents"), list) else [args]
+                    if any(isinstance(s, dict) and REVIEWERS.search(str(s.get("TypeName") or "")) for s in specs):
+                        reviewed = True
                 elif name == "read_file" and str(args.get("Path") or "").endswith(REVIEW_SKILLS):
                     reviewed = True
                 elif name == "read_file" and str(args.get("Path") or "").endswith("/skills/init/SKILL.md"):
@@ -756,15 +760,18 @@ def decide(payload: dict) -> Optional[str]:
     if conv.delegated(st) and conv.waiting_for_claude(st):
         return None  # it asked Claude Code and waits: the answer arrives as a message and wakes it up
     in_plan = False
+    plan_handed = False  # the planning turn ended by handing the plan over (its last tool call is exit_plan_mode)
     try:
         import orchestrator  # type: ignore[import-not-found]
         before_orch = json.dumps(st, sort_keys=True, ensure_ascii=False)
         fn = getattr(orchestrator, "in_plan_mode", None)
         in_plan = bool(fn(payload, st)) if callable(fn) else False
+        hand = getattr(orchestrator, "handed_over", None)
+        plan_handed = in_plan and callable(hand) and bool(hand(payload))
         if json.dumps(st, sort_keys=True, ensure_ascii=False) != before_orch and isinstance(payload.get("conversationId"), str):
             conv.store(payload["conversationId"], st)
     except Exception:
-        in_plan = False
+        in_plan = plan_handed = False
     hints = setting("parallelHints")
     run = parallel.running(st) if hints else []
     work = parallel.busy(run)
@@ -773,7 +780,9 @@ def decide(payload: dict) -> Optional[str]:
     if payload.get("fullyIdle") is False:
         return None  # only its dev server or watcher runs, nothing tracked, or parallel hints are off
     broken = [] if in_plan else broken_files(payload)
-    items = task_items(payload, st) if st["users"] and setting("finishTasks") else []  # subagents: no task.md
+    # A plan handed over: the executor carries on, nudging the planner about task.md or an announcement would only
+    # confuse it. A [plan review] turn, or a planning turn that ends without handing over, is checked as in 0.27.1.
+    items = [] if plan_handed else (task_items(payload, st) if st["users"] and setting("finishTasks") else [])  # subagents: no task.md
     tp = conv.transcript_path(payload)
     review: List[str] = []
     unverified: List[str] = []
@@ -783,7 +792,7 @@ def decide(payload: dict) -> Optional[str]:
     ci_need: Optional[Tuple[str, List[str], str]] = None
     git_left: Optional[dict] = None
     answer = last_answer(tp) if tp else ""
-    announced = announcement(answer) if st["users"] else ""
+    announced = "" if plan_handed else (announcement(answer) if st["users"] else "")
     handed = conv.delegated(st)  # a task from Claude Code: it reviews the result itself and never pushes from here
     if not in_plan and not broken and not items and st["users"] and tp:
         turn = turn_changes(tp, st["users"][-1].get("step", -1), payload)

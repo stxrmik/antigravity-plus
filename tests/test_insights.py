@@ -269,5 +269,49 @@ check("_uri_to_path decodes percent-encoded file URIs and Windows drive paths",
       and _insights_mod._uri_to_path("file://localhost/Users/demo/Repo") == "/Users/demo/Repo"
       and _insights_mod._uri_to_path("file:///C:/Users/demo/My%20Repo") == "C:/Users/demo/My Repo")
 
+# invoke_subagent results: only the block after «Created the following subagent(s):» names subagents; another tool's
+# output in the same model call (a command printing a conversationId) and big contents don't, and parsing stays linear
+real_id, other_id, third_id = "aaaaaaaa-0000-4000-8000-000000000001", "aaaaaaaa-0000-4000-8000-000000000002", "aaaaaaaa-0000-4000-8000-000000000003"
+head = "Created At: 2026-11-25T02:36:36+03:00\nCompleted At: 2026-11-25T02:37:05+03:00\n"
+one = head + 'Created the following subagent:\n{\n  "conversationId": "%s",\n  "workspaceUris": ["file:///tmp/ws%%20a"]\n}\nThe subagent will message you.' % real_id
+two = head + 'Created the following subagents:\n[{"conversationId": "%s"}, {"conversationId": "%s", "workspaceUris": []}]' % (real_id, third_id)
+check("_parse_subagent_infos reads one object, with its workspaceUris",
+      [(i["conversationId"], i.get("workspaceUris")) for i in _insights_mod._parse_subagent_infos(one)]
+      == [(real_id, ["file:///tmp/ws%20a"])], _insights_mod._parse_subagent_infos(one))
+check("_parse_subagent_infos reads an array of objects in order",
+      [i["conversationId"] for i in _insights_mod._parse_subagent_infos(two)] == [real_id, third_id])
+check("_parse_subagent_infos ignores a conversationId outside a «Created the following subagent» block",
+      _insights_mod._parse_subagent_infos('{"conversationId": "%s"}' % other_id) == [])
+big = head + 'Created the following subagent:\n{"conversationId": "%s"}\n' % real_id + ('[{"x": [1, {"y": "[{"}]}, ' * 40_000)
+t0 = time.time()
+big_infos = _insights_mod._parse_subagent_infos(big)
+noise = "{[" * 500_000
+t1 = time.time()
+noise_infos = _insights_mod._parse_subagent_infos("Created the following subagent:" + noise)
+check("_parse_subagent_infos stays fast (and finds the object) on 1 MB of brackets and braces",
+      len(big) > 1_000_000 and [i["conversationId"] for i in big_infos] == [real_id] and noise_infos == []
+      and time.time() - t0 < 3 and time.time() - t1 < 3, (len(big), round(time.time() - t0, 2), big_infos, noise_infos))
+
+sub_scan_dir = os.path.join(SP, "scan_subagents")
+os.makedirs(sub_scan_dir, exist_ok=True)
+sub_scan_path = os.path.join(sub_scan_dir, "transcript_full.jsonl")
+scan_steps = [
+    {"step_index": 0, "type": "USER_INPUT", "created_at": "2026-11-25T02:36:00Z", "content": "<USER_REQUEST>Go</USER_REQUEST>"},
+    {"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-11-25T02:36:01Z",
+     "tool_calls": [{"name": "run_command", "args": {"CommandLine": "echo"}},
+                    {"name": "read_file", "args": {"Path": "/tmp/x"}},
+                    {"name": "invoke_subagent", "args": {"Role": "Explorer", "Model": "pro"}}]},
+    {"step_index": 2, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-25T02:36:02Z",
+     "content": '{"conversationId": "%s"}' % other_id},
+    {"step_index": 3, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-25T02:36:03Z",
+     "content": 'source quoting: Created the following subagent:\n{"conversationId": "%s"}' % other_id},
+    {"step_index": 4, "type": "GENERIC", "status": "DONE", "created_at": "2026-11-25T02:36:04Z", "content": one},
+]
+with open(sub_scan_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s_, ensure_ascii=False) for s_ in scan_steps) + "\n")
+scanned = _insights_mod.scan("scan-subagents", sub_scan_path)
+check("scan(): another tool's conversationId in the same call isn't a subagent; the invoke_subagent result is, with its Model",
+      [(c_[0], c_[1]) for c_ in scanned.children] == [(real_id, "pro")], scanned.children)
+
 print("ALL OK" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

@@ -66,7 +66,7 @@ def local(ts: Optional[dt.datetime]) -> str:
 def parse_time(value) -> Optional[dt.datetime]:
     if not value:
         return None
-    s = re.sub(r"(\.\d{6})\d+", r"\1", str(value).strip().replace("Z", "+00:00"))  # 3.9 takes ≤ 6 digits
+    s = re.sub(r"(?<=:\d\d)\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], str(value).strip().replace("Z", "+00:00"))  # 3.9 takes 6 digits
     try:
         t = dt.datetime.fromisoformat(s)
     except ValueError:
@@ -124,7 +124,9 @@ def index_rows() -> List[dict]:
     out = []
     for cid, title, preview, steps, modified, uris, depth, status in rows:
         try:
-            paths = [unquote(urlparse(u).path) for u in json.loads(uris or "[]")]
+            paths = [re.sub(r"^/([A-Za-z]:)", r"\1", unquote(urlparse(u).path)) for u in json.loads(uris or "[]")]
+            if os.name == "nt":
+                paths = [os.path.normpath(p) if p else p for p in paths]
         except ValueError:
             paths = []
         if not depth:

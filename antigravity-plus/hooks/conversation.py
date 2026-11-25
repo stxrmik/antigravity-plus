@@ -267,7 +267,7 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
         base = {"s": d.get("step_index", st["last_step"]), "ts": d.get("created_at", ""), "st": "run"}
         if CREATED.decode() in head:
             pending = st.get("bg_pending") or []
-            for cid in AGENT_ID.findall(content[:3000]):
+            for cid in AGENT_ID.findall(content[:30000]):
                 spec = pending.pop(0) if pending else {}
                 bg[cid] = dict(base, k="agent", t=spec.get("t", ""), r=spec.get("r", ""))
             st["bg_pending"] = pending
@@ -288,7 +288,7 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
     for name, c in zip(names, tcs):
         raw_args = c.get("args")
         a: dict = raw_args if isinstance(raw_args, dict) else {}
-        action = str(a.get("Action") or "list").lower()
+        action = str(a.get("Action") or a.get("action") or "list").lower()
         if name in SWARM_TOOLS:
             calls["swarm_ts"] = d.get("created_at", "")  # the board is how a coordinator waits: never polling
             if name == "swarm":
@@ -775,10 +775,12 @@ def bypass_events(users: List[dict]) -> List[dict]:
 
 def _epoch(ts: str) -> float:
     """Transcript time ("2026-11-04T10:00:00Z", fractions allowed) → seconds; 0 when it can't be read."""
+    if not isinstance(ts, str):
+        return 0.0  # a null or numeric ts in a damaged transcript
     try:
-        t = re.sub(r"(\.\d{6})\d+", r"\1", (ts or "").strip()).replace("Z", "+00:00")
+        t = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], ts.strip()).replace("Z", "+00:00")
         return datetime.datetime.fromisoformat(t).timestamp()
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError, OSError):
         return 0.0
 
 

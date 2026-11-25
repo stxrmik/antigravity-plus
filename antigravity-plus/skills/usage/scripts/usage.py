@@ -46,12 +46,24 @@ DELEGATED_MARK = "[Delegated from Claude Code]"  # = hooks/conversation.py DELEG
 FOLLOW_UP_RE = re.compile(r"sender=system\b.{0,200}?content=Follow-up from Claude Code:\s*(.*?)"
                           r"(?:\n\n\(Same rules as before|</SYSTEM_MESSAGE>|$)", re.S)
 ALIASES = ("flash_lite", "flash", "pro")
-# Orchestrator (Carbon / Argon / Neon), seen on Antigravity 2.32: the planner works in plan mode and hands its plan over with
-# exit_plan_mode; Antigravity then says «Plan mode is off: this turn runs on the execution model …», and Gemini 4
-# Hydrogen carries the plan out until it hands back with enter_plan_mode. Antigravity's metadata names each call's
-# model; the transcript doesn't, so where the language server can't be asked, these markers tell the two apart. The
-# hand-over must open its <SYSTEM_MESSAGE>: a session context quoting a note about it doesn't count.
-EXECUTION_RE = re.compile(r"<SYSTEM_MESSAGE>\s*[^<]{0,200}?\bruns on the execution model\b", re.I)
+# Orchestrator (fixed or configurable Planner/Executor, plus `/plan`): the planner works in plan mode and hands
+# its plan over with exit_plan_mode; Antigravity then says «Plan mode is off: this turn runs on <role> …», and the
+# executor carries the plan out until it hands back with enter_plan_mode / «[plan review]». Antigravity's metadata names
+# each call's model; the transcript doesn't, so where the language server can't be asked, these markers tell them apart.
+# The hand-over/review must OPEN its <SYSTEM_MESSAGE> body (Antigravity wraps every system message in
+# «The following is a <SYSTEM_MESSAGE> not actually sent by the user …\n\n<SYSTEM_MESSAGE>\n<body>\n</SYSTEM_MESSAGE>»):
+# a session context, or a subagent's report, that quotes such a note doesn't count (see system_body()).
+SYSTEM_WRAPPER_RE = re.compile(r"\A\s*(?:[^\n]*<SYSTEM_MESSAGE>[^\n]*\n\s*)?<SYSTEM_MESSAGE>[ \t]*(?:\n|\Z)")
+HANDOVER_RE = re.compile(r"Plan mode is off:\s*this turn runs on\b", re.I)
+EXECUTION_RE = re.compile(  # the role is capped: anything longer or odder is not a model name (→ EXECUTOR)
+    r"Plan mode is off:\s*this turn runs on\s+(?P<role>[\w .()/+-]{1,60}?)\s*(?:\.(?=\s|$)|$)", re.I | re.M
+)
+PLAN_REVIEW_RE = re.compile(r"\[plan review\]", re.I)  # «[plan review due]» changes nothing, so it doesn't match
+PLAN_EXECUTE_PBTXT_RE = re.compile(r"(?:^|[\s{}])plan_execute\s*:\s*true\b", re.I)
+QUOTED_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+SUBAGENT_RESULT_RE = re.compile(  # an invoke_subagent result: its two timestamp lines, then the header
+    r"\A(?:[ \t]*(?:Created|Completed) At:[^\n]*\n)*\s*Created the following subagents?:")
+CONV_ID_RE = re.compile(r'"conversationId"\s*:\s*"([0-9a-f-]{36})"')
 EXECUTOR = "Gemini 4 Hydrogen (Orchestrator)"  # the executor's calls, named as in Antigravity's metadata
 
 
@@ -115,6 +127,25 @@ class SubagentInfo:
 
 # ─────────────────────────────── pricing ───────────────────────────────────
 
+def parse_compact_override(raw: Optional[str], window: int) -> Optional[int]:
+    """Parse the Antigravity CLI setting AGY_CLI_AUTO_COMPACT_OVERRIDE («700000», «800K», «0.5M», «80%») against `window`
+    (the desktop app has no such setting). Kept identical to hooks/speed.py `_parse_compact_override`."""
+    s = (raw or "").strip()
+    if not s or window <= 0:
+        return None
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(%|k|m)?", s, re.I)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None
+    unit = (m.group(2) or "").lower()
+    tokens = (int(window * (val / 100.0)) if unit == "%" else int(val * 1000) if unit == "k"
+              else int(val * 1_000_000) if unit == "m" else int(val))
+    return tokens if 0 < tokens < window else None
+
+
 class Pricing:
     def __init__(self, path: str, override_model: Optional[str] = None, service_tier: Optional[str] = None):
         with open(path, encoding="utf-8") as f:
@@ -134,6 +165,10 @@ class Pricing:
                 return m
         return None
 
+    def is_priced(self, model_name: str) -> bool:
+        m = self.lookup(model_name)
+        return bool(m and not m.get("unpriced"))
+
     def alias(self, subagent_model_arg: str) -> Optional[str]:
         return self.cfg.get("subagent_model_aliases", {}).get(subagent_model_arg)
 
@@ -142,6 +177,10 @@ class Pricing:
         return (m or {}).get("context_window") or self.cfg.get("default_context_window", 200000)
 
     def compaction_threshold(self, model_name: str) -> Optional[int]:
+        win = self.context_window(model_name)
+        override = parse_compact_override(os.environ.get("AGY_CLI_AUTO_COMPACT_OVERRIDE"), win)
+        if override is not None:
+            return override
         m = self.lookup(model_name)
         val = (m or {}).get("compaction_threshold")
         return int(val) if isinstance(val, int) and val > 0 else None
@@ -159,7 +198,7 @@ class Pricing:
 
     def price_call(self, c: Call) -> None:
         m = self.lookup(c.model)
-        if not m:
+        if not m or m.get("unpriced"):
             c.cost = c.cost_no_cache = 0.0
             c.cost_parts = (0.0, 0.0, 0.0)
             return
@@ -190,8 +229,9 @@ def normalize_model(name: str) -> str:
 def parse_ts(s: Optional[str]) -> Optional[dt.datetime]:
     if not s:
         return None
+    fixed = re.sub(r"(?<=:\d\d)\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], s.replace("Z", "+00:00"))
     try:
-        return dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.datetime.fromisoformat(fixed)
     except ValueError:
         return None
 
@@ -291,20 +331,52 @@ def _remember_model(conv_id: str, model: str) -> None:
         pass
 
 
-def _ls_metadata(conv_id: str) -> List[dict]:
-    """A conversation's model calls as Antigravity's language server records them (generatorMetadata) — only where
-    Antigravity hands over the address and token (its side panel). [] when it can't be asked."""
+_LS_UNSET = object()
+_LS_CACHE: object = _LS_UNSET
+
+
+def _discover_ls() -> Tuple[str, str]:
+    """(addr, token) from ANTIGRAVITY_LS_ADDRESS + ANTIGRAVITY_CSRF_TOKEN, else the first live daemon_servers() entry
+    (~/.gemini/antigravity/daemon/hub_*.json, checked once per process). Never scans processes: an isolated HOME
+    (tests, CI) stays offline and a Windows PowerShell scan is not paid per process."""
+    global _LS_CACHE
     addr, token = os.environ.get("ANTIGRAVITY_LS_ADDRESS", ""), os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "")
+    if addr and token:
+        return addr, token
+    if os.environ.get("AGP_USAGE_NO_LS") == "1":
+        return "", ""
+    if _LS_CACHE is _LS_UNSET:
+        found: Tuple[str, str] = ("", "")
+        hooks_dir = os.path.abspath(os.path.join(HERE, "..", "..", "..", "hooks"))
+        if os.path.isdir(hooks_dir):
+            if hooks_dir not in sys.path:
+                sys.path.insert(0, hooks_dir)
+            try:
+                import compat
+                for ls in compat.daemon_servers():
+                    if compat._alive(ls.pid) and compat.ls_healthy(ls.addr, 0.4):
+                        found = (ls.addr, ls.token)
+                        break
+            except Exception:
+                pass
+        _LS_CACHE = found
+    return _LS_CACHE if isinstance(_LS_CACHE, tuple) else ("", "")
+
+
+def _ls_metadata(conv_id: str) -> List[dict]:
+    """A conversation's model calls as Antigravity's language server records them (generatorMetadata). [] if unreachable."""
+    addr, token = _discover_ls()
     if not addr or not token or not UUID_RE.fullmatch(conv_id or ""):
         return []
     import urllib.request
     base = addr if re.match(r"^https?://", addr) else f"http://{addr}"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     req = urllib.request.Request(f"{base}/exa.language_server_pb.LanguageServerService/GetCascadeTrajectoryGeneratorMetadata",
                                  data=json.dumps({"cascadeId": conv_id}).encode("utf-8"), method="POST",
                                  headers={"Content-Type": "application/json", "Connect-Protocol-Version": "1",
                                           "X-Codeium-Csrf-Token": token})
     try:
-        with urllib.request.urlopen(req, timeout=3) as r:
+        with opener.open(req, timeout=3) as r:
             data = json.loads(r.read().decode("utf-8") or "{}")
     except Exception:  # unreachable, refused or unreadable: the caller goes on without it
         return []
@@ -336,8 +408,79 @@ def _ls_step_models(conv_id: str) -> Dict[int, str]:
 
 
 def orchestrated(model: str) -> bool:
-    """Orchestrator (Carbon / Argon / Neon): a planner that hands routine steps to Gemini 4 Hydrogen."""
+    """Orchestrator (Carbon / Argon / Neon): a planner that hands routine steps to an executor."""
     return "orchestrator" in normalize_model(model)
+
+
+def system_body(content: str) -> str:
+    """The body of a SYSTEM_MESSAGE step: what follows the wrapper's own `<SYSTEM_MESSAGE>` line (after the
+    «The following is a <SYSTEM_MESSAGE> …» preamble), stripped; the content itself when it has no wrapper. A note
+    quoted further inside (a subagent's report, a hook's context) never starts the body."""
+    m = SYSTEM_WRAPPER_RE.match(content or "")
+    body = (content or "")[m.end():] if m else (content or "")
+    return re.sub(r"\A<SYSTEM_MESSAGE>\s*", "", re.sub(r"\s*</SYSTEM_MESSAGE>\s*\Z", "", body.strip()))
+
+
+def handover_executor(content: str) -> Optional[str]:
+    """«Plan mode is off: this turn runs on <role>» opening a system message → the executor's model name (EXECUTOR
+    for «the execution model» or a role that isn't a model name); None when the message is not a hand-over."""
+    body = system_body(content)
+    if not HANDOVER_RE.match(body):
+        return None
+    m = EXECUTION_RE.match(body)
+    role = m.group("role").strip() if m else ""
+    m_role = re.match(r"^the execution model\s*\((.+)\)$", role, re.I)
+    if not role or role.lower() == "the execution model":
+        return EXECUTOR
+    return (m_role.group(1).strip() if m_role else role) or EXECUTOR
+
+
+def is_plan_review(content: str) -> bool:
+    """«[plan review] Plan mode is on: …» opening a system message: Antigravity handed back to the planner."""
+    return bool(PLAN_REVIEW_RE.match(system_body(content)))
+
+
+def _annotation_plan_execute(conv_id: str, logs_dir: str, roots: List[str]) -> bool:
+    """True when `<appDataDir>/annotations/<conv_id>.pbtxt` marks `plan_execute:true`."""
+    if not re.fullmatch(r"[\w-]{8,80}", conv_id or ""):
+        return False
+    app_dirs: List[str] = []
+    if logs_dir:
+        p = os.path.realpath(logs_dir)
+        marker = f"{os.sep}brain{os.sep}"
+        idx = p.find(marker)
+        if idx > 0:
+            app_dirs.append(p[:idx])
+    for r in roots:
+        exp = os.path.expanduser(r)
+        if exp not in app_dirs:
+            app_dirs.append(exp)
+    for app_dir in app_dirs:
+        pbtxt = os.path.join(app_dir, "annotations", f"{conv_id}.pbtxt")
+        try:
+            if not os.path.isfile(pbtxt) or os.path.getsize(pbtxt) > 16384:
+                continue
+            with open(pbtxt, encoding="utf-8", errors="replace") as f:
+                # the quoted title may say anything («"plan_execute:true parsing"»): look at the fields only
+                if PLAN_EXECUTE_PBTXT_RE.search(QUOTED_RE.sub('""', f.read())):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _transcript_has_plan_execute(steps: List[dict]) -> bool:
+    for st in steps:
+        typ = st.get("type", "")
+        if typ == "PLANNER_RESPONSE":
+            for tc in st.get("tool_calls") or []:
+                if isinstance(tc, dict) and tc.get("name") in ("exit_plan_mode", "enter_plan_mode"):
+                    return True
+        elif typ == "SYSTEM_MESSAGE" and st.get("source") != "SYSTEM_SDK":
+            content = st.get("content") or ""
+            if handover_executor(content) is not None or is_plan_review(content):
+                return True
+    return False
 
 
 def started_on(conv_id: str, pricing: Pricing) -> str:
@@ -376,13 +519,19 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
     s = Session(conv_id=conv_id, path=logs_dir)
     model = inherited_model or ""
     asked_antigravity = False  # the model of an agentapi-started conversation is looked up once, at its first call
-    executing = False  # Orchestrator: Hydrogen carries out the planner's plan (see EXECUTION_RE)
+    executing = False  # Orchestrator / plan-execute: executor carries out the planner's plan
+    executor_model = EXECUTOR
     step_models: Optional[Dict[int, str]] = None  # Orchestrator: each call's model from Antigravity, asked once
     turn: Optional[Turn] = None
-    pending_subagents: List[dict] = []
+    pending_subagents: List[Tuple[int, dict]] = []  # (position of its invoke_subagent among the call's tool calls, args)
+    call_queue: List[Tuple[int, dict]] = []  # the call's tool calls: their results come back as GENERIC steps in that order
+    handback_model = ""  # the executor that was active when the user wrote: its enter_plan_mode is still its own call
     sub_ids: List[Tuple[str, dict]] = []
 
-    for st in load_steps(logs_dir):
+    steps = load_steps(logs_dir)
+    plan_exec = _annotation_plan_execute(conv_id, logs_dir, roots) or _transcript_has_plan_execute(steps)
+
+    for st in steps:
         ts = parse_ts(st.get("created_at"))
         if ts:
             s.first_ts = s.first_ts or ts
@@ -405,11 +554,22 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
                 if not s.title:
                     s.title = short(text, 80)
             pending_subagents = []
+            call_queue = []
+            if executing:
+                handback_model = executor_model
             executing = False
+            executor_model = EXECUTOR
             continue
 
-        if typ == "SYSTEM_MESSAGE" and EXECUTION_RE.search(content):
-            executing = True  # the planner's plan went to the executor
+        if typ == "SYSTEM_MESSAGE" and st.get("source") != "SYSTEM_SDK":
+            handed = handover_executor(content)
+            if handed is not None:
+                executing = True  # the planner's plan went to the executor
+                executor_model = handed
+                handback_model = ""
+            elif is_plan_review(content):
+                executing = False  # Antigravity handed back to the planner
+                handback_model = ""
 
         if typ == "SYSTEM_MESSAGE" and "Follow-up from Claude Code:" in content:
             fm = FOLLOW_UP_RE.search(content)
@@ -417,14 +577,20 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
                 turn = Turn(idx=len(s.turns) + 1, text="Claude Code: " + fm.group(1).strip(), ts=ts)
                 s.turns.append(turn)
                 pending_subagents = []  # (a message through agentapi doesn't hand Orchestrator back to its planner)
+                call_queue = []
                 continue
 
         if typ == "PLANNER_RESPONSE":
             pending_subagents = []
-            tools = [tc.get("name", "?") for tc in (st.get("tool_calls") or [])]
-            for tc in st.get("tool_calls") or []:
+            call_queue = [(pos, tc) for pos, tc in enumerate(st.get("tool_calls") or []) if isinstance(tc, dict)]
+            tools = [tc.get("name", "?") for _pos, tc in call_queue]
+            for pos, tc in call_queue:
                 if tc.get("name") == "invoke_subagent":
-                    pending_subagents.append(tc.get("args") or {})
+                    raw_args = tc.get("args") or {}
+                    if isinstance(raw_args, dict) and isinstance(raw_args.get("Subagents"), list):
+                        pending_subagents.extend((pos, s) for s in raw_args["Subagents"] if isinstance(s, dict))
+                    elif isinstance(raw_args, dict):
+                        pending_subagents.append((pos, raw_args))
             if any(k in st for k in ("input_tokens", "output_tokens", "cache_read_tokens")):
                 if turn is None:
                     turn = Turn(idx=1, text="(начало)", ts=ts)
@@ -432,16 +598,19 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
                 if not model and not asked_antigravity:
                     asked_antigravity = True
                     model = started_on(conv_id, pricing)
-                if not model:
-                    s.guessed_calls += 1
                 call_model = model
-                if model and orchestrated(model):  # the planner's own calls, or Hydrogen's carrying out its plan
+                if plan_exec or (model and orchestrated(model)):
                     if step_models is None:
                         step_models = _ls_step_models(conv_id)
-                    call_model = step_models.get(st.get("step_index", -1)) or (EXECUTOR if executing else model)
+                    call_model = step_models.get(st.get("step_index", -1)) or (executor_model if executing else model)
+                    if not executing and handback_model and tools == ["enter_plan_mode"]:
+                        call_model = step_models.get(st.get("step_index", -1)) or handback_model  # the executor handing back
+                handback_model = ""
+                if not call_model:
+                    s.guessed_calls += 1
                 c = Call(step=st.get("step_index", -1), ts=ts, model=call_model or pricing.cfg.get("default_model", "?"),
                          input=int(st.get("input_tokens") or 0), cache_read=int(st.get("cache_read_tokens") or 0),
-                         output=int(st.get("output_tokens") or 0), tools=tools, turn=turn.idx, guessed=not model)
+                         output=int(st.get("output_tokens") or 0), tools=tools, turn=turn.idx, guessed=not call_model)
                 pricing.price_call(c)
                 s.calls.append(c)
                 turn.calls.append(c)
@@ -451,13 +620,22 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
                 executing = False  # handed back to the planner
             continue
 
-        # tool results that follow an invoke_subagent call → look for conversation ids
-        if pending_subagents:
-            for uid in UUID_RE.findall(content):
-                if uid not in seen and all(uid != x for x, _ in sub_ids):
-                    args = pending_subagents.pop(0) if pending_subagents else {}
-                    sub_ids.append((uid, args))
-                    break
+        # a tool result: the k-th GENERIC step after a model call answers its k-th tool call. Only an invoke_subagent's
+        # result (or one opening with «Created the following subagent:») names the subagents it started — another
+        # tool's output in the same call (a command printing a conversationId) must not take a pending subagent's args.
+        if typ == "GENERIC":
+            pos, call = call_queue.pop(0) if call_queue else (-1, {})
+            if pending_subagents:
+                headed = bool(SUBAGENT_RESULT_RE.match(content))
+                if headed or call.get("name") == "invoke_subagent":
+                    uids = CONV_ID_RE.findall(content) or UUID_RE.findall(content)
+                    for uid in uids:
+                        if not pending_subagents:
+                            break
+                        if uid in seen or any(uid == x for x, _ in sub_ids):
+                            continue
+                        own = [i for i, (owner, _a) in enumerate(pending_subagents) if owner == pos]
+                        sub_ids.append((uid, pending_subagents.pop(own[0] if own else 0)[1]))
 
     if depth < 3:
         for uid, args in sub_ids:
@@ -686,7 +864,7 @@ def render_markdown(s: Session, pricing: Pricing, max_turns: int = 10) -> str:
             out.append("<sub>⚠️ Транскрипты субагентов недоступны из песочницы — перезапустите скрипт с BypassSandbox, чтобы включить их в итог.</sub>")
             out.append("")
 
-    unknown = sorted({c.model for c in s.calls if not pricing.lookup(c.model)})
+    unknown = sorted({c.model for c in s.calls if not pricing.is_priced(c.model)})
     notes = [f"Цены из `pricing.json` (обновлён {pricing.cfg.get('_updated', '?')}); это эквивалент стоимости через API, а не ваш реальный счёт."]
     if any((pricing.lookup(c.model) or {}).get("uncached_input_as_cache_write") for c in s.calls):
         notes.append("Для Claude некэшированный ввод считается как запись в кэш (×1.25).")
@@ -865,7 +1043,7 @@ def render_all(roots: List[str], pricing: Pricing, days: Optional[int], limit: i
 # ─────────────────────────────── JSON (side panel) ─────────────────────────
 
 CACHE_PATH = os.path.expanduser("~/.gemini/antigravity-plus/usage-cache.json")
-CACHE_VERSION = 5  # 4: agentapi conversations get their real model and Claude Code tasks their title; 5: Orchestrator
+CACHE_VERSION = 8  # 5: Orchestrator; 6: configurable Orchestrator & CLI override; 7: Subagents array + role parens; 8: body-anchored hand-over markers, subagent results by position
 
 
 def _iso(ts: Optional[dt.datetime]) -> Optional[str]:
@@ -934,7 +1112,7 @@ def session_json(s: Session, pricing: Pricing) -> dict:
         "top_calls": [_call(c) for c in sorted(s.calls, key=lambda c: -c.cost)[:5]],
         "tools": dict(sorted(tools.items(), key=lambda x: -x[1])),
         "subagents": sub_rows,
-        "unpriced_models": sorted({c.model for c in _all_calls(s) if not pricing.lookup(c.model)}),
+        "unpriced_models": sorted({c.model for c in _all_calls(s) if not pricing.is_priced(c.model)}),
         "model_guessed_calls": s.guessed_calls,
         "default_model": pricing.cfg.get("default_model", ""),
         "pricing_updated": pricing.cfg.get("_updated", ""),
@@ -956,7 +1134,7 @@ def _summary(s: Session, pricing: Pricing) -> dict:
     return {"id": s.conv_id, "title": s.title, "first_ts": _iso(s.first_ts), "last_ts": _iso(s.last_ts),
             "cost": round(grand.cost, 6), "tokens": grand.total, "calls": grand.calls, "turns": len(s.turns),
             "models": s.models, "context": _context(s, pricing), "model_guessed": s.guessed_calls > 0,
-            "unpriced_models": sorted({c.model for c in calls if not pricing.lookup(c.model)}), "buckets": buckets}
+            "unpriced_models": sorted({c.model for c in calls if not pricing.is_priced(c.model)}), "buckets": buckets}
 
 
 def _signature(logs: str, roots: List[str]) -> str:
@@ -983,7 +1161,10 @@ def recent_json(roots: List[str], pricing: Pricing, limit: int = 15, days: int =
     """Recent top-level conversations + today / last-N-days totals, cached by transcript signature."""
     try:
         with open(pricing.path, "rb") as f:
-            pricing_sig = hashlib.sha1(f.read() + f"{pricing.override or ''}|{pricing.service_tier or ''}".encode()).hexdigest()
+            compact_ovr = os.environ.get("AGY_CLI_AUTO_COMPACT_OVERRIDE") or ""
+            pricing_sig = hashlib.sha1(
+                f.read() + f"{pricing.override or ''}|{pricing.service_tier or ''}|{compact_ovr}".encode()
+            ).hexdigest()
     except OSError:
         pricing_sig = ""
     cache: dict = {}
@@ -1069,7 +1250,7 @@ def recent_json(roots: List[str], pricing: Pricing, limit: int = 15, days: int =
         "today": agg(by_day[day_keys[-1]]), "period": agg(period),
         "by_day": [{"day": d, **agg(by_day[d])} for d in day_keys],
         # a leading "?" marks calls whose model the transcript never named (priced as default_model)
-        "by_model": [{"model": m.lstrip("?"), "guessed": m.startswith("?"), "priced": pricing.lookup(m.lstrip("?")) is not None,
+        "by_model": [{"model": m.lstrip("?"), "guessed": m.startswith("?"), "priced": pricing.is_priced(m.lstrip("?")),
                       **agg(b)} for m, b in sorted(by_model.items(), key=lambda x: -x[1][0])],
         "conversations": [{k_: v for k_, v in summ.items() if k_ != "buckets"} for summ in summaries[:limit]],
         "errors": errors,

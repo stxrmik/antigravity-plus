@@ -337,5 +337,9 @@ drop_cache()
 compat_msg = quota.message({"conversationId": "compat-q", "modelName": "Gemini 4 Carbon (High)"}, compat_st)
 os.environ.clear(); os.environ.update(old_env)
 check("quota.message() stays backward-compatible returning str", isinstance(compat_msg, str) and "<quota" in compat_msg, compat_msg)
+check("parse(): accepts unwrapped {groups: ...} as well as {response: {groups: ...}}",
+      quota.parse({"groups": answer()["response"]["groups"]}) == quota.parse(answer()))
+check("parse_ts(): impossible date (month 13) returns None instead of raising",
+      quota.parse_ts("2026-13-01T00:00:00Z") is None)
 
 sys.exit(0 if ok else 1)

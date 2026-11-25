@@ -5,12 +5,12 @@ description: >-
   definitions, rules, skills list), SessionStart context, compaction summary, user messages, model text and thinking,
   tool arguments and outputs per tool, agent/task messages, live hook hints, top 10 biggest items, and tips to save
   space. Use when the user asks (/context, «что занимает контекст», «почему контекст переполнен»), and on your own
-  when speed/context hints warn (~150k / ~220k tokens) to find what is bloating the context.
+  when speed/context hints warn (~200k / ~440k on Gemini 4, ~150k / ~220k on 3.x) to find what is bloating the context.
 ---
 
 # /context — what fills the context window
 
-> **On your own:** read-only — run it when `<context_budget>` warns (around ~150k or ~220k tokens) so you act on what actually fills the context instead of guessing.
+> **On your own:** read-only — run it when `<context_budget>` warns (~200k / ~440k tokens on Gemini 4, ~150k / ~220k on 3.x) so you act on what actually fills the context instead of guessing.
 
 The script [context.py](scripts/context.py) reads the conversation's transcript since the last compaction (`CHECKPOINT`), counts hook hints the way Antigravity keeps them (since 2.32 every injected systemMessage stays until the next compaction; old ephemeral messages lasted one step), calibrates estimates against the last `PLANNER_RESPONSE` token count (`input_tokens + cache_read_tokens`), and breaks everything down by category.
 

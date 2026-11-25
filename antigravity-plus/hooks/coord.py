@@ -291,15 +291,30 @@ def _named(title: str) -> bool:
     return bool(title.strip()) and not title.lstrip().startswith(conv.DELEGATED_MARK)
 
 
-def _agent(data: dict, cid: str) -> dict:
+def _cid(value: object, own: str = "") -> str:
+    """A conversation id another agent can be told apart by: a non-empty string that names a folder and isn't `own`.
+    Empty, missing, non-string and self-referencing ids are no ids (and "" never matches an entry's empty parent)."""
+    v = value.strip() if isinstance(value, str) else ""
+    return v if v and v != own and CID.fullmatch(v) else ""
+
+
+def _agent(data: dict, cid: str, payload: Optional[dict] = None) -> dict:
     """The agent's entry. Its title comes from Antigravity's index ("title_from": "index" — final); until the index
-    has one, it is provisional ("preview": the index's preview; "request": the first user message, request_title())
-    and the index is asked again, at most once a minute — as it is for the parent of a subagent."""
+    has one, it is provisional (the index's "preview", the first user message — "request", request_title() — and,
+    last of all, the "payload": agentName from HookArgsCommon, which is usually absent and may be the same for
+    every agent) and the index is asked again, at most once a minute — as it is for the parent of a subagent.
+    The index row also tells a main agent ("main": it has a title and no parent): nothing else makes it a subagent."""
     now = time.time()
     a = data["agents"].setdefault(cid, {"title": "", "parent": "", "last": now, "files": {}})
+    p = payload or {}
+    p_parent = _cid(p.get("parentConversationId"), cid)
+    p_agent = p.get("agentName").strip() if isinstance(p.get("agentName"), str) else ""
+    if p_parent and not a.get("main"):
+        a["parent"] = a.get("parent") or p_parent
     if (a.get("title_from") != "index" or not a.get("parent")) and now - a.get("looked", 0) > LOOK_EVERY:
         a["looked"] = now  # main agents have no parent: don't ask the index on every call
         title, preview, parent = _index_row(cid)
+        par = _cid(parent, cid)
         if _named(title):
             a["title"], a["title_from"] = title.strip(), "index"
         elif a.get("title_from") != "index":
@@ -310,21 +325,61 @@ def _agent(data: dict, cid: str) -> dict:
                 users = st.get("users") if isinstance(st, dict) else None
                 first = users[0].get("text") if isinstance(users, list) and users and isinstance(users[0], dict) else ""
                 guess = request_title(str(first or "") or preview or str(a.get("title") or ""))
-                if guess:
+                if guess:  # better than agentName, which only fills in when nothing else names it
                     a["title"], a["title_from"] = guess, "request"
-        a["parent"] = a.get("parent") or parent
+        if par:
+            a["main"] = False
+            a["parent"] = par
+        elif _named(title):  # the index names it and knows no parent: a main agent, whatever else claims
+            a["main"] = True
+            a["parent"] = ""
+    if p_agent and not _named(str(a.get("title") or "")):
+        a["title"], a["title_from"] = p_agent, "payload"
     return a
 
 
-def family(data: dict, cid: str) -> set:
-    """This conversation, its parent and its subagents: they work on one task together."""
+def _entry(data: dict, aid: str) -> dict:
+    e = data["agents"].get(aid)
+    return e if isinstance(e, dict) else {}
+
+
+def family(data: dict, cid: str, payload: Optional[dict] = None) -> set:
+    """What works on one task together: this conversation, its ancestors (parent links), and everything below them —
+    siblings, subagents of subagents — plus the subagents the conversation itself started and tracked (state "bg").
+    Only real parent links count — never an empty id or an id of its own — and a "rootConversationId" alone links
+    nothing (a root two main agents share would make them one family). A tracked subagent that is known to be
+    someone else's — a main agent, or one with another parent — stays out."""
     fam = {cid}
-    parent = data["agents"].get(cid, {}).get("parent")
-    if parent:
+    agents = data["agents"]
+    me = _entry(data, cid)
+    p = payload or {}
+    up = cid
+    parent = "" if me.get("main") else (_cid(me.get("parent"), cid) or _cid(p.get("parentConversationId"), cid))
+    while parent and parent not in fam:  # up to the main agent (a cycle in a damaged registry ends here)
         fam.add(parent)
-    for other, a in data["agents"].items():
-        if a.get("parent") in fam:
-            fam.add(other)
+        up = parent
+        parent = _cid(_entry(data, up).get("parent"), up)
+    st = conv._state(cid) if isinstance(cid, str) and CID.fullmatch(cid) else None
+    bg = st.get("bg") if isinstance(st, dict) else None
+    if isinstance(bg, dict):
+        for sub_id, it in bg.items():
+            sub = _cid(sub_id, cid)
+            if not sub or not isinstance(it, dict) or it.get("k") != "agent":
+                continue
+            e = _entry(data, sub)
+            if e.get("main") or _cid(e.get("parent"), sub) not in ("", cid):
+                continue
+            fam.add(sub)
+    changed = True
+    while changed:  # everything below the family so far
+        changed = False
+        for other, entry in agents.items():
+            if other in fam or not isinstance(entry, dict):
+                continue
+            par = _cid(entry.get("parent"), other)
+            if par and par in fam and not entry.get("main"):
+                fam.add(other)
+                changed = True
     return fam
 
 
@@ -332,7 +387,7 @@ def heartbeat(payload: dict) -> None:
     cid, ws = payload.get("conversationId"), workspace(payload)
     if isinstance(cid, str) and ws:
         with Registry(ws) as data:
-            _agent(data, cid)["last"] = time.time()
+            _agent(data, cid, payload)["last"] = time.time()
 
 
 # ─────────────────────────────── stale writes ───────────────────────────────
@@ -422,7 +477,7 @@ def record(payload: dict, tool: str, path: str) -> None:
         if text is not None and version(path) != v:
             text = None  # it changed while being read: this text may not be version v
     with Registry(ws) as data:
-        a = _agent(data, cid)
+        a = _agent(data, cid, payload)
         now = time.time()
         a["last"] = now
         if v:
@@ -433,10 +488,10 @@ def record(payload: dict, tool: str, path: str) -> None:
         _save_snap(ws, cid, path, v, text)  # this agent's own file: no other agent waits on it
 
 
-def _writer(data: dict, cid: str, path: str) -> Tuple[Optional[str], float, dict]:
+def _writer(data: dict, cid: str, path: str, payload: Optional[dict] = None) -> Tuple[Optional[str], float, dict]:
     """(id, when, entry) of the agent outside this conversation's family that changed `path` last."""
     writer, when = None, 0.0
-    fam = family(data, cid)
+    fam = family(data, cid, payload)
     for other, a in data["agents"].items():
         ts = a.get("files", {}).get(path, 0)
         if other not in fam and ts > when:
@@ -456,7 +511,7 @@ def check_write(payload: dict, path: str, content: Optional[str] = None, target:
         return None  # a new file
     with Registry(ws, write=False) as data:
         seen = data["seen"].get(cid, {}).get(path)
-        writer, when, writer_info = _writer(data, cid, path)
+        writer, when, writer_info = _writer(data, cid, path, payload)
     if seen is None:
         if writer and time.time() - when < ACTIVE:
             return refusal(path, ws, writer, writer_info, when, never_read=True)
@@ -473,7 +528,7 @@ def check_write(payload: dict, path: str, content: Optional[str] = None, target:
             seen = data["seen"].get(cid, {}).get(path)
             if seen is None or seen[:2] == current:
                 return None
-            writer, when, writer_info = _writer(data, cid, path)
+            writer, when, writer_info = _writer(data, cid, path, payload)
             eff_writer = writer if writer and when > seen[2] else None
             snap_text = _load_snap(ws, cid, path, seen[:2])
             if (steady and snap_text is not None and disk_text is not None and snap_text == disk_text
@@ -563,7 +618,7 @@ def others(payload: dict) -> List[dict]:
         return []
     now, out = time.time(), []
     with Registry(ws, write=False) as data:
-        fam = family(data, cid)
+        fam = family(data, cid, payload)
         for other, a in data["agents"].items():
             if other in fam or now - a.get("last", 0) > ACTIVE:
                 continue

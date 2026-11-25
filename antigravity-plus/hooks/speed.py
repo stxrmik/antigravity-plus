@@ -47,19 +47,50 @@ FORGET_AFTER = 2         # successes inside the sandbox that make a remembered c
 KEEP = 20                # remembered commands per project
 
 
+def _parse_compact_override(raw: str, window: int) -> Optional[int]:
+    """Parse the Antigravity CLI setting AGY_CLI_AUTO_COMPACT_OVERRIDE («700000», «800K», «0.5M», «80%») against
+    `window` (the desktop app has no such setting). Kept identical to skills/usage/scripts/usage.py
+    `parse_compact_override`."""
+    s = (raw or "").strip()
+    if not s or window <= 0:
+        return None
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(%|k|m)?", s, re.I)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None
+    unit = (m.group(2) or "").lower()
+    tokens = (int(window * (val / 100.0)) if unit == "%" else int(val * 1000) if unit == "k"
+              else int(val * 1_000_000) if unit == "m" else int(val))
+    return tokens if 0 < tokens < window else None
+
+
 def ctx_limits(model: str) -> Tuple[int, int, str]:
     """(warn, high, note) context thresholds for `model`: Antigravity compacts when the next call wouldn't fit the
-    window — 512k for the Gemini 4 family, 256k for older Gemini, 128k for Flash-Lite subagents, 840k for Claude 5.5."""
+    window — 512k for Gemini 4 and Gemini 3.5 Flash-Lite, 256k for older Gemini, 128k for 2.5/3.1 Flash-Lite, 840k for
+    Claude 5.5, 80k for GPT-OSS 120B."""
     m = (model or "").lower()
-    if re.search(r"flash[-_ ]?lite", m):
-        return 80_000, 110_000, " of the model's 128k window"
-    if GEMINI4.search(m):  # Orchestrator: Carbon, Argon or Neon with Hydrogen, the same Gemini 4 window
-        return CTX4_WARN, CTX4_HIGH, " of the model's 512k window"
-    if "gemini" in m:
-        return CTX_WARN, CTX_HIGH, " of the model's 256k window"
-    if re.search(r"(opus|sonnet)[- ]?5[.-]5", m):
-        return 180_000, 720_000, " of the model's 840k window"
-    return CTX_WARN, CTX_HIGH, ""
+    if re.search(r"gemini[-_ ]?(?:2\.5|3\.1[-_ ]?flash[-_ ]?lite)", m):
+        warn, high, win, note = 80_000, 110_000, 128_000, " of the model's 128k window"
+    elif re.search(r"gpt[-_ ]?oss", m):
+        warn, high, win, note = 50_000, 70_000, 80_000, " of the model's 80k window"
+    elif re.search(r"flash[-_ ]?lite", m) or GEMINI4.search(m):  # 3.5 Flash-Lite & Gemini 4/Orchestrator share 512k
+        warn, high, win, note = CTX4_WARN, CTX4_HIGH, 512_000, " of the model's 512k window"
+    elif "gemini" in m:
+        warn, high, win, note = CTX_WARN, CTX_HIGH, 256_000, " of the model's 256k window"
+    elif re.search(r"(opus|sonnet)[- ]?5[.-]5", m):
+        warn, high, win, note = 180_000, 720_000, 840_000, " of the model's 840k window"
+    else:
+        return CTX_WARN, CTX_HIGH, ""
+    override = _parse_compact_override(os.environ.get("AGY_CLI_AUTO_COMPACT_OVERRIDE", ""), win)
+    if override is not None:
+        warn = min(warn, max(1, int(override * 0.6)))
+        high = min(high, max(1, int(override * 0.88)))
+        lim_s = f"{override // 1000}k" if override >= 1000 else str(override)
+        note = f" of the {lim_s} compaction limit (Antigravity CLI AGY_CLI_AUTO_COMPACT_OVERRIDE; {win // 1000}k window)"
+    return warn, high, note
 
 
 def setting(key: str = "speedHints") -> bool:

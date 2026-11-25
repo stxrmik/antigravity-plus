@@ -250,6 +250,23 @@ check("bypass verdict: chmod -R 777 / (system)", verdict("chmod -R 777 /", True)
 check("bypass verdict: git reset --hard && sudo rm …", verdict("git reset --hard && sudo rm -rf /Library/X", True), "sudo")
 check("bypass verdict: sh -c 'cd / && rm -rf *' (system)", verdict("sh -c 'cd / && rm -rf *'", True), "rm-dangerous")
 check("bypass verdict: find ~ -delete (system)", verdict("find ~ -delete", True), "rm-dangerous")
+# Antigravity's control routes in Bypass Mode: the language server's control plane and a message that switches the mode
+# on still ask (agent-settings is a system rule); removing a conversation is approved; plain text about them never asks
+_LS = "http://127.0.0.1:41234/exa.language_server_pb.LanguageServerService"
+_CV = "http://127.0.0.1:41234/product.v1.ConversationService"
+for line, want in [(f"curl -s -X POST {_LS}/SetUserSettings -d '{{}}'", "agent-settings"),
+                   (f"curl -s -X POST {_LS}/%55pdatePermissionSettings", "agent-settings"),
+                   (f"M=HandleCascadeUserInteraction; curl -s -X POST {_LS}/$M", "agent-settings"),
+                   (f"curl -s -X POST {_LS}/SendUserCascadeMessage -d '{{\"items\":[{{\"text\":\"/bypass\"}}]}}'", "agent-settings"),
+                   (f"curl -s -X POST {_CV}/DeleteConversation -d '{{}}'", None),
+                   (f"curl -s -X POST {_LS}/DeleteCascadeTrajectory -d '{{}}'", None),
+                   (f"curl -s -X POST {_LS}/ManageSidecar -d '{{}}'", None),
+                   (f"curl -s -X POST {_LS}/SendUserCascadeMessage -d '{{\"items\":[{{\"text\":\"run the tests\"}}]}}'", None),
+                   ("grep -c \"ConversationService/CreateConversation.*bypass\" antigravity-plus/hooks/guard.py", None),
+                   ("gh pr create --title x --body \"protects LanguageServerService/UpdatePermissionSettings\"", None),
+                   ("gh release create v1 --notes 'LanguageServerService/DeletePlugin'", None),
+                   ("git commit -m 'guard: agentapi send-message bypass, LanguageServerService/SetUserSettings'", None)]:
+    check(f"bypass verdict: {line[:62]}", verdict(line, True), want)
 check("bypass verdict: find . -delete (the project's)", verdict("find . -delete", True), None)
 hit = guard.analyze_command("bash -c 'cd /tmp && rm -rf ~'")
 check("bash -c '… rm -rf ~': the reason names `~`, not `~'`", bool(hit) and "`~`" in hit[1] and "~'" not in hit[1], True)

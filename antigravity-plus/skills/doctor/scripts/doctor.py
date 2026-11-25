@@ -36,6 +36,7 @@ try:
 except Exception:  # reported in the memory section
     memstore = None
 RULE_FILE_LIMIT = 24000
+RULES_TOKEN_BUDGET = 20000
 OK, WARN, BAD = "✅", "⚠️", "❌"
 
 
@@ -759,14 +760,88 @@ def environment() -> List[str]:
     return out
 
 
+def _estimate_rule_tokens(text: str) -> float:
+    if not text:
+        return 0.0
+    ascii_n = len(text.encode("ascii", "ignore"))
+    rest = len(text) - ascii_n
+    cyr = len(re.findall("[\u0400-\u04ff]", text)) if rest else 0
+    wide = len(re.findall("[\u2e80-\U0010ffff]", text)) if rest > cyr else 0
+    other = max(0, rest - cyr - wide)
+    symbols = sum(text.count(ch) for ch in "{}()[];=<>/\\_|`#$*&+%^~\"'")
+    ratio = 3.5 if ascii_n and symbols / ascii_n > 0.05 else 4.0
+    return ascii_n / ratio + cyr / 2.5 + wide + other / 2.5
+
+
+def _rule_files_for_budget(root: str) -> List[str]:
+    paths: List[str] = []
+    plugins_dir = os.path.expanduser("~/.gemini/config/plugins")
+    has_self = False
+    if os.path.isdir(plugins_dir):
+        for name in sorted(os.listdir(plugins_dir)):
+            rdir = os.path.join(plugins_dir, name, "rules")
+            if os.path.isdir(rdir):
+                if name == NAME:
+                    has_self = True
+                for fn in sorted(os.listdir(rdir)):
+                    if fn.endswith(".md"):
+                        paths.append(os.path.join(rdir, fn))
+    if not has_self:
+        rdir = os.path.join(PLUGIN, "rules")
+        if os.path.isdir(rdir):
+            paths += [os.path.join(rdir, fn) for fn in sorted(os.listdir(rdir)) if fn.endswith(".md")]
+    for g in ("~/.gemini/config/AGENTS.md", "~/.gemini/config/GEMINI.md", "~/.gemini/GEMINI.md"):
+        paths.append(os.path.expanduser(g))
+    for n in ("AGENTS.md", "GEMINI.md"):
+        paths.append(os.path.join(root, n))
+    return paths
+
+
+def _combined_rule_tokens(root: str) -> int:
+    total = 0.0
+    seen = set()
+    for p in _rule_files_for_budget(root):
+        if not os.path.isfile(p):
+            continue
+        real = os.path.realpath(p)
+        if real in seen:
+            continue
+        seen.add(real)
+        try:
+            with open(p, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        m = re.match(r"^---\s*\n(.*?)\n---\s*(?:\n|$)", text, re.S)
+        if m:
+            tm = re.search(r"^trigger:\s*(.+)$", m.group(1), re.M)
+            if tm and tm.group(1).strip().strip("'\"") != "always_on":
+                continue
+            text = text[m.end():]
+        total += _estimate_rule_tokens(f"<RULE[{p}]>\n{text.lstrip()}\n</RULE[{p}]>\n")
+    return int(round(total))
+
+
 def workspace_info(ws: str) -> List[str]:
     out = [f"Папка: `{ws}`"]
     code, top = run(["git", "rev-parse", "--show-toplevel"], cwd=ws)
     root = top.strip() if code == 0 else ws
     out.append(f"{OK if code == 0 else WARN} " + (f"git-репозиторий: `{root}`" if code == 0 else "не git-репозиторий — /commit, /pr, /review недоступны"))
     have = [n for n in ("AGENTS.md", "GEMINI.md", "CLAUDE.md", "CLAUDE.local.md") if os.path.isfile(os.path.join(root, n))]
-    if any(n in have for n in ("AGENTS.md", "GEMINI.md")):
+    ws_rules = [n for n in ("AGENTS.md", "GEMINI.md") if n in have]
+    if ws_rules:
         out.append(f"{OK} память проекта: " + ", ".join(have))
+        for n in ws_rules:
+            try:
+                sz = os.path.getsize(os.path.join(root, n))
+            except OSError:
+                sz = 0
+            if sz > RULE_FILE_LIMIT:
+                out.append(f"{WARN} {n} {sz} байт > лимита {RULE_FILE_LIMIT} — может быть обрезан или исключён из контекста")
+        est_tokens = _combined_rule_tokens(root)
+        if est_tokens > RULES_TOKEN_BUDGET:
+            out.append(f"{WARN} суммарный объём правил ≈{est_tokens} токенов > бюджета {RULES_TOKEN_BUDGET} — "
+                       f"{', '.join(ws_rules)} рискует не попасть в inline-контекст Antigravity")
     else:
         out.append(f"{WARN} нет AGENTS.md — запустите `/init`" + (f" (найдено: {', '.join(have)} — подхватывается хуком)" if have else ""))
     cl = os.path.join(root, ".claude")

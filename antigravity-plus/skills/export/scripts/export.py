@@ -59,7 +59,26 @@ def summarize_call(name: str, args: dict) -> str:
     if name == "search_web":
         return f"«{one_line(a.get('query', ''), 120)}»"
     if name == "invoke_subagent":
+        subs = (args or {}).get("Subagents")
+        if isinstance(subs, str):
+            try:
+                subs = json.loads(subs)
+            except ValueError:
+                subs = None
+        if isinstance(subs, list) and subs:
+            parts = [f"{s.get('TypeName', '?')} — {one_line(str(s.get('Role', '')), 40)}"
+                     for s in subs if isinstance(s, dict)]
+            if parts:
+                return one_line(", ".join(parts), 140)
         return f"{a.get('TypeName', '?')} — {one_line(a.get('Role', ''), 60)}"
+    if name == "run_workflow":
+        return one_line(a.get("Description") or a.get("ScriptPath") or "", 120)
+    if name == "swarm":
+        target = a.get("name") or a.get("title") or ""
+        return f"{a.get('action', '')} `{target}`".strip() if target else a.get("action", "")
+    if name == "exit_plan_mode":
+        plan = a.get("plan") or a.get("Summary") or ""
+        return one_line(plan, 120) if plan else ""
     if name == "send_message":
         return f"→ {a.get('Recipient', '?')[:8]}… «{one_line(a.get('Message', ''), 80)}»"
     if name == "ask_question":

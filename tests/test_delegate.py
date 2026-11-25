@@ -274,9 +274,9 @@ def price_in(line):  # «$2/$10 per 1M» in a line of `delegate.py models`, or "
     m = re.search(r"\$[\d.]+/\$[\d.]+ per 1M", line)
     return m.group(0) if m else ""
 
-# models: quota and tiers — fast on Gemini 4 Hydrogen (Low), standard on Hydrogen (Medium), strong on Neon (Medium) (the
-# 2026-11-20 benchmark); the Claude tier falls back to Gemini while its quota is used up; speeds measured from the
-# conversations' own timings
+# models: quota and tiers — fast on Gemini 4 Hydrogen (Low), standard on Hydrogen (Medium), strong on Neon (Medium)
+# (2026-11-20 & 2026-11-24 benchmarks); the Claude tier falls back to Gemini while its quota is used up; speeds
+# measured from the conversations' own timings
 code, out = run("models")
 check("models: quota per group and the tiers — Hydrogen (Low), Hydrogen (Medium), Neon (Medium)",
       code == 0 and "«Gemini Models»: week 90% left" in out
@@ -305,7 +305,10 @@ check("models: … the same for Orchestrator (Neon)", "Orchestrator (Neon)" in n
 check("models: Gemini 4 Neon (High) is Antigravity's default", "Antigravity's default" in line_of(out, "gemini-4-neon-high ")
       and "Antigravity's default" not in line_of(out, "gemini-4-carbon-medium "), out)
 code, out = run("models", "--json")
-check("models --json: the experimental models with their notes", list(json.loads(out)["experimental"]) == ["gemini-4-neon-xhigh"], out)
+exp_json = json.loads(out)["experimental"]
+check("models --json: the experimental models with their notes (incl. Nov-30-leaving 3.8 Flash)",
+      list(exp_json) == ["gemini-4-neon-xhigh", "gemini-3.8-flash-medium"]
+      and "2026-11-30" in exp_json["gemini-3.8-flash-medium"], out)
 check("models --json", code == 0 and json.loads(out)["tiers"]["claude"] == "gemini-4-neon-medium"
       and json.loads(out)["states"]["Gemini Models"]["status"] == "ok" and json.loads(out)["default"] == "gemini-4-neon-high", out)
 # strong by the 2026-11-20 benchmark: Neon (Medium), then Hydrogen (High), Neon (High), Orchestrator (Neon); Carbon and
@@ -628,6 +631,17 @@ sys.path.insert(0, HOOKS)
 import conversation as conv
 sys.path.insert(0, os.path.dirname(DELEGATE))
 import delegate
+check("parse_ts: a month 13 is unparsable, not an exception", delegate.parse_ts("2026-13-01T00:00:00Z") is None)
+orch = delegate.EXPERIMENTAL["gemini-pro-orchestrator-argon"]
+check("EXPERIMENTAL: Orchestrator (Argon) isn't said to be removed — only Argon leaves on 2026-11-30",
+      "removes it" not in orch and "removes Argon on 2026-11-30" in orch and "hasn't said what happens" in orch, orch)
+check("TIER_USE: standard ~1–4 min; ultra says Carbon (High) hit the 9-minute cap, took 11–26 min and --timeout stays",
+      "~1–4 min" in delegate.TIER_USE["standard"] and "9-minute cap" in delegate.TIER_USE["ultra"]
+      and "11–26 min" in delegate.TIER_USE["ultra"] and "don't lower --timeout" in delegate.TIER_USE["ultra"]
+      and delegate.DEFAULT_TIMEOUT == 1800, delegate.TIER_USE)
+src = open(DELEGATE, encoding="utf-8").read()
+check("the TIERS comment gives the 2026-11-24 benchmark's API cost, not an unsupported share of the weekly quota",
+      "-0.95%" not in src and "cost ~$10.5 at API prices" in src and "keep `--timeout`\n# >= 1800" not in src)
 check("the mark is the same on both sides", delegate.MARK == conv.DELEGATED_MARK)
 
 # Gemini 4 Neon: its quota group by family, Orchestrator (Neon)'s by its whole label; the picks when Antigravity has
@@ -640,6 +654,16 @@ check("group_of: Gemini 4 Neon and Orchestrator (Neon) draw on «Gemini Models»
       and gname("Orchestrator (Carbon)") == "Gemini Models" and gname("Claude Sonnet 5.5 (High)") == "Claude and GPT models"
       and gname("Orchestrator (Xenon)") is None and gname("Gemini 4 Neonite (High)") is None
       and gname("Orchestrator") is None, groups)
+_orig_rpc = delegate.rpc
+try:
+    delegate.rpc = lambda ls, method, body=None: {"groups": [
+        {"displayName": "Gemini Models", "description": "Models: Gemini 4 Neon",
+         "buckets": [{"window": "weekly", "remainingFraction": 0.5, "resetTime": iso(86400)}]}]}
+    unw = delegate.quota(LIVE)
+finally:
+    delegate.rpc = _orig_rpc
+check("quota(): accepts unwrapped {groups: ...} as well as {response: {groups: ...}}",
+      len(unw) == 1 and unw[0]["name"] == "Gemini Models" and unw[0]["buckets"]["weekly"]["left"] == 0.5, unw)
 renamed = [{"id": f"m-{i}", "label": label, "left": 0.5, "reset": "", "enum": "", "tag": "", "note": ""} for i, label in
            enumerate(["Gemini 4 Neon (XHigh)", "Gemini 4 Neon (High)", "Gemini 4 Carbon (High)", "Orchestrator (Neon)",
                       "Gemini 4 Hydrogen (High)", "Orchestrator (Carbon)", "Gemini 4 Neon (Medium)",
@@ -778,13 +802,14 @@ def usage_json(conv_id, env=None):
         return json.loads(r.stdout)
     except ValueError:
         return {"error": r.stdout + r.stderr}
-call_row = lambda i, out=300: {"step_index": i, "type": "PLANNER_RESPONSE", "created_at": "2026-11-15T10:00:%02dZ" % i,
+TODAY = time.strftime("%Y-%m-%d")
+call_row = lambda i, out=300: {"step_index": i, "type": "PLANNER_RESPONSE", "created_at": f"{TODAY}T10:00:{i:02d}Z",
                                "input_tokens": 5000, "cache_read_tokens": 20000, "output_tokens": out, "content": ""}
 rec1 = json.load(open(record, encoding="utf-8"))
-brain(C1, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-15T10:00:00Z",
+brain(C1, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": f"{TODAY}T10:00:00Z",
             "content": "<USER_REQUEST>\n" + delegate.compose("Goal: port the parser.", ws, ws) + "\n</USER_REQUEST>"},
-           call_row(1), {"step_index": 2, "type": "SYSTEM_MESSAGE", "created_at": "2026-11-15T10:00:03Z", "content":
-                         "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-15T10:00:03Z sender=system priority=MESSAGE_PRIORITY_HIGH "
+           call_row(1), {"step_index": 2, "type": "SYSTEM_MESSAGE", "created_at": f"{TODAY}T10:00:03Z", "content":
+                         f"<SYSTEM_MESSAGE>\n[Message] timestamp={TODAY}T10:00:03Z sender=system priority=MESSAGE_PRIORITY_HIGH "
                          "content=" + delegate.FOLLOW_UP.format(message="Also set c to 4.") + "\n</SYSTEM_MESSAGE>"},
            call_row(3)])
 d = usage_json(C1)
@@ -796,7 +821,7 @@ check("usage: a delegated task gets the model it ran on (from the bridge's recor
       and (d.get("context") or {}).get("window") == window("gemini-4-carbon") != window(PRICES["default_model"]), d)
 check("usage: its title is the task, not the run rules; a follow-up is a turn of its own",
       d.get("title") == rec1["title"] and [t["text"] for t in d.get("turns", [])] == [rec1["title"], "Claude Code: Also set c to 4."], d)
-brain(C6, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-15T10:00:00Z",
+brain(C6, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": f"{TODAY}T10:00:00Z",
             "content": "<USER_REQUEST>\nSummarize the logs.\n</USER_REQUEST>"}, call_row(1)])
 d = usage_json(C6)
 check("usage: no record and no way to ask Antigravity → priced as the default model, and it says so",
@@ -807,9 +832,9 @@ check("usage (side panel, which can ask Antigravity): the model from Antigravity
 d = usage_json(C6)
 check("usage: … remembered for the next time", d.get("models") == ["Gemini 4 Argon (High)"], d)
 # Orchestrator: Antigravity's metadata names each call's model — the panel prices Hydrogen's calls as Hydrogen
-brain(C9, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-15T10:00:00Z",
+brain(C9, [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": f"{TODAY}T10:00:00Z",
             "content": "<USER_REQUEST>\n" + delegate.compose("Goal: d = 5.", ws, ws) + "\n</USER_REQUEST>"},
-           call_row(1, 5000), {"step_index": 2, "type": "SYSTEM_MESSAGE", "created_at": "2026-11-15T10:00:02Z",
+           call_row(1, 5000), {"step_index": 2, "type": "SYSTEM_MESSAGE", "created_at": f"{TODAY}T10:00:02Z",
                                "content": "<SYSTEM_MESSAGE>\n(the plan, in other words)\n</SYSTEM_MESSAGE>"},
            call_row(3), call_row(4)])
 d = usage_json(C9)

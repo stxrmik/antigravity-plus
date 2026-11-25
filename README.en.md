@@ -44,7 +44,7 @@ on Antigravity's plugin page it is turned on and off as a whole. Python standard
 
 ## Install
 
-You need **Google Antigravity 2.x**, **Python 3.8+** and **git**. `/ui-check` also needs Chrome, Chromium, Edge or
+You need **Google Antigravity 2.x** (verified on 2.35.1), **Python 3.8+** and **git**. `/ui-check` also needs Chrome, Chromium, Edge or
 Brave. `/mobile` needs Xcode (the iOS simulator, macOS only) and/or the Android SDK (the emulator); `/ci` uses `gh`
 (GitHub) or `glab` (GitLab) — nothing else.
 
@@ -185,29 +185,34 @@ they install the saved choice.
   spending). Its own limit running low → it hands over more, light tasks included; Antigravity's quota tight → only
   bulky work on the cheapest model; used up → it does the work itself until the reset.
 - The model is a tier or an exact id: `fast` — Gemini 4 Hydrogen (Low) for light tasks and lookups, `standard` —
-  Gemini 4 Hydrogen (Medium) for most work, `strong` — Gemini 4 Neon (Medium), then Hydrogen (High), Neon (High) and
-  Orchestrator (Neon), for the hardest part or a retry, `ultra` — Gemini 4 Carbon (High), then Orchestrator (Carbon),
-  for complex, specific tasks (recommended effort High), `claude` — Claude Sonnet 5.5 (High) in Antigravity, on its
+  Gemini 4 Hydrogen (Medium), then Neon (Low), Hydrogen (High) and Neon (Medium) for most work, `strong` — Gemini 4 Neon
+  (Medium), then Hydrogen (High), Neon (High), Hydrogen (XHigh) and Orchestrator (Neon), for the hardest part or a
+  retry, `ultra` — Gemini 4 Carbon (High), then Orchestrator (Carbon) and Carbon (Medium), for complex, specific tasks
+  (recommended effort High; don't lower `--timeout`, default 1800 s), `claude` — Claude Sonnet 5.5 (High) in Antigravity, on its
   separate Claude quota. Within a tier the limits left decide: used-up models are skipped, a "tight" quota group
   (under 15% left, or spent faster than the week goes by) comes last, and a quota that would reset unused soon comes
   first. The output says why this model.
-- Why these: a benchmark on Antigravity 2.33.0 (2026-11-20) — five tasks with hidden tests, from a small function to a
-  security fix in a 2,000-line module of this plugin, 48 runs on 16 models. Every run got everything right except
-  Hydrogen (Low) on the largest task (one case missed), so the models differed in time and quota. Model time per task on
-  the small tasks / the largest: Hydrogen (Low) 0.5 / 1.3 min, Hydrogen (Medium) 0.7–1.5 / 3.8, Hydrogen (High)
-  1.1–2.7 / 8.7, Neon (Medium) 2.3–2.8 / 8.0, Neon (High) 3.6–5.9 / 17, Orchestrator (Neon) 4.5–6.3 / 21, Hydrogen
-  (XHigh) 2.8–5.2 / 40, Carbon (High) and Orchestrator (Carbon) 11–21 / 26, Gemini 3.8 Flash 5.5–6.2 even on the light
-  one; Claude Sonnet 5.5 (High) 0.8–1.6 / 6.3. A task took ~0.005–0.03% of the weekly Gemini quota on Hydrogen, up to
-  0.2–0.4% on the Orchestrators, XHigh and Carbon. Antigravity books every call at its API price (per token Hydrogen
+- Why these: two hidden-test benchmarks — 2026-11-20 (2.33.0: 5 tasks, 48 runs on 16 models) and 2026-11-24 (2.35.0:
+  2 tasks — a DAG scheduler and a 4-bug parser/offset/quota fix — 20 runs, about $10.50 at API prices in total). Times
+  and costs match the plugin's records of those runs; the pass rates come only from that benchmark's own report (its
+  folder is gone). By that report every active Hydrogen and Neon run passed both tasks 100%: Hydrogen (Low) 24 / 36 s
+  ($0.12–$0.15), Hydrogen (Medium) 53 / 72 s ($0.17–$0.30), **Neon (Low) 70 / 75 s ($0.30–$0.31)** — 2× faster than
+  Hydrogen (High) at about the same cost, so it joined `standard`; Hydrogen (High) and Neon (Medium) took ~2.1–2.7 min,
+  Hydrogen (XHigh) 3.4–7.7 min, Neon (High) 4.6–5.6 min, Orchestrator (Neon) 5.5 min on task A (`3` Neon + `4`
+  Hydrogen calls). Carbon (High) and Orchestrator (Carbon) took 11–26 min on 2026-11-20, and on 2026-11-24 every one of
+  their runs hit the benchmark's 9-minute cap, so don't lower `--timeout`. High as the default effort belongs only to
+  the configurable Orchestrator (App 2.35.0: the default Orchestrator/Executor models in Settings > Models start at
+  High; you pick the Planner/Executor pair there). Antigravity books every call at its API price (per token Hydrogen
   counts 1, Neon 2, Carbon ~4); its Claude group costs ~2.5% of its week per dollar, ~60× the Gemini quota per task.
-- So Carbon has a tier of its own after `strong`, `ultra`, for the complex and specific tasks the benchmark's ones were
-  too small to show — there it was never better, at 4–12× the time; real delegated tasks on Orchestrator (Carbon) took
-  21–76 min, and on read-only audits its planner did all the work. Every model in no tier (Neon (XHigh), Carbon (Low),
-  Argon (Low, Medium), Orchestrator (Argon), Claude Opus 5.5 (Low), GPT-OSS 120B) is listed by `delegate.py models` as
-  «Experimental», with a word on when each may fit, and taken by its exact id (`--model orchestrator` is Orchestrator
-  (Carbon), `--model "orchestrator neon"` Orchestrator (Neon); the report shows how many calls planner and Hydrogen made). API prices: Neon $3 / $15 per 1M tokens, Hydrogen $1.5 / $7.5,
-  Carbon and Argon $2 / $10 until 2026-11-30 and $4 / $20 from 2026-12-01. `delegate.py models` shows each model's
-  speed in your recent conversations.
+- So Carbon keeps its own tier after `strong`, `ultra`, for complex and specific tasks. Paid Google AI Pro gets Neon
+  and Orchestrator (Neon) since 2.34 according to the changelog; it doesn't mention Carbon for AI Pro. Every model in no
+  tier (`Neon (XHigh)`, `Carbon (Low)`, `Claude Opus 5.5 (Low)`, `Argon`, `Orchestrator (Argon)`, `Gemini 3.8 Flash`,
+  `GPT-OSS 120B`) is listed by `delegate.py models` as «Experimental» with a word on when each fits, and taken by exact
+  id (`--model orchestrator` is Orchestrator (Carbon), `--model "orchestrator neon"` Orchestrator (Neon); reports split
+  planner vs executor calls). Antigravity itself tags Argon and Gemini 3.8 Flash «Leaving on Nov 30» and says GPT-OSS
+  will be removed on 2026-11-30; it says nothing like that about Orchestrator (Argon). API prices: Neon $3 / $15 per
+  1M tokens, Hydrogen $1.5 / $7.5, Carbon $2 / $10 until 2026-11-30 and $4 / $20 from 2026-12-01. `delegate.py models`
+  shows each model's speed in your recent conversations.
 - The Antigravity agent works in the same folder, its conversation shows up in Antigravity ("Claude Code: …"), and
   Claude Code does its own part meanwhile. At the end Claude Code gets a short report: the agent's words, the files it
   changed (+/− lines), its commands with exit codes, and the cost — model calls, tokens, share of the weekly limit.
@@ -269,15 +274,16 @@ they install the saved choice.
   that works inside the sandbox twice is forgotten; with the sandbox off, the list isn't shown.
 - When the conversation's context reaches 200k tokens (150k on older models), the agent is told to keep it lean:
   search with `rg -n`, read only the lines it needs, trim long output. Antigravity compacts the history as soon as the
-  next model call won't fit the window (verified on 2.33.0): 512k for the Gemini 4 family (Neon, Carbon, Argon,
-  Hydrogen, every Orchestrator) — the last call before a compaction carried 504k–512k, never more —, 256k for Gemini
-  3.x Flash, 128k for Flash-Lite, 840k for Claude 5.5. So around 440k (220k on Gemini 3.x) the agent hears that
-  compaction is near and it's time to offer `/handoff`, or your `/compact` to compact now, at a moment you choose. After
-  it reads a whole large file: a tip to read ranges (once per message). `/context` shows what fills the window (rules,
-  session context, files, outputs).
+  next model call won't fit the window (verified on 2.34–2.35.1): 512k for the Gemini 4 family (Neon, Carbon, Argon,
+  Hydrogen, every Orchestrator) and **Gemini 3.5 Flash-Lite**, 256k for Gemini 3.x Flash, 128k for 2.5/3.1 Flash-Lite,
+  840k for Claude 5.5, and 80k for GPT-OSS 120B (in the Antigravity CLI the window can be narrowed with `AGY_CLI_AUTO_COMPACT_OVERRIDE`: a token count, `800K`/`0.5M` or a percentage; the desktop app ignores it). So around
+  440k (220k on 256k models) the agent hears that compaction is near and it's time to offer `/handoff`, or your
+  `/compact` to compact now, at a moment you choose. After it reads a whole large file: a tip to read ranges (once per
+  message). `/context` shows what fills the window (rules, session context, files, outputs).
 - **Plan-limit hints (`hooks/quota.py`).** When the current model's quota group drops under 15% weekly or 10% 5-hour
   left, spends far ahead of the week's pace, or runs out, the main agent receives `<quota>` once with the exact numbers,
-  reset time and concrete ways to stretch it (`flash` subagents, Hydrogen or Orchestrator, `/handoff`).
+  reset time and concrete ways to stretch it (`flash`/`pro` subagents now run on Hydrogen and `flash_lite` on 3.5
+  Flash-Lite, switch models, or `/handoff`).
 - After three failed commands or edits in a row the agent stops, reads the error and changes its approach; code for
   a server or a container goes in a file piped to stdin, not into `python3 -c` with nested quotes.
 
@@ -804,7 +810,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
   for your system (`py -3 -X utf8` on Windows). The guard understands sh/bash/zsh, PowerShell and cmd.
 - **Claude Code:** `CLAUDE.md` with `@imports`, `.claude/rules`, `~/.claude/CLAUDE.md`, `.claude/commands`,
   `.claude/skills` and `.claude/agents` are picked up; project memory is shared. The other way round, the skill
-  `antigravity` lets Claude Code hand tasks to Antigravity agents (checked with Claude Code 2.1 and Antigravity 2.29).
+  `antigravity` lets Claude Code hand tasks to Antigravity agents (checked with Claude Code 2.1 and Antigravity 2.29–2.35.1).
 - `/mobile`: the iOS simulator on macOS with Xcode, the Android emulator on all three systems.
 - `/lsp`: language servers are installed separately and work on all three systems (sourcekit-lsp needs Xcode or Swift).
 - The agent answers in the language you write in. Some of the plugin's own messages (guard confirmations, `/doctor`)
