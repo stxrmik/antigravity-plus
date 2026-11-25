@@ -225,6 +225,35 @@ they install the saved choice.
   ended its turn to wait. The same `reply` lets Claude Code steer it any time: «also cover X», «leave Y alone».
 - Claude Code checks the result itself (the diff, its own test run) and can send a follow-up into the same
   conversation — the agent goes on with its context. The report includes their talk.
+- **Errors on Antigravity's side don't stop the work.** Antigravity sometimes ends a turn with an error («Stopped by
+  an error»: an API stream that broke off with `unexpected EOF`, even on the first model call). The task then goes on
+  by itself with a short «go on», up to 2 times (`run --retries N`, `delegate.py settings --retries N`). A background
+  supervisor does this even when nothing waits for the task. The report quotes the error instead of an empty «no
+  final message». Quota, permission and unknown-model errors aren't retried, and the report says why.
+- Commands the agent sent to the background show up in the report: how long each has run, its last line of output,
+  its log file and its processes (PIDs). So you can see what a `background` task waits for, and what to say about a
+  command that hangs.
+- The report lists the images the agent actually opened, with their sizes, and the ones it couldn't open. That is
+  the check that it really saw the frame sheet or the screenshot.
+- **A task queue.** With `--max-parallel N` (or once: `delegate.py settings --max-parallel N`) at most N tasks run at
+  once. The others wait in a queue (id `q-…`, first in `list`) and start by themselves when a slot frees up. A task
+  holds a slot while its conversation or its background work runs.
+- **One watch, no duplicates.** `delegate.py watch --follow` in Monitor follows every task of the session, later ones
+  included. Events are numbered (#1, #2 … per task), and none arrives twice, even with several watches running: a
+  newer one takes a task over from an older one. Before Monitor's 30-minute limit the watch ends with exit code 0 and
+  a hint to start it again.
+- **The price before the start.** `delegate.py estimate --model <tier>` shows what a task costs on each tier, from
+  your own past tasks: the share of the weekly quota (median and 9 in 10), API dollars, minutes, and how many such
+  tasks the rest of the week pays for. `run --dry-run` does the same for one brief without starting anything.
+  `budget` says whether the quota lasts until the reset: what the week has spent per day so far, and how much a day
+  lasts.
+- **Series.** Work that comes in pieces, each going on from the last, runs in one conversation: `run --series NAME …`,
+  then `next NAME "…"`. The next piece goes into the same conversation once the previous one is over, with its
+  context and cache. A new conversation reads Antigravity's whole prompt uncached, about 40k tokens on its first call
+  as measured. `--template FILE` puts shared templates before the brief, once in a series. When the context is nearly
+  full, or with `--fresh`, the next piece starts a new conversation that gets the templates and the last report.
+- `delegate.py wake` starts Antigravity and waits until it is ready, up to 3 minutes after a reboot. `run` waits the
+  same way, so the first task isn't lost.
 - The agent may not commit, push or deploy; it asks Claude Code, not you. When the guard asks for a confirmation,
   Claude Code doesn't approve it itself; it tells you that a decision waits for you in Antigravity.
 - The saving: the agent's reading, editing and test runs come out of the Antigravity quota; Claude Code spends tokens
@@ -269,6 +298,12 @@ they install the saved choice.
   reminded once to ask the server.
 
 ### 🏎️ Speed, context and quota
+- **Agents don't slow your own work.** Agents' commands can run at a lower priority: `/settings` → `agent-priority
+  below_normal` or `idle`. Your render, build or game then comes first, and whatever an agent's command starts
+  inherits its priority. You can also cap how many heavy programs of agents (ffmpeg, blender, HandBrakeCLI,
+  xcodebuild, gradle…) run at once: `heavy-max N`. A command over the limit waits up to 20 s, then the guard refuses
+  it and names what already runs. Both limits hold in Bypass Mode too, and the agent can change them only with your
+  confirmation.
 - A command that failed in Antigravity's terminal sandbox and worked with `BypassSandbox` is remembered for the
   project: in new conversations the agent runs it outside the sandbox right away, without a wasted run. A command
   that works inside the sandbox twice is forgotten; with the sandbox off, the list isn't shown.
@@ -766,9 +801,21 @@ Good to know:
   default), and when the agent stops at a guard confirmation or asks Claude Code something it reports at once.
   Changed files come from Antigravity (what the agent wrote with its tools), changes made by its commands from
   `git status`.
-- The rest: `budget` (both sides' limits, what each tier takes now, how much to hand over), `models` (every model:
-  quota left, price, measured speed), `wait`, `watch`, `reply`, `result`, `diff`, `send` (a follow-up in the same
-  conversation), `cancel`, `list`. Tasks and their talk are recorded in `~/.gemini/antigravity-plus/delegate/`.
+- The rest: `budget` (both sides' limits, whether the week lasts until the reset, what each tier takes now, how much
+  to hand over), `estimate` (what a task costs, from your past tasks), `models` (every model: quota left, price,
+  measured speed), `wait`, `watch [--follow]`, `reply`, `result`, `diff`, `send` (a follow-up in the same
+  conversation), `next` / `series` (series), `cancel`, `list`, `settings` (`--max-parallel`, `--retries`), `wake`.
+  Tasks and their talk are recorded in `~/.gemini/antigravity-plus/delegate/`.
+- An error Antigravity ended a turn with (`EXECUTOR_TERMINATION_REASON_ERROR`; an `ERROR_MESSAGE` step in the
+  conversation) is answered by whoever looks at the task first: `wait`, `watch`, `result` or the background
+  `delegate.py supervise`. It sends «go on» once per error; the task record, written under a lock, keeps it from
+  happening twice. The supervisor starts by itself with a task, keeps `supervisor.log`, starts queued tasks and ends
+  when no task is active. It never starts Antigravity, and it ends when Antigravity has been closed for 10 minutes.
+- `watch` claims each event in the task's record (`told`, the `events` counter) before printing it, and leases the task
+  (`watcher`): a newer watch takes it over and the older one goes quiet.
+- Background commands are `RUN_COMMAND` steps with `taskDetails` (title, log, last line of output, when they moved to
+  the background). Their processes are found under the language server by the text of the command line. Images are
+  `VIEW_FILE` steps with a picture.
 - The «Token usage» panel shows these conversations with their real model (from the task record; for other
   conversations started through agentapi, from Antigravity's own metadata) and the task's name instead of the run
   rules; Claude Code's follow-ups are turns of their own.
@@ -808,6 +855,8 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 | Git checks: commands that would hang, a rebase or merge left half done | "don't check git commands" | `git-checks` |
 | Type errors from the language server after an edit, the `/lsp` hint | "don't check types after edits" | `lsp-checks` |
 | Inline UI banners (`user_markdown`: Bypass, quota, updates) | "turn UI banners off" | `ui-notices` |
+| The OS priority of agents' commands (normal by default), so they don't slow your render or build | "run agents' commands at a lower priority": `below_normal` or `idle`, back with `normal` | `agent-priority` |
+| At most N heavy programs of agents at once (ffmpeg, blender, HandBrakeCLI, xcodebuild, gradle…; no limit by default) | "at most one ffmpeg for the agents": `1`; `0` for no limit | `heavy-max`, the list: `heavy-programs` |
 
 ## Platforms and compatibility
 

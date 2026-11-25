@@ -8,27 +8,53 @@ exit codes, and what the run cost. The reading, editing and test runs happen on 
 instead of Claude's tokens, and in parallel with Claude's own work.
 
   delegate.py budget [--claude-5h PCT] [--claude-week PCT]   the limits left (Antigravity's, and Claude's own when
-                                               known), what each tier takes now, and how much to hand over
+                                               known), whether they last until the reset (% per day), what each tier
+                                               takes now, and how much to hand over
   delegate.py models [--json]                  every model: quota left, price, measured speed; the tiers
-  delegate.py run --model M [--cwd DIR] [--title T] [--timeout SEC] [--no-wait] [BRIEF]   (no BRIEF: read stdin)
+  delegate.py estimate [--model M]             before handing over: what a task costs on each tier here, in share of
+                                               the weekly quota, API dollars and minutes — from your own past tasks
+  delegate.py run --model M [--cwd DIR] [--title T] [--timeout SEC] [--no-wait] [--template FILE …]
+                  [--series NAME] [--retries N] [--max-parallel N] [--dry-run] [BRIEF]   (no BRIEF: read stdin)
+  delegate.py next NAME [--fresh] [--no-wait] [BRIEF]   the next piece of a series (run --series NAME): the same
+                                               conversation, after the previous piece is over — its context and
+                                               cache carry over; --fresh (or a nearly full context) starts a new one
+  delegate.py series NAME                      the pieces of a series and how each ended
   delegate.py wait ID [--timeout SEC]          wait for a task, then print its report
   delegate.py result ID [--full]               the report of a task again
   delegate.py diff ID [PATH …] [--stat]        what the agent changed, as a unified diff
-  delegate.py watch [ID …] [--timeout SEC]     for Claude Code's Monitor tool: one line per event while tasks run —
-                                               the agent's questions and messages, an approval it waits for, the end
+  delegate.py watch [ID …] [--follow] [--timeout SEC]   for Claude Code's Monitor tool: one numbered line per event
+                                               while tasks run — the agent's questions and messages, an approval it
+                                               waits for, a resume after an error, the end; --follow also takes the
+                                               tasks this session starts later. One watcher per task: a newer watch
+                                               takes a task over, so events never arrive twice
   delegate.py reply ID MESSAGE                 answer the agent's question, or tell it something while it works
   delegate.py send ID MESSAGE [--no-wait]      a follow-up in the same conversation (the agent keeps its context)
-  delegate.py cancel ID                        stop a task
-  delegate.py list                             recent tasks
+  delegate.py cancel ID                        stop a task (or take a queued one off the queue)
+  delegate.py list                             recent tasks, queued ones included
+  delegate.py settings [--max-parallel N] [--retries N]   the bridge's defaults: how many tasks run at once (more
+                                               wait in a queue), how many times a task stopped by an error is resumed
+  delegate.py wake [--timeout SEC]             start Antigravity if it isn't running and wait until it is ready
   delegate.py statusline                       for Claude Code's statusLine in a terminal: remembers its rate_limits
+  delegate.py supervise                        (starts by itself) starts queued tasks when a slot frees up and
+                                               resumes tasks Antigravity stopped with an error, while any are active
 
 Run by the Antigravity agent in its own terminal, to talk back (the brief gives it the exact commands):
   delegate.py ask "QUESTION"                   a question for Claude Code; the answer arrives in its conversation
   delegate.py tell "MESSAGE"                   something Claude Code should know now; no answer needed
 
-An ID may be shortened to a unique prefix (8 characters are plenty). Exit codes: 0 finished, 1 error, 2 needs
-attention (an approval waits in Antigravity, or the task was canceled or failed), 3 still running after --timeout,
-4 the agent asks Claude Code a question and waits for the answer (`reply`, then `wait` again).
+An ID may be shortened to a unique prefix (8 characters are plenty); a queued task has an id «q-…» until it starts.
+Exit codes: 0 finished, 1 error, 2 needs attention (an approval waits in Antigravity, or the task was canceled or
+failed), 3 still running after --timeout, 4 the agent asks Claude Code a question and waits for the answer (`reply`,
+then `wait` again).
+
+Errors: when Antigravity ends a turn with an error (an API stream that broke off — «unexpected EOF» —, even on the
+first model call), the task is resumed with a short «go on» message after RETRY_DELAY seconds, up to --retries times
+(2 by default; never for quota, permission or model errors). Whoever notices first resumes it — the supervisor, a
+wait, a watch —, the task's record keeps the others from doing it twice, and the report quotes the error.
+
+Queue: with --max-parallel N (or `settings --max-parallel N`), a task that would be the N+1th running one waits in
+a queue; the supervisor (a small background process of this script that ends when nothing is left) starts it when
+one finishes. A task counts while its conversation runs or its background work does.
 
 Talking while it works: `ask` and `tell` only print — a JSON line `{"to_claude_code": …}` with the text and an id.
 Claude Code's side finds those lines in the conversation itself (the command's output, or the message Antigravity
@@ -58,6 +84,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import contextlib
 import difflib
 import http.client
 import json
@@ -110,7 +137,20 @@ IDLE_GRACE = float(os.environ.get("AGP_DELEGATE_IDLE_GRACE") or 240)  # turn ove
 WATCH_POLL = float(os.environ.get("AGP_DELEGATE_WATCH_POLL") or 3)    # seconds between two looks of `watch`
 WATCH_TIMEOUT = 1780  # `watch` stops on its own just before the Monitor tool's 30-minute limit, saying how to go on
 IDLE_PROBE = float(os.environ.get("AGP_DELEGATE_IDLE_PROBE") or 2)  # seconds: does work it started still run?
-NOT_OVER = ("running", "question", "approval", "background", "timeout")  # a task record's states until it is over
+NOT_OVER = ("running", "question", "approval", "background", "timeout", "queued")  # a record's states until it is over
+BRIDGE_SETTINGS = os.path.join(TASKS, "settings.json")  # `delegate.py settings`: the bridge's own defaults
+BRIDGE_DEFAULTS = {"max_parallel": 0, "retries": 2}      # tasks at once (0: no limit); resumes per task after errors
+SUPERVISOR_LOCK = os.path.join(TASKS, ".supervisor.lock")
+SUPERVISOR_LOG = os.path.join(TASKS, "supervisor.log")
+DISPATCH_LOCK = os.path.join(TASKS, ".dispatch.lock")  # counting the running tasks and starting one: slots()
+START_TIMEOUT = float(os.environ.get("AGP_DELEGATE_START_TIMEOUT") or 180)  # seconds for a just-started Antigravity
+RETRY_DELAY = float(os.environ.get("AGP_DELEGATE_RETRY_DELAY") or 20)       # seconds after an error before a resume
+SUPERVISE_IDLE = float(os.environ.get("AGP_DELEGATE_SUPERVISE_IDLE") or 90)  # the supervisor ends after this long idle
+PROMPT_LIMIT = 30000  # characters of a whole first message (rules, templates, brief): it goes on agentapi's command line
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".avif")
+# Share of a week's quota one API dollar takes (forced quota reads, 2026-11): Gemini 4 Hydrogen/Neon ~0.042%,
+# Carbon ~0.125%, Claude ~2.5%. `estimate` uses what your own tasks measured first, these when it has too few.
+PCT_PER_USD = (("claude", 2.5), ("gpt", 2.5), ("carbon", 0.125), ("", 0.042))  # first word in the label wins
 
 # Tiers → model ids, best first; the limits left reorder them (see the docstring). Chosen from two benchmarks:
 # 1) 2026-11-20 (Antigravity 2.33.0): five tasks with hidden tests (from a small function to a security fix in guard.py,
@@ -215,17 +255,25 @@ Rules for this run:
    Its answers and messages arrive in this conversation as messages starting with "Claude Code"; follow them like this task. Ask only when a wrong guess would cost real rework — otherwise choose the most reasonable option and say so in your report. After asking, go on with what doesn't depend on the answer; if nothing is left, end your turn with one line saying what you wait for — the answer wakes you up. Don't poll, sleep or ask the same thing twice. Don't ask for approvals this way, and never send secrets.
 3. Keep going with tool calls until the task is done — a message without a tool call ends your run.
 4. After your last change, run the checks the task names (or the tests or build of the code you touched) and fix what fails.
-5. Stop any server or watcher you started before you finish.
+5. Stop any server or watcher you started before you finish. When you end your turn to wait for a long command running in the background, say in one line which command you wait for.
 6. End with one message in this format, under 250 words, without file contents:
 STATUS: done | partial | blocked
 CHANGED: <path> — <what changed> (one line per file, or "nothing")
 CHECKS: <command> → <result, with the exact numbers> (or "none")
 NOTES: <choices you made, what is left, risks> (or "none")
 
-{where}
+{reference}{where}
 
 Task:
 {brief}"""
+REFERENCE = "Reference for this kind of task (part of the task, the same in every task like it):\n\n{text}\n\n"
+# Sent when Antigravity ended the agent's turn with an error (an API stream that broke off, …): see auto_resume()
+RESUME_ERROR = ("Antigravity stopped your last turn with an error{what} — a hiccup on its side, not a problem with the "
+                "task. Go on from where you stopped; check what your last steps did before you repeat one. Same rules "
+                "as before.")
+PIECE = "Piece {n} of the series «{name}»:\n{message}"
+FRESH_SERIES = ("This continues the series «{name}»: pieces 1–{done} ran in an earlier conversation, and what they made is "
+                "in the project's files. The last piece's report:\n{last}\n\n")
 
 FOLLOW_UP = ("Follow-up from Claude Code: {message}\n\n(Same rules as before: questions go to Claude Code with the ask "
              "command, check your work after the last change, end with the STATUS / CHANGED / CHECKS / NOTES report.)")
@@ -257,8 +305,17 @@ EMPTY_SHA256 = "47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="  # base64 SHA-256 
 # ─────────────────────────────── the language server ───────────────────────────────
 
 class LS:
-    def __init__(self, addr: str, token: str, exe: str = ""):
-        self.addr, self.token, self.exe = addr, token, exe
+    def __init__(self, addr: str, token: str, exe: Optional[str] = "", pid: int = 0):
+        self.addr, self.token, self.pid = addr, token, pid
+        self._exe = exe  # None: not looked up yet (see executable())
+
+    @property
+    def exe(self) -> str:
+        """The language server's executable, which also runs agentapi — looked up the first time it is needed (on
+        Windows that takes a PowerShell call, which the supervisor would otherwise make every few seconds)."""
+        if self._exe is None:
+            self._exe = compat.ls_executable(self.pid) if self.pid else ""
+        return self._exe
 
 
 def discover() -> Optional[LS]:
@@ -268,8 +325,32 @@ def discover() -> Optional[LS]:
     found = compat.language_server()
     if not found:
         return None
-    exe = os.environ.get("ANTIGRAVITY_AGENTAPI_EXE", "") if found.source == "env" else compat.ls_executable(found.pid)
-    return LS(found.addr, found.token, exe)
+    exe = os.environ.get("ANTIGRAVITY_AGENTAPI_EXE", "") if found.source == "env" else None
+    return LS(found.addr, found.token, exe, found.pid)
+
+
+def spawn_detached(cmd: List[str], env: Optional[dict] = None, gui: bool = False) -> bool:
+    """Start a process that outlives this one (and the terminal command that ran this script): its own session on
+    macOS/Linux; on Windows in its own process group and — where the job this runs in allows it — out of that job,
+    so a tool runner that kills its job on exit doesn't take it along. A console program (the supervisor) gets a
+    hidden console of its own (CREATE_NO_WINDOW), so the git, agentapi and PowerShell it starts flash no window — a
+    DETACHED_PROCESS would have none, and each of them would open one; an app (`gui`: Antigravity) is detached.
+    True if it started."""
+    base = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, close_fds=True)
+    if not compat.WINDOWS:
+        try:
+            subprocess.Popen(cmd, start_new_session=True, **base)
+            return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+    mode = 0x00000008 if gui else 0x08000000  # DETACHED_PROCESS for an app, CREATE_NO_WINDOW for a console program
+    for flags in (mode | 0x00000200 | 0x01000000, mode | 0x00000200):  # … | NEW_PROCESS_GROUP (| BREAKAWAY_FROM_JOB)
+        try:
+            subprocess.Popen(cmd, creationflags=flags, **base)
+            return True
+        except (OSError, subprocess.SubprocessError):  # a job without breakaway refuses the first: try without it
+            continue
+    return False
 
 
 def launch() -> bool:
@@ -282,30 +363,49 @@ def launch() -> bool:
                     return True
             return False
         exe = compat.antigravity_node()
-        if not exe:
-            return False
-        detach = ({"creationflags": 0x00000008 | 0x00000200} if compat.WINDOWS  # DETACHED_PROCESS | NEW_PROCESS_GROUP
-                  else {"start_new_session": True})
-        subprocess.Popen([exe], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **detach)
-        return True
+        return bool(exe) and spawn_detached([exe], gui=True)
     except (OSError, subprocess.SubprocessError):
         return False
 
 
-def connect() -> LS:
+def connect(timeout: Optional[float] = None) -> LS:
+    """The running language server — after starting Antigravity when it isn't running and waiting for it: right after
+    a cold start (a reboot, an update) it takes a minute or more to come up and sign in, so up to START_TIMEOUT
+    seconds (AGP_DELEGATE_START_TIMEOUT; `wake --timeout`)."""
     ls = discover()
     if ls:
         return ls
+    limit = START_TIMEOUT if timeout is None else timeout
     if not os.environ.get("AGP_DELEGATE_NO_LAUNCH") and launch():
-        print("Antigravity wasn't running — started it in the background.", flush=True)
-        deadline = time.time() + 90
+        print(f"Antigravity wasn't running — started it in the background; waiting for it (up to {span(limit)}) …",
+              flush=True)
+        deadline = time.time() + limit
         while time.time() < deadline:
             time.sleep(2)
             ls = discover()
             if ls:
+                ready_models(ls, deadline)
                 return ls
+        raise Failure(f"Antigravity was started but its language server didn't come up within {span(limit)}. It may "
+                      "wait for the user (sign-in, an update): ask them to look at it — or run `delegate.py wake "
+                      "--timeout 600` and retry, or do the work yourself.")
     raise Failure("Antigravity isn't running and couldn't be started from here. Ask the user to open Antigravity "
                   "(signed in), then retry — or do the work yourself.")
+
+
+def ready_models(ls: "LS", deadline: float) -> int:
+    """Wait until a just-started Antigravity lists its models (it is signed in); how many it lists (0: not yet)."""
+    while True:
+        try:
+            d = rpc(ls, "GetCascadeModelConfigData", {})
+            n = len([c for c in d.get("clientModelConfigs") or [] if isinstance(c, dict) and c.get("modelId")])
+            if n:
+                return n
+        except SOFT:
+            pass
+        if time.time() >= deadline:
+            return 0
+        time.sleep(2)
 
 
 def rpc(ls: LS, method: str, body: dict, timeout: float = 20.0) -> dict:
@@ -486,14 +586,52 @@ def state_of(group: Optional[dict], now: Optional[float] = None) -> dict:
         status = "spend"
     else:
         status = "ok"
-    if pace is not None:
-        parts.append("spending faster than the week lasts" if pace < 0.85 else "on pace" if pace < 1.5
-                     else "far behind pace")
-    return {"status": status, "week": week, "h5": five, "pace": pace, "text": ", ".join(parts) or "?"}
+    out = {"status": status, "week": week, "h5": five, "pace": pace, "lasts": None, "allow": None, "forecast": ""}
+    if week is not None and wreset and wreset > now:
+        out.update(forecast(week, wreset, now))
+    return dict(out, text=", ".join(parts) or "?")
+
+
+def pct(x: float) -> str:
+    """A percentage for a person: 12%, 3.4%, 0.42%, 0.012%."""
+    if x >= 9.95:
+        return f"{x:.0f}%"
+    if x >= 0.995:
+        return f"{x:.1f}%"
+    return f"{x:.2g}%" if x > 0 else "0%"
+
+
+def forecast(week: float, reset: float, now: float) -> dict:
+    """Does the week's quota last until it resets? From the fraction left and the reset time: how much a day keeps it
+    lasting from now (`allow`, % per day), what the week has spent per day since it began (`spent`), and whether it
+    lasts at that pace (`lasts`: True / False / None when it's too early to tell) — with the text for a person."""
+    days_left = max((reset - now) / 86400, 0.01)
+    elapsed = 7 - days_left
+    allow = week * 100 / days_left
+    used = (1 - week) * 100
+    if elapsed < 0.25 or used <= 0.05:
+        return {"allow": allow, "spent": None, "lasts": None,
+                "forecast": f"{pct(allow)} a day lasts until the reset"}
+    spent = used / elapsed
+    runs = week * 100 / spent  # days the rest lasts at this week's pace
+    if runs >= days_left:
+        text = f"spent {pct(spent)} a day so far → at that pace it lasts until the reset ({pct(allow)} a day would)"
+    else:
+        text = (f"spent {pct(spent)} a day so far → at that pace it runs out ~{span((days_left - runs) * 86400)} "
+                f"before the reset; {pct(allow)} a day would last")
+    return {"allow": allow, "spent": spent, "lasts": runs >= days_left, "forecast": text}
 
 
 STATE_TEXT = {"spend": "quota to spare — use it", "ok": "fine", "tight": "tight — save it",
               "exhausted": "unavailable"}
+
+
+def verdict(s: dict) -> str:
+    """The word on a group's state that agrees with its forecast: «fine» only while the quota lasts until the
+    reset at this week's pace."""
+    if s["status"] == "ok" and s.get("lasts") is False and s.get("allow") is not None:
+        return f"fine for now — keep to about {pct(s['allow'])} a day"
+    return STATE_TEXT[s["status"]]
 
 
 def experimental(ms: List[dict]) -> List[Tuple[dict, str]]:
@@ -758,22 +896,58 @@ def prices() -> List[dict]:
     return []
 
 
-def price(label: str, table: List[dict], day: str = "") -> str:
-    """«$2/$10 per 1M» (input/output) from pricing.json, with its price changes dated on or before `day` (YYYY-MM-DD,
-    default today, local time — as the usage panel prices calls)."""
+def rates_of(label: str, table: List[dict], day: str = "") -> Optional[dict]:
+    """The pricing.json entry for a model label, with its price changes dated on or before `day` (YYYY-MM-DD, default
+    today, local time — as the usage panel prices calls); None when it isn't priced."""
     day = day or time.strftime("%Y-%m-%d")
     for m in table:
         try:
             if re.search(m["match"], label, re.I):
+                if m.get("unpriced") or "input" not in m or "output" not in m:
+                    return None
                 rate = dict(m)
                 for ch in sorted((c for c in m.get("price_changes") or [] if isinstance(c, dict)),
                                  key=lambda c: str(c.get("from"))):
                     if str(ch.get("from") or "9999") <= day:
                         rate.update(ch)
-                return f"${rate['input']:g}/${rate['output']:g} per 1M"
+                return rate
         except (re.error, KeyError, TypeError, ValueError):
             continue
-    return ""
+    return None
+
+
+def price(label: str, table: List[dict], day: str = "") -> str:
+    """«$2/$10 per 1M» (input/output) from pricing.json."""
+    rate = rates_of(label, table, day)
+    try:
+        return f"${rate['input']:g}/${rate['output']:g} per 1M" if rate else ""
+    except (KeyError, TypeError, ValueError):
+        return ""
+
+
+def call_cost(label: str, fresh: int, cached: int, out: int, table: List[dict]) -> Optional[float]:
+    """One model call at API prices, in dollars, as usage.py prices it (Claude bills uncached input as a cache write);
+    None when the model isn't priced."""
+    rate = rates_of(label, table)
+    if not rate:
+        return None
+    try:
+        in_rate = float(rate.get("cache_write", rate["input"]) if rate.get("uncached_input_as_cache_write")
+                        else rate["input"])
+        return (fresh * in_rate + cached * float(rate.get("cache_read", rate["input"])) + out * float(rate["output"])) / 1e6
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def window_of(label: str, table: List[dict]) -> int:
+    """The context window Antigravity gives this model (pricing.json `context_window`), 512k when unknown."""
+    for m in table:
+        try:
+            if re.search(m["match"], label, re.I) and isinstance(m.get("context_window"), int):
+                return int(m["context_window"])
+        except (re.error, KeyError, TypeError):
+            continue
+    return 512000
 
 
 # ─────────────────────────────── projects ───────────────────────────────
@@ -918,6 +1092,76 @@ def update(task: dict, **fields) -> dict:
     return task
 
 
+def load(task_id: str) -> Optional[dict]:
+    """A task's record as it is on disk now, None when there is none."""
+    try:
+        with open(os.path.join(TASKS, task_id + ".json"), encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) and d.get("id") == task_id else None
+
+
+def transact(task: dict, change) -> bool:
+    """Re-read a task's record under the lock and let `change(record)` edit it; True from it saves the record. A
+    check-and-set: of two processes that see the same event (the supervisor and a watch, two watches) only one acts
+    on it. `task` gets the record's current fields either way. Returns what `change` returned."""
+    os.makedirs(TASKS, exist_ok=True)
+    with open(os.path.join(TASKS, ".lock"), "a+", encoding="utf-8") as fh:
+        compat.lock(fh)
+        try:
+            rec = load(task["id"]) or dict(task)
+            done = bool(change(rec))
+            if done:
+                save(rec)
+        finally:
+            compat.unlock(fh)
+    task.clear()
+    task.update(rec)
+    return done
+
+
+def claim_events(task: dict, keys: List[str], shown: List[str]) -> Tuple[set, int]:
+    """Mark events as told to Claude Code, under the lock: returns the keys nobody had told yet, and the number the
+    first newly told one of `shown` gets (each task numbers the events it printed 1, 2, 3 … across all watches)."""
+    new: set = set()
+    first = [0]
+
+    def change(rec: dict) -> bool:
+        told = set(rec.get("told") or [])
+        new.update(k for k in keys if k not in told)
+        if not new:
+            return False
+        first[0] = int(rec.get("events") or 0) + 1
+        rec["told"] = sorted(told | new)
+        rec["events"] = int(rec.get("events") or 0) + len([k for k in shown if k in new])
+        return True
+
+    transact(task, change)
+    return new, first[0]
+
+
+def bridge_settings() -> dict:
+    """The bridge's own defaults (`delegate.py settings`): max_parallel (tasks running at once; 0 = no limit) and
+    retries (resumes per task after Antigravity stops it with an error). AGP_DELEGATE_MAX_PARALLEL and
+    AGP_DELEGATE_RETRIES override them."""
+    s = dict(BRIDGE_DEFAULTS)
+    try:
+        with open(BRIDGE_SETTINGS, encoding="utf-8") as f:
+            d = json.load(f)
+        for key in BRIDGE_DEFAULTS:
+            v = d.get(key) if isinstance(d, dict) else None
+            if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 50:
+                s[key] = v
+    except (OSError, ValueError):
+        pass
+    for key, var in (("max_parallel", "AGP_DELEGATE_MAX_PARALLEL"), ("retries", "AGP_DELEGATE_RETRIES")):
+        v = (os.environ.get(var) or "").strip()
+        if v.isdigit():
+            s[key] = min(int(v), 50)
+    return s
+
+
 def records() -> List[dict]:
     out = []
     try:
@@ -933,7 +1177,7 @@ def records() -> List[dict]:
                 continue
             if isinstance(d, dict) and isinstance(d.get("id"), str):
                 out.append(d)
-    out.sort(key=lambda d: d.get("started") or 0, reverse=True)
+    out.sort(key=lambda d: float(d.get("started") or d.get("queued") or 0), reverse=True)  # a queued one: when queued
     return out
 
 
@@ -945,7 +1189,9 @@ def prune() -> None:
             pass
 
 
-def task_for(ident: str) -> dict:
+def task_for(ident: str, follow: bool = True) -> dict:
+    """The task record an id (or a unique prefix of one) names. A queued task («q-…») that has started meanwhile
+    stands for the task it became (unless `follow` is False)."""
     ident = (ident or "").strip()
     if not re.fullmatch(r"[\w-]{4,80}", ident):
         raise Failure(f"not a task id: {ident!r}")
@@ -953,6 +1199,8 @@ def task_for(ident: str) -> dict:
     if len(hits) > 1:
         raise Failure(f"{ident!r} matches {len(hits)} tasks — give more of the id.")
     if hits:
+        if follow and hits[0].get("state") == "started" and hits[0].get("started_as"):
+            return load(str(hits[0]["started_as"])) or hits[0]
         return hits[0]
     if re.fullmatch(r"[0-9a-fA-F-]{36}", ident):  # a conversation started some other way: work with it anyway
         return {"id": ident, "cwd": os.getcwd(), "root": os.getcwd(), "turn": 0, "label": "", "model": "",
@@ -967,11 +1215,30 @@ def talk_command(verb: str) -> str:
     return f'{compat.python_cmd()} "{os.path.abspath(__file__)}" {verb} "{text}"'
 
 
-def compose(brief: str, folder: str, root: str) -> str:
+def compose(brief: str, folder: str, root: str, reference: str = "") -> str:
+    """The first message of a task: the run rules, the reference texts (--template), the folder, the task — the
+    parts that change from task to task last."""
     where = f"Working folder: {folder}" + ("" if os.path.normcase(folder) == os.path.normcase(root)
                                            else f" (inside the workspace {root})")
+    ref = REFERENCE.format(text=reference.strip()) if reference.strip() else ""
     return RULES.format(mark=MARK, where=where, brief=brief.strip(), ask=talk_command("ask"),
-                        tell=talk_command("tell"))
+                        tell=talk_command("tell"), reference=ref)
+
+
+def read_templates(paths: List[str]) -> str:
+    """The text of --template files, each under a heading with its name."""
+    parts = []
+    for p in paths or []:
+        try:
+            with open(p, encoding="utf-8-sig") as f:
+                text = f.read().strip()
+        except UnicodeDecodeError:
+            raise Failure(f"the template {p} isn't UTF-8 text — save it as UTF-8.")
+        except OSError as e:
+            raise Failure(f"can't read the template {p}: {e}")
+        if text:
+            parts.append(f"## {os.path.basename(p)}\n{text}")
+    return "\n\n".join(parts)
 
 
 def title_of(brief: str, given: str) -> str:
@@ -980,15 +1247,158 @@ def title_of(brief: str, given: str) -> str:
     return "Claude Code: " + (t[:60].rstrip() + "…" if len(t) > 60 else t)
 
 
+# ─────────────────────────────── errors: resuming a stopped turn ───────────────────────────────
+
+# An error a «go on» won't fix: the plan's quota, permissions, a model Antigravity doesn't offer, a prompt too long.
+PERMANENT_ERROR = re.compile(r"(?i)quota|resource[ _]?exhausted|exceeded your|billing|credits\b|permission denied|"
+                             r"unauthori[sz]ed|forbidden|not (?:found|supported)|invalid (?:argument|model|request)|"
+                             r"unsupported|context (?:length|window)|too many tokens|(?:prompt|input) is too long")
+SLOW_ERROR = re.compile(r"(?i)\b429\b|rate.?limit|too many requests|overloaded|capacity|try again later")
+
+
+def error_text(st: dict) -> str:
+    """A step's error message on one line: an ERROR_MESSAGE step's, or a failed step's own."""
+    em = st.get("errorMessage") if isinstance(st.get("errorMessage"), dict) else {}
+    err = em.get("error") if isinstance(em.get("error"), dict) else st.get("error")
+    err = err if isinstance(err, dict) else {}
+    text = err.get("shortError") or err.get("fullError") or err.get("message") or em.get("message") or ""
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def turn_error(steps: List[dict], base: int = 0) -> Tuple[str, int]:
+    """What ended a turn Antigravity stopped with an error: the newest error of a model call in `steps` (numbered
+    from `base`) — an ERROR_MESSAGE step («API error (attempt 1): stream reading error: unexpected EOF») or a model
+    response that broke off —, else a failed step among the last three. ("", -1) when there is none."""
+    model, other = ("", -1), ("", -1)
+    last = base + len(steps) - 1
+    for i, st in enumerate(steps, base):
+        kind, failed = str(st.get("type") or ""), st.get("status") == "CORTEX_STEP_STATUS_ERROR"
+        if kind == "CORTEX_STEP_TYPE_ERROR_MESSAGE" or (failed and kind == "CORTEX_STEP_TYPE_PLANNER_RESPONSE"):
+            model = (error_text(st) or model[0], i)
+        elif failed and i >= last - 2:
+            other = (error_text(st), i)
+    return model if model[1] >= 0 else other
+
+
+def stopped_by_error(s: dict) -> bool:
+    return (str(s.get("status") or "") == "CASCADE_RUN_STATUS_IDLE"
+            and str(s.get("latestExecutorTerminationReason") or "") == "EXECUTOR_TERMINATION_REASON_ERROR")
+
+
+def turn_resumes(task: dict) -> List[dict]:
+    """The resumes after errors in the task's current turn: --retries counts per turn (a follow-up or the next piece
+    of a series starts with all of them again)."""
+    turn = int(task.get("turn") or 0)
+    return [r for r in task.get("resumes") or [] if int(r.get("count") or 0) > turn]
+
+
+def resume_state(task: dict, s: dict) -> str:
+    """For a task whose conversation is idle: "due" when Antigravity ended its turn with an error and it has
+    resumes left (run --retries), "wait" when the same error is younger than RETRY_DELAY seconds, "" otherwise (it
+    ended another way, it was canceled, no resumes left or none asked for, this error was resumed or judged not
+    worth it already, or the stop is hours old — then it's the user's call)."""
+    if not task.get("retries_max") or task.get("state") == "canceled" or not stopped_by_error(s):
+        return ""
+    count = int(s.get("stepCount") or 0)
+    done = turn_resumes(task)
+    if any(int(r.get("count", -1)) == count for r in task.get("resumes") or []) \
+            or int(task.get("no_resume_at", -1)) == count:
+        return ""
+    if len(done) >= int(task.get("retries_max") or 0):
+        return ""
+    when = parse_ts(str(s.get("lastModifiedTime") or "")) or 0.0
+    if when and time.time() - when > 6 * 3600:
+        return ""
+    return "wait" if when and time.time() - when < RETRY_DELAY else "due"
+
+
+def auto_resume(ls: LS, task: dict, s: Optional[dict] = None) -> Tuple[str, Optional[dict]]:
+    """Resume a task whose turn Antigravity ended with an error — an API stream that broke off, even on the first
+    model call — with a short «go on» message, up to its `retries_max` (run --retries). Once per error, by whoever
+    notices first (the supervisor, a wait, a watch, a result): the claim in the record keeps the others from sending
+    it too. Returns ("resumed", the entry — None when another process sent it), ("wait", None) while the error is
+    fresh or the send failed (it is tried again), or ("", None): nothing to resume, or an error a resume won't fix
+    (quota, permissions, a model Antigravity doesn't offer — kept in the record, so the report says so)."""
+    s = summary(ls, task["id"]) if s is None else s
+    state = resume_state(task, s)
+    if state != "due":
+        return state, None
+    count = int(s.get("stepCount") or 0)
+    base = max(int(task.get("turn") or 0), count - 40)
+    try:
+        steps = rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": task["id"], "stepOffset": base}, timeout=60).get("steps")
+    except SOFT:
+        return "wait", None
+    steps = [x for x in steps or [] if isinstance(x, dict)]
+    err, at = turn_error(steps, base)
+    culprit = steps[at - base] if 0 <= at - base < len(steps) else {}
+    from_model = str(culprit.get("type") or "") in ("CORTEX_STEP_TYPE_ERROR_MESSAGE", "CORTEX_STEP_TYPE_PLANNER_RESPONSE")
+    if from_model and PERMANENT_ERROR.search(err):  # a tool's own error («target content not found») decides nothing
+        update(task, no_resume_at=count, last_error=err[:300])
+        return "", None
+    when = parse_ts(str(s.get("lastModifiedTime") or "")) or 0.0
+    if SLOW_ERROR.search(err) and when and time.time() - when < 4 * RETRY_DELAY:
+        return "wait", None  # a rate limit: give it a little longer
+    entry = {"at": time.time(), "count": count, "step": at, "error": err[:300]}
+    taken = [False]  # another process resumed this error already
+
+    def claim(rec: dict) -> bool:
+        done = rec.get("resumes") or []
+        if any(int(r.get("count", -1)) == count for r in done):
+            taken[0] = True
+            return False
+        if rec.get("state") == "canceled" or len(turn_resumes(rec)) >= int(rec.get("retries_max") or 0):
+            return False  # stopped by the user meanwhile, or no resumes left in this turn
+        entry["n"] = len(turn_resumes(rec)) + 1
+        rec.update(resumes=done + [entry], state="running", since=count, last_error=err[:300])
+        return True
+
+    if not transact(task, claim):
+        return ("resumed", None) if taken[0] else ("", None)
+    text = MESSAGE.format(message=RESUME_ERROR.format(what=f" («{err[:200]}»)" if err else ""))
+    project = task.get("project") or ((find_project(task.get("cwd") or os.getcwd()) or ({"id": ""}, ""))[0]["id"])
+    try:
+        agentapi(ls, ["send-message", "--title=Claude Code", task["id"], text], project)
+    except Failure:
+        def undo(rec: dict) -> bool:  # not sent: the next look tries again
+            rec["resumes"] = [r for r in rec.get("resumes") or [] if int(r.get("count", -1)) != count]
+            return True
+        transact(task, undo)
+        return "wait", None
+    return "resumed", entry
+
+
+def resume_line(task: dict, r: dict) -> str:
+    """A resume after an error, as a watch event and a report line."""
+    err = f" («{r['error'][:160]}»)" if r.get("error") else ""
+    return (f"🔁 Antigravity task {task['id'][:8]}: Antigravity stopped its turn with an error{err} — resumed it "
+            f"automatically ({r.get('n', '?')} of {task.get('retries_max', '?')}); it goes on with its context")
+
+
 # ─────────────────────────────── waiting ───────────────────────────────
 
 def summary(ls: LS, cid: str) -> dict:
+    s = listed(ls, cid)
+    return s or {}
+
+
+def listed(ls: LS, cid: str) -> Optional[dict]:
+    """A conversation's summary; {} when Antigravity no longer lists it (deleted), None when it didn't answer in time
+    — a slow answer is no reason to call a task finished."""
     try:
         d = rpc(ls, "GetAllCascadeTrajectories", {}, timeout=30)
     except TIMEOUTS:
-        return {}
+        return None
     s = (d.get("trajectorySummaries") or {}).get(cid)
     return s if isinstance(s, dict) else {}
+
+
+GONE_AFTER = 120.0  # seconds: a conversation missing from Antigravity's list this long after its start is gone
+
+
+def gone(task: dict, s: Optional[dict]) -> bool:
+    """Antigravity answered, and no longer has this task's conversation (the user deleted it)."""
+    return s == {} and bool(task.get("started")) and time.time() - float(task["started"]) > GONE_AFTER
 
 
 def approval(ask: dict) -> dict:
@@ -1030,11 +1440,11 @@ def wait(ls: LS, task: dict, timeout: float) -> Tuple[str, dict]:
     Code something (`ask`) that no reply has answered yet. "background": the agent ended its turn but something it
     started (a subagent, a command) still runs for longer than IDLE_GRACE."""
     cid = task["id"]
-    since = max(int(task.get("turn") or 0), int(task.get("since") or 0))  # it must answer after this step
     began = time.time()
     deadline = began + max(timeout, 1.0)
-    offset, idle_since = since, None
+    offset, idle_since = max(int(task.get("turn") or 0), int(task.get("since") or 0)), None
     while True:
+        since = max(int(task.get("turn") or 0), int(task.get("since") or 0))  # it must answer after this step
         listen(ls, task)
         asked = open_questions(task)
         if asked:
@@ -1048,7 +1458,18 @@ def wait(ls: LS, task: dict, timeout: float) -> Tuple[str, dict]:
             asked = open_questions(task)
             if asked:
                 return "question", {"questions": asked}
-            if answered(ls, cid, since) or time.time() - began > 30:
+            s = listed(ls, cid)
+            if s is None:  # its summary didn't come in time: no reason to call it finished — look again
+                time.sleep(min(POLL, 5.0))
+                continue
+            if gone(task, s):
+                return "done", {"gone": True}
+            what, _ = auto_resume(ls, task, s)  # stopped by an error: resumed now, or after a short pause
+            if what:
+                time.sleep(min(POLL, 5.0))
+                continue
+            since = max(int(task.get("turn") or 0), int(task.get("since") or 0))
+            if answered(ls, cid, since) or time.time() - max(began, last_sent(task)) > 30:
                 return "done", {}
             time.sleep(1)
             continue
@@ -1081,13 +1502,17 @@ def background_runs(ls: LS, cid: str) -> bool:
 def last_sent(task: dict) -> float:
     """When Claude Code last wrote into the conversation: the start, a follow-up or a reply."""
     return max([float(task.get("started") or 0), float(task.get("sent") or 0)]
-               + [float(m.get("at") or 0) for m in task.get("chat") or [] if m.get("from") == "claude"])
+               + [float(m.get("at") or 0) for m in task.get("chat") or [] if m.get("from") == "claude"]
+               + [float(r.get("at") or 0) for r in task.get("resumes") or []])
 
 
-def idle_state(ls: LS, task: dict) -> str:
-    """A task whose conversation is IDLE, without waiting: "background" while something it started still runs,
-    "running" while a message from Claude Code hasn't been picked up yet (right after a start, a follow-up or a
-    reply it can look idle for a moment — `wait` gives it 30 s too), else "done"."""
+def idle_state(ls: LS, task: dict, s: Optional[dict] = None) -> str:
+    """A task whose conversation is IDLE, without waiting: "running" while it is about to be resumed after an error
+    (`s`: its summary, when the caller has it), "background" while something it started still runs, "running"
+    while a message from Claude Code hasn't been picked up yet (right after a start, a follow-up or a reply it can
+    look idle for a moment — `wait` gives it 30 s too), else "done"."""
+    if s is not None and resume_state(task, s):
+        return "running"
     if background_runs(ls, task["id"]):
         return "background"
     since = max(int(task.get("turn") or 0), int(task.get("since") or 0))
@@ -1099,7 +1524,11 @@ def idle_state(ls: LS, task: dict) -> str:
 def state_now(ls: LS, task: dict) -> Tuple[str, dict]:
     """Without waiting: "question", "running", "approval", "background" (it ended its turn, but something it
     started still runs) or "done"."""
-    status = summary(ls, task["id"]).get("status")
+    found = listed(ls, task["id"])
+    if gone(task, found):
+        return "done", {"gone": True}
+    s = found or {}
+    status = s.get("status")
     running = status in ("CASCADE_RUN_STATUS_RUNNING", "CASCADE_RUN_STATUS_BUSY")
     listen(ls, task, start=None if running else int(task.get("turn") or 0))
     asked = open_questions(task)
@@ -1108,7 +1537,11 @@ def state_now(ls: LS, task: dict) -> Tuple[str, dict]:
     if running:
         ask, _ = pending(ls, task["id"])
         return ("approval", ask) if ask else ("running", {})
-    return (idle_state(ls, task) if status == "CASCADE_RUN_STATUS_IDLE" else "done"), {}
+    if found is None:
+        return "running", {}  # Antigravity didn't answer in time: it can't be called finished from that
+    if status == "CASCADE_RUN_STATUS_IDLE" and auto_resume(ls, task, s)[0]:
+        return "running", {}  # stopped by an error: resumed now, or in a moment
+    return (idle_state(ls, task, s) if status == "CASCADE_RUN_STATUS_IDLE" else "done"), {}
 
 
 # ─────────────────────────────── talking while it works ───────────────────────────────
@@ -1239,7 +1672,12 @@ def deliver(ls: LS, task: dict, message: str, kind: str = "") -> Tuple[dict, boo
         raise Failure(f"Antigravity doesn't know conversation {task['id']}.")
     listen(ls, task)
     asked = open_questions(task)
-    message = message.strip()[:TALK_LIMIT]
+    message = message.strip()
+    limit = BRIEF_LIMIT if kind == "follow-up" else TALK_LIMIT  # more work (send, next) may be as long as a brief
+    if len(message) > limit:
+        raise Failure(f"the message has {len(message)} characters, more than the {limit} one "
+                      + ("follow-up" if kind == "follow-up" else "reply") + " takes — nothing was sent. Shorten it, "
+                      "or put the details in a file in the project and point to it.")
     if kind == "follow-up":
         text = FOLLOW_UP.format(message=message)
     elif asked:
@@ -1372,13 +1810,18 @@ def _count(u: dict, key: str) -> int:
     return int(v) if v.isdigit() else 0
 
 
-def usage(ls: LS, cid: str, turn: int) -> dict:
-    """Model calls and tokens since step `turn` (proto3 JSON: int64 counts come as strings)."""
+def usage(ls: LS, cid: str, turn: int, table: Optional[List[dict]] = None) -> dict:
+    """Model calls and tokens since step `turn` (proto3 JSON: int64 counts come as strings), what they cost at API
+    prices (`usd`; None when a model isn't priced), the turn's first call (`first`: its fresh and cached input — a
+    new conversation reads its whole prompt uncached) and the conversation's size at its newest call (`context`)."""
     try:
         d = rpc(ls, "GetCascadeTrajectoryGeneratorMetadata", {"cascadeId": cid}, timeout=60)
     except SOFT:
         return {}
-    tot = {"calls": 0, "input": 0, "cached": 0, "output": 0, "models": [], "by_label": {}}
+    table = prices() if table is None else table
+    tot = {"calls": 0, "input": 0, "cached": 0, "output": 0, "models": [], "by_label": {}, "usd": 0.0,
+           "first": None, "context": 0}
+    lowest, newest = None, -1
     for g in d.get("generatorMetadata") or []:
         if not isinstance(g, dict):
             continue
@@ -1387,17 +1830,116 @@ def usage(ls: LS, cid: str, turn: int) -> dict:
             continue
         cm = g.get("chatModel") or {}
         u = cm.get("usage") or {}
+        fresh, cached, out = _count(u, "inputTokens"), _count(u, "cacheReadTokens"), _count(u, "outputTokens")
         tot["calls"] += 1
-        tot["input"] += _count(u, "inputTokens")
-        tot["cached"] += _count(u, "cacheReadTokens")
-        tot["output"] += _count(u, "outputTokens")
+        tot["input"] += fresh
+        tot["cached"] += cached
+        tot["output"] += out
         name = str(cm.get("responseModel") or "")
         if name and name not in tot["models"]:
             tot["models"].append(name)
         label = str(cm.get("modelDisplayName") or name)  # Orchestrator: configurable Planner (Carbon/Neon/Opus) + Executor (Hydrogen/Sonnet)
         if label:
             tot["by_label"][label] = tot["by_label"].get(label, 0) + 1
+        cost = call_cost(label, fresh, cached, out, table)
+        tot["usd"] = None if cost is None or tot["usd"] is None else tot["usd"] + cost
+        lo, hi = (min(idx), max(idx)) if idx else (0, 0)
+        if lowest is None or lo < lowest:
+            lowest, tot["first"] = lo, {"input": fresh, "cached": cached}
+        if hi >= newest:
+            newest, tot["context"] = hi, fresh + cached + out
     return tot
+
+
+def background_commands(steps: List[dict], base: int = 0) -> List[dict]:
+    """The agent's commands that went to the background (Antigravity's `taskDetails`) in `steps` (numbered from
+    `base`): task id, title, command line, when it moved to the background, whether it still runs, its exit code,
+    its last line of output and its log file."""
+    finished: Dict[str, str] = {}  # task id → the notification Antigravity sent when it was over
+    for st in steps:
+        if st.get("type") == "CORTEX_STEP_TYPE_SYSTEM_MESSAGE":
+            msg = (st.get("systemMessage") or {}).get("agentMessage") or {}
+            m = re.match(r'Task id "([^"]+)" finished with result', str(msg.get("content") or "")) \
+                if isinstance(msg, dict) else None
+            if m:
+                finished[m.group(1)] = str(msg.get("content") or "")
+    out = []
+    for i, st in enumerate(steps, base):
+        td = st.get("taskDetails")
+        if st.get("type") != "CORTEX_STEP_TYPE_RUN_COMMAND" or not isinstance(td, dict) or not td.get("movedToBackgroundAt"):
+            continue
+        rc = st.get("runCommand") or {}
+        tid = str(td.get("id") or "")
+        done = finished.get(tid, "")
+        code = rc.get("exitCode")
+        if not isinstance(code, int) and done:
+            m = re.search(r"exited with code (-?\d+)", done)
+            code = int(m.group(1)) if m else None
+        lines = [ln.strip() for ln in str(td.get("progress") or "").splitlines()
+                 if ln.strip() and not ln.strip().startswith("<truncated")]
+        out.append({"step": i, "task": tid.rsplit("/", 1)[-1] or f"task-{i}", "title": str(td.get("title") or ""),
+                    "line": re.sub(r"\s+", " ", str(rc.get("commandLine") or td.get("description") or "")).strip(),
+                    "since": parse_ts(str(td.get("movedToBackgroundAt") or "")),
+                    "running": str(st.get("status") or "") in UNFINISHED and not done,
+                    "code": code if isinstance(code, int) else None, "last": lines[-1][:160] if lines else "",
+                    "log": uri_to_path(str(td.get("logUri") or ""))})
+    return out
+
+
+def command_pids(lines: List[str], ls_pid: int = 0) -> Dict[str, List["compat.Proc"]]:
+    """The processes that run these command lines now, under Antigravity's language server (`ls_pid`, else every
+    process named language_server*; AGP_DELEGATE_LS_PID for tests): for each line, the process running it (on
+    Windows the PowerShell Antigravity wraps a command in) and what that started. Found by the command line's text —
+    for the user to look at or stop, not proof."""
+    if not lines:
+        return {}
+    table = compat.process_table(cmdlines=True)
+    given = int(os.environ.get("AGP_DELEGATE_LS_PID") or 0) or ls_pid
+    servers = [given] if given in table else [p.pid for p in table.values() if p.name.startswith("language_server")]
+    under = {pid for root in servers for pid in compat.descendants(table, root)}
+
+    def norm(text: str) -> str:
+        return re.sub(r"[\s\"'`\\^]+", " ", (text or "").lower()).strip()
+
+    out: Dict[str, List[compat.Proc]] = {}
+    for line in lines:
+        key = norm(line)[:120]
+        if len(key) < 4:
+            continue
+        hits = {pid for pid in under if key in norm(table[pid].cmdline)}
+        procs: List[compat.Proc] = []
+        for top in sorted(pid for pid in hits if table[pid].ppid not in hits)[:2]:  # the outermost of each
+            procs += [table[top]] + [table[c] for c in compat.descendants(table, top) if c in table]
+        if procs:
+            out[line] = procs[:8]
+    return out
+
+
+def viewed_images(steps: List[dict], base: int = 0) -> Tuple[List[Tuple[str, int, int]], List[Tuple[str, str]]]:
+    """The images the agent opened with its file viewer in `steps` (numbered from `base`): (path, bytes, times) for
+    each it saw — the model got the picture —, and (path, why) for each it couldn't open."""
+    seen: Dict[str, List[int]] = {}
+    missed: List[Tuple[str, str]] = []
+    for st in steps:
+        if st.get("type") != "CORTEX_STEP_TYPE_VIEW_FILE":
+            continue
+        vf = st.get("viewFile") or {}
+        path = uri_to_path(str(vf.get("absolutePathUri") or ""))
+        media = vf.get("mediaData") if isinstance(vf.get("mediaData"), dict) else {}
+        if not path or not (path.lower().endswith(IMAGE_EXT) or str(media.get("mimeType") or "").startswith("image/")):
+            continue
+        size = str(vf.get("numBytes") or "0")
+        if st.get("status") == "CORTEX_STEP_STATUS_DONE" and (media or size not in ("", "0")):
+            rec = seen.setdefault(path, [int(size) if size.isdigit() else 0, 0])
+            rec[1] += 1
+        else:
+            why = error_text(st) or str(st.get("status") or "").replace("CORTEX_STEP_STATUS_", "").lower() or "?"
+            missed.append((path, why))
+    return [(p, v[0], v[1]) for p, v in seen.items()], missed
+
+
+def size_text(n: int) -> str:
+    return f"{n / 1048576:.1f} MB" if n >= 1048576 else f"{max(n, 1) / 1024:.0f} KB"
 
 
 def split_text(by_label: Dict[str, int]) -> str:
@@ -1408,8 +1950,14 @@ def split_text(by_label: Dict[str, int]) -> str:
     return " (" + ", ".join(f"{n} on {label}" for label, n in by_label.items()) + ")"
 
 
-def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tuple[str, int]:
+def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tuple[str, int, dict]:
+    """The report of a task in `state`, its exit code, and what the turn measured (calls, tokens, API dollars,
+    seconds, the weekly quota before and after) for `estimate`."""
     cid, short = task["id"], task["id"][:8]
+    if info.get("gone"):
+        return (f"❌ Antigravity task {cid} is gone: Antigravity no longer lists its conversation (deleted in the "
+                f"app?), so nothing more comes from it.\nWhat it changed is in the working tree — git status shows it; "
+                f"delegate.py diff {short} may no longer know.", 2, {"ended": "gone"})
     s = summary(ls, cid)
     turn = int(task.get("turn") or 0)
     try:
@@ -1430,15 +1978,18 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
         elif st.get("type") == "CORTEX_STEP_TYPE_RUN_COMMAND":
             rc = st.get("runCommand") or {}
             line = re.sub(r"\s+", " ", str(rc.get("commandLine") or rc.get("proposedCommandLine") or "")).strip()
-            if line and not TALK.search(line):  # its ask / tell show up as the talk with you instead
+            still = isinstance(st.get("taskDetails"), dict) and str(st.get("status") or "") in UNFINISHED
+            if line and not TALK.search(line) and not still:  # ask / tell show up as the talk; a running one below
                 commands.append({"line": line, "code": rc.get("exitCode"), "status": st.get("status", ""),
                                  "out": outcome(output_text(rc))})
     ended = str(s.get("latestExecutorTerminationReason") or "")
     failed = FAILED_ENDS.get(ended) if state == "done" else None
+    err = turn_error(steps[turn:], turn)[0] if failed and ended.endswith("_ERROR") else ""
     start = task.get("sent") or parse_ts(str(s.get("createdTime") or "")) or task.get("started") or 0
     stop = parse_ts(str(s.get("lastModifiedTime") or "")) if state != "timeout" else time.time()
     took = f" in {span((stop or time.time()) - start)}" if start else ""
-    head = {"done": f"❌ Antigravity task {cid} {failed}{took}" if failed else f"✅ Antigravity finished task {cid}{took}",
+    head = {"done": (f"❌ Antigravity task {cid} {failed}{took}" + (f": «{err[:240]}»" if err else ""))
+                    if failed else f"✅ Antigravity finished task {cid}{took}",
             "approval": f"⏸ Antigravity task {cid} is waiting for the user's approval in Antigravity",
             "question": f"❓ Antigravity task {cid} asks you (Claude Code) — it waits for your answer",
             "background": f"✅ Antigravity task {cid} ended its turn{took}; something it started still runs there",
@@ -1457,28 +2008,50 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
         lines += ["", f"Next: answer → delegate.py reply {short} \"…\" (it goes on with your answer), then wait again → "
                       f"delegate.py wait {short} (in the background). Don't know? Say what you'd choose, or that it's "
                       "its call — an unanswered question keeps it waiting."]
-        return "\n".join(lines), 4
+        return "\n".join(lines), 4, {}
 
-    use = usage(ls, cid, turn)
+    table = prices()
+    use = usage(ls, cid, turn, table)
     model = task.get("label") or ", ".join(use.get("models") or []) or "?"
     cost = f"Model: {model}"
     if use.get("calls"):
         cost += (f" · {use['calls']} model calls{split_text(use.get('by_label') or {})}"
                  f" · {kilo(use['input'] + use['cached'])} tokens read"
                  + (f" ({kilo(use['cached'])} from cache)" if use["cached"] else "") + f" · {kilo(use['output'])} written")
+        if use.get("usd"):
+            cost += f" · ≈${use['usd']:.2f} at API prices"
+        first = use.get("first") or {}
+        if turn == 0 and first.get("input", 0) + first.get("cached", 0) > 0:
+            whole = first["input"] + first["cached"]
+            cost += (f" · first call {kilo(whole)}, "
+                     + (f"{first['cached'] * 100 // whole}% from cache" if first["cached"] else "none from cache"))
     before = task.get("quota_before")
+    after = None
     if isinstance(before, (int, float)) and task.get("label"):
         groups = quota(ls)
-        now = weekly_left(task["label"], groups)
-        if now is not None:
+        after = weekly_left(task["label"], groups)
+        if after is not None:
             grp = (group_of(task["label"], groups) or {}).get("name", "")
-            cost += f" · weekly «{grp}» limit {before * 100:.1f}% → {now * 100:.1f}% left"
+            cost += f" · weekly «{grp}» limit {before * 100:.1f}% → {after * 100:.1f}% left"
     lines.append(cost)
     title = str(s.get("summary") or task.get("title") or "")
     if title or task.get("project_name"):
         lines.append(f"In Antigravity: «{title}»" + (f" · project «{task['project_name']}»" if task.get("project_name") else ""))
     if task.get("created_project"):
         lines.append(f"(This first task here created the Antigravity project «{task.get('project_name')}» for {task.get('root')}.)")
+    if task.get("series"):
+        pieces = task.get("pieces") or []
+        lines.append(f"Series «{task['series']}», piece {pieces[-1].get('n') if pieces else 1}"
+                     f" (the next one: delegate.py next {task['series']} \"…\")")
+    window = window_of(model, table)
+    if use.get("context", 0) > 0.6 * window:
+        lines.append(f"Context: {kilo(use['context'])} of {kilo(window)} tokens — the conversation is nearly full; more "
+                     "work in it gets compacted soon" + (f" (next piece: delegate.py next {task['series']} --fresh)"
+                                                        if task.get("series") else ""))
+    resumed = turn_resumes(task)
+    if resumed:
+        lines.append(f"Resumed automatically after {len(resumed)} error{'s' if len(resumed) > 1 else ''} in this turn: "
+                     + "; ".join(f"step {r.get('step')} «{str(r.get('error') or '?')[:120]}»" for r in resumed))
 
     if state == "approval":
         lines += ["", f"Waiting for: {info.get('action')} {info.get('target')}".rstrip()]
@@ -1510,6 +2083,28 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
             lines.append(f"  {mark} {shown} → {code}" + (f" · {c['out']}" if c["out"] else ""))
         if len(commands) > 10:
             lines.append(f"  ({len(commands) - 10} earlier commands not shown)")
+    running_bg = [b for b in background_commands(steps[turn:], turn) if b["running"]]
+    if running_bg:
+        pids = command_pids([b["line"] for b in running_bg], ls.pid) if state != "done" else {}
+        lines += ["", "Still running in the background (Antigravity wakes the agent when one finishes):"]
+        for b in running_bg:
+            shown = b["line"] if len(b["line"]) <= 110 else b["line"][:107] + "…"
+            lines.append(f"  ⏳ {b['task']} {shown}" + (f" — for {span(time.time() - b['since'])}" if b["since"] else ""))
+            if b["last"]:
+                lines.append(f"     last output: {b['last']}")
+            procs = pids.get(b["line"]) or []
+            if procs:
+                lines.append("     processes: " + " › ".join(f"{p.pid} {p.name}" for p in procs))
+            if b["log"]:
+                lines.append(f"     log: {b['log']}")
+    seen, missed = viewed_images(steps[turn:], turn)
+    if seen or missed:
+        shown_imgs = [f"{rel(p, task)} ({size_text(n)}" + (f", {k}×" if k > 1 else "") + ")" for p, n, k in seen[:12]]
+        lines += ["", f"Images it opened ({len(seen)}): " + (", ".join(shown_imgs) or "none")
+                  + (f" … and {len(seen) - 12} more" if len(seen) > 12 else "")]
+        if missed:
+            lines.append(f"  couldn't open {len(missed)}: "
+                         + "; ".join(f"{rel(p, task)} — {why[:80]}" for p, why in missed[:5]))
     talk = chat_lines(task, turn)
     if talk:
         lines += ["", "Talk with you while it worked:"] + talk
@@ -1519,7 +2114,7 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
             text = text[:REPORT_LIMIT].rstrip() + f"\n… [cut — delegate.py result {short} --full]"
         lines += ["", "The agent's report (its own words — check before you rely on it):", text]
     elif state == "done":
-        lines += ["", "The agent left no final message."]
+        lines += ["", "The agent left no final message" + (" — Antigravity's error above stopped it." if err else ".")]
 
     nxt = {"done": f"Next: review → delegate.py diff {short} (paths to narrow it, --stat for counts); "
                    f"follow-up in the same conversation → delegate.py send {short} \"…\".",
@@ -1529,25 +2124,165 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
            "running": f"Next: wait → delegate.py wait {short} (in the background), or stop it → delegate.py cancel {short}.",
            "timeout": f"Next: wait more → delegate.py wait {short} (in the background), or stop it → "
                       f"delegate.py cancel {short}."}[state]
+    if failed and ended.endswith("_ERROR"):
+        count = int(s.get("stepCount") or 0)
+        times = len(turn_resumes(task))
+        why = ("the error doesn't look like a hiccup a resume fixes (quota, permissions, the model)"
+               if int(task.get("no_resume_at", -1)) == count else
+               "automatic resumes are off for it (--retries 0, or a task from before they existed)"
+               if not task.get("retries_max") else
+               f"it was resumed {times} time{'s' if times != 1 else ''} already"
+               if times >= int(task.get("retries_max") or 0) else "")
+        nxt = ((f"Not resumed automatically: {why}. " if why else "")
+               + f"Next: go on in the same conversation (it keeps its context) → delegate.py send {short} "
+               f"\"Go on from where you stopped.\", or look at what it did → delegate.py diff {short}.")
     lines += ["", nxt]
     code = 2 if state == "approval" or failed else 3 if state in ("timeout", "running") else 0
-    return "\n".join(lines), code
+    first = use.get("first") or {}
+    facts = {"calls": use.get("calls", 0), "input": use.get("input", 0), "cached": use.get("cached", 0),
+             "output": use.get("output", 0), "usd": round(use["usd"], 4) if use.get("usd") else None,
+             "first_call": (first.get("input", 0) + first.get("cached", 0)) if turn == 0 and first else None,
+             "seconds": round((stop or time.time()) - start) if start else None,
+             "quota_before": before if isinstance(before, (int, float)) else None, "quota_after": after,
+             "ended": "error" if failed and ended.endswith("_ERROR") else ("failed" if failed else state)}
+    return "\n".join(lines), code, facts
+
+
+def shown_end(task: dict, state: str) -> List[str]:
+    """The event keys a report of a finished turn has shown already: the agent's messages and the turn's end (a watch
+    started later doesn't announce them again)."""
+    heard = [m["id"] for m in task.get("chat") or [] if m.get("from") == "antigravity" and m.get("id")]
+    resumed = [f"resume:{r.get('count')}" for r in turn_resumes(task)]  # the report lists them
+    return heard + resumed + ([f"end:{int(task.get('turn') or 0)}"] if state == "done" else [])
 
 
 def finish(ls: LS, task: dict, timeout: float) -> int:
     state, info = wait(ls, task, timeout)
-    text, code = render(ls, task, state, info)
-    heard = [m["id"] for m in task.get("chat") or [] if m.get("from") == "antigravity" and m.get("id")]
-    update(task, state=state, told_add=heard,  # a watch won't repeat them
-           **({"finished": time.time()} if state in ("done", "background") else {}))
+    text, code, facts = render(ls, task, state, info)
+    fields: Dict[str, object] = dict(state="gone" if info.get("gone") else state,
+                                     told_add=shown_end(task, state))  # a watch won't repeat them
+    if state in ("done", "background"):
+        fields["finished"] = time.time()
+    if state == "done" and facts.get("calls"):
+        fields["costs"] = dict(task.get("costs") or {}, **{str(int(task.get("turn") or 0)): facts})
+    update(task, **fields)
     print(text)
     return code
+
+
+# ─────────────────────────────── what a task costs ───────────────────────────────
+
+def first_costs(label: str, recs: List[dict], limit: int = 40) -> List[dict]:
+    """What your recent tasks on this model measured in their first turn (`costs["0"]`, saved by every report of a
+    finished task), newest first — a follow-up turn isn't a task of its own, so it doesn't count."""
+    out = []
+    for r in recs:
+        c = (r.get("costs") or {}).get("0")
+        if r.get("label") == label and isinstance(c, dict) and c.get("calls") and c.get("ended") in ("done", None):
+            out.append(dict(c, started=r.get("started"), finished=r.get("finished"), id=r["id"]))
+            if len(out) >= limit:
+                break
+    return out
+
+
+def backfill(ls: LS, recs: List[dict], budget: float = 20.0) -> int:
+    """Fill in `costs["0"]` for finished tasks from before reports saved it (asking Antigravity for their calls), for
+    at most `budget` seconds. Returns how many it filled."""
+    deadline, done, table = time.time() + budget, 0, prices()
+    for r in recs:
+        if time.time() > deadline:
+            break
+        if r.get("state") != "done" or (r.get("costs") or {}).get("0") or not r.get("started") or r["id"].startswith("q-"):
+            continue
+        try:
+            use = usage(ls, r["id"], 0, table)
+        except SOFT:
+            continue
+        if not use.get("calls"):
+            continue
+        seconds = (float(r["finished"]) - float(r["started"])) if r.get("finished") else None
+        if int(r.get("turn") or 0) > 0:
+            seconds = None  # a follow-up came later: the first turn's own length is unknown
+        facts = {"calls": use["calls"], "input": use["input"], "cached": use["cached"], "output": use["output"],
+                 "usd": round(use["usd"], 4) if use.get("usd") else None, "seconds": round(seconds) if seconds else None,
+                 "quota_before": None, "quota_after": None, "ended": "done", "backfilled": True}
+        if int(r.get("turn") or 0) > 0:
+            facts["approx"] = True  # usage since step 0 covers its follow-ups too
+        update(r, costs=dict(r.get("costs") or {}, **{"0": facts}))
+        done += 1
+    return done
+
+
+def pct_per_usd(label: str, recs: List[dict]) -> Tuple[float, str]:
+    """The share of a week's quota (in %) one API dollar takes on this model's quota group: the median your own
+    tasks measured — only tasks that ran alone, so others didn't spend the same quota meanwhile — when there are
+    three or more, else PCT_PER_USD. Returns (value, where it comes from)."""
+    low = (label or "").lower()
+    kind = next((w for w, _ in PCT_PER_USD if w and w in low), "")
+    spans = [(float(r.get("started") or 0), float(r.get("finished") or 0), r["id"]) for r in recs if r.get("started")]
+    ratios = []
+    for r in recs:
+        c = (r.get("costs") or {}).get("0") or {}
+        b, a, usd = c.get("quota_before"), c.get("quota_after"), c.get("usd")
+        if not all(isinstance(x, (int, float)) for x in (b, a, usd)) or usd < 0.02 or b <= a:
+            continue
+        if next((w for w, _ in PCT_PER_USD if w and w in str(r.get("label") or "").lower()), "") != kind:
+            continue
+        s0, s1 = float(r.get("started") or 0), float(r.get("finished") or 0)
+        if not s1 or any(o != r["id"] and o0 < s1 and (o1 or o0 + 3600) > s0 for o0, o1, o in spans):
+            continue
+        ratios.append((b - a) * 100 / usd)
+    if len(ratios) >= 3:
+        return statistics.median(ratios), f"measured on {len(ratios)} of your tasks"
+    return next(v for w, v in PCT_PER_USD if not w or w in low), "the plugin's measurement from 2026-11"
+
+
+def quantile(xs: List[float], q: float) -> float:
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, int(round(q * (len(xs) - 1))))]
+
+
+def estimate_of(m: dict, groups: List[dict], recs: List[dict]) -> dict:
+    """What a task on model `m` costs here, from your past tasks on it: median and 90th percentile share of its
+    quota group's week, API dollars, minutes, and how many such tasks the week's rest pays for."""
+    smp = first_costs(m["label"], recs)
+    usd = [float(x["usd"]) for x in smp if isinstance(x.get("usd"), (int, float)) and x["usd"] > 0]
+    mins = [float(x["seconds"]) / 60 for x in smp if isinstance(x.get("seconds"), (int, float)) and x["seconds"] > 0]
+    rate, source = pct_per_usd(m["label"], recs)
+    g = group_of(m["label"], groups) or {}
+    left = ((g.get("buckets") or {}).get("weekly") or {}).get("left")
+    out = {"n": len(smp), "group": g.get("name", ""), "rate": rate, "rate_source": source, "left": left}
+    if usd:
+        med = statistics.median(usd)
+        out.update(usd=med, usd90=quantile(usd, 0.9), share=med * rate, share90=quantile(usd, 0.9) * rate)
+        if isinstance(left, (int, float)) and out["share"] > 0:
+            out["tasks_left"] = left * 100 / out["share"]
+    if mins:
+        out["minutes"] = statistics.median(mins)
+    return out
+
+
+def estimate_text(est: dict) -> str:
+    """«≈0.012% of «Gemini Models»'s week per task (median of 31; 9 in 10 under 0.04%) · ≈$0.27 · ≈6 min · the 62%
+    left pays for ~5000 such tasks»."""
+    if not est.get("share"):
+        return "no finished tasks on it here yet — `models` and the tiers' notes give the benchmark's numbers"
+    grp = f" of «{est['group']}»'s week" if est.get("group") else " of its quota's week"
+    out = (f"≈{pct(est['share'])}{grp} per task (median of {est['n']}; 9 in 10 under {pct(est['share90'])})"
+           f" · ≈${est['usd']:.2f} at API prices")
+    if est.get("minutes"):
+        out += f" · ≈{est['minutes']:.0f} min"
+    if est.get("tasks_left"):
+        n = est["tasks_left"]
+        out += (f" · the {est['left'] * 100:.0f}% left pays for ~{n:,.0f} such tasks" if n >= 2
+                else f" · the {est['left'] * 100:.0f}% left won't pay for one more")
+    return out
 
 
 # ─────────────────────────────── commands ───────────────────────────────
 
 def tier_lines(ms: List[dict], default: str, groups: List[dict], sp: Dict[str, dict], now: float,
-               uses: bool) -> List[str]:
+               uses: bool, recs: Optional[List[dict]] = None) -> List[str]:
     lines = []
     for t in TIERS:
         try:
@@ -1555,6 +2290,10 @@ def tier_lines(ms: List[dict], default: str, groups: List[dict], sp: Dict[str, d
             speed = speed_text(sp, m["label"])
             lines.append(f"  {t:9} {m['id']:26} {m['label']}" + (f" · {speed}" if speed else ""))
             lines.append(f"            {why}")
+            if recs is not None:
+                est = estimate_of(m, groups, recs)
+                if est.get("share"):
+                    lines.append(f"            a task here: {estimate_text(est)}")
         except Failure:
             lines.append(f"  {t:9} nothing has quota left now")
         if uses:
@@ -1578,7 +2317,8 @@ def quota_lines(groups: List[dict], now: float) -> List[str]:
     out = []
     for g in groups:
         s = state_of(g, now)
-        out.append(f"  Antigravity «{g['name']}»: {s['text']} → {STATE_TEXT[s['status']]}")
+        out.append(f"  Antigravity «{g['name']}»: {s['text']}" + (f"; {s['forecast']}" if s.get("forecast") else "")
+                   + f" → {verdict(s)}")
     return out or ["  Antigravity: limits not reported"]
 
 
@@ -1626,7 +2366,7 @@ def cmd_budget(a) -> int:
     lines = ["Limits now:", f"  Claude Code, your own plan: {ctext}{src}"
              + {"critical": " → almost used up", "tight": " → getting tight", "ok": " → fine", "unknown": ""}[cstate]]
     lines += quota_lines(groups, now)
-    lines += ["", "What each tier takes now (--model):"] + tier_lines(ms, default, groups, sp, now, False)
+    lines += ["", "What each tier takes now (--model):"] + tier_lines(ms, default, groups, sp, now, False, records())
     states = [state_of(g, now) for g in groups]
     exp = experimental(ms)
     if exp:
@@ -1668,8 +2408,10 @@ def cmd_statusline(a) -> int:
 def read_brief(a) -> str:
     if a.brief_file:
         try:
-            with open(a.brief_file, encoding="utf-8") as f:
+            with open(a.brief_file, encoding="utf-8-sig") as f:
                 return f.read()
+        except UnicodeDecodeError:
+            raise Failure(f"{a.brief_file} isn't UTF-8 text — save it as UTF-8.")
         except OSError as e:
             raise Failure(f"can't read {a.brief_file}: {e}")
     if a.brief and a.brief != "-":
@@ -1679,20 +2421,16 @@ def read_brief(a) -> str:
     return sys.stdin.read()
 
 
-def cmd_run(a) -> int:
-    brief = read_brief(a).strip()
-    if not brief:
-        raise Failure("the brief is empty.")
-    if len(brief) > BRIEF_LIMIT:
-        raise Failure(f"the brief has {len(brief)} characters (limit {BRIEF_LIMIT}) — put the details in a file in the "
-                      "project and point the brief at it.")
-    folder = os.path.realpath(a.cwd or os.getcwd())
+def start_task(ls: LS, p: dict) -> Tuple[dict, List[str], str, bool]:
+    """Start a task from its parameters — a run now, or a queued one when a slot frees up: pick the model by the limits
+    left, find (or create) the Antigravity project, start the conversation, save the record. Returns (the record,
+    notes on models passed over, why this model, whether it created the project)."""
+    folder = p["cwd"]
     if not os.path.isdir(folder):
         raise Failure(f"no such folder: {folder}")
-    ls = connect()
     ms, default = models(ls)
     groups = quota(ls)
-    model, notes, why = pick(a.model, ms, default, groups)
+    model, notes, why = pick(p["model"], ms, default, groups)
     found = find_project(folder)
     created = False
     if found:
@@ -1700,37 +2438,442 @@ def cmd_run(a) -> int:
     else:
         root = os.path.realpath((git(["rev-parse", "--show-toplevel"], folder) or "").strip() or folder)
         project, created = create_project(ls, root), True
-    title = title_of(brief, a.title)
+    title = title_of(p["brief"], p.get("title") or "")
     top = (git(["rev-parse", "--show-toplevel"], folder) or "").strip()
     top = os.path.realpath(top) if top else ""
     before = dirty(top) if top else None  # before the agent starts: what its commands change shows up later
     resp = agentapi(ls, ["new-conversation", f"--model={model['id']}", f"--title={title}",
-                         compose(brief, folder, root)], project["id"])
+                         compose(p["brief"], folder, root, p.get("reference") or "")], project["id"])
     cid = str((resp.get("newConversation") or {}).get("conversationId") or "")
     if not cid:
         raise Failure(f"agentapi didn't return a conversation id: {json.dumps(resp)[:300]}")
     task = {"id": cid, "title": title, "model": model["id"], "label": model["label"], "project": project["id"],
             "project_name": project["name"], "created_project": created, "cwd": folder, "root": top or root,
-            "started": time.time(), "turn": 0, "state": "running", "brief": brief[:400],
+            "started": time.time(), "turn": 0, "state": "running", "brief": p["brief"][:400],
             "quota_before": weekly_left(model["label"], groups), "dirty_before": before,
-            "claude_session": os.environ.get("CLAUDE_CODE_SESSION_ID", ""), "heard": 0, "chat": []}
+            "claude_session": p.get("claude_session") or "", "heard": 0, "chat": [],
+            "retries_max": int(p.get("retries") or 0)}
+    if p.get("series"):
+        task.update(series=p["series"], series_reference=p.get("reference") or "",
+                    pieces=[{"n": int(p.get("piece") or 1), "turn": 0, "at": time.time(), "brief": p["brief"][:200]}])
     save(task)
     prune()
-    print(f"Started Antigravity task {cid} — {model['label']}, project «{project['name']}»"
-          + (" (created for this folder)" if created else "") + ".", flush=True)
-    for n in notes:
-        print("  " + n, flush=True)
-    print(f"  Why this model: {why}", flush=True)
+    return task, notes, why, created
+
+
+def started_lines(task: dict, notes: List[str], why: str, created: bool, recs: Optional[List[dict]] = None) -> List[str]:
+    lines = [f"Started Antigravity task {task['id']} — {task['label']}, project «{task['project_name']}»"
+             + (" (created for this folder)" if created else "") + "."]
+    lines += ["  " + n for n in notes]
+    lines.append(f"  Why this model: {why}")
+    est = estimate_of({"label": task["label"]}, [], recs if recs is not None else records())
+    if est.get("usd"):
+        lines.append(f"  Expected (your last {est['n']} tasks on it): ≈${est['usd']:.2f} at API prices"
+                     + (f", ≈{est['minutes']:.0f} min" if est.get("minutes") else "")
+                     + f", ≈{pct(est['share'])} of its quota's week")
+    return lines
+
+
+def valid_series(name: str) -> str:
+    name = (name or "").strip()
+    if not re.fullmatch(r"[\w.-]{1,40}", name):
+        raise Failure(f"a series name is up to 40 letters, digits, «_», «.» or «-»: {name!r}")
+    return name
+
+
+def series_task(name: str) -> Optional[dict]:
+    """The newest task of a series (`run --series NAME`, `next NAME`)."""
+    return next((r for r in records() if r.get("series") == name and not r["id"].startswith("q-")), None)
+
+
+def cmd_run(a) -> int:
+    brief = read_brief(a).strip()
+    if not brief:
+        raise Failure("the brief is empty.")
+    if len(brief) > BRIEF_LIMIT:
+        raise Failure(f"the brief has {len(brief)} characters (limit {BRIEF_LIMIT}) — put the details in a file in the "
+                      "project and point the brief at it.")
+    reference = read_templates(a.template or [])
+    if len(brief) + len(reference) > PROMPT_LIMIT - 4000:
+        raise Failure(f"the brief and its templates come to {len(brief) + len(reference)} characters (limit "
+                      f"{PROMPT_LIMIT - 4000}: the first message goes on agentapi's command line) — point the brief at "
+                      "the bigger files instead of inlining them.")
+    folder = os.path.realpath(a.cwd or os.getcwd())
+    if not os.path.isdir(folder):
+        raise Failure(f"no such folder: {folder}")
+    series = valid_series(a.series) if a.series else ""
+    if series and series_task(series):
+        raise Failure(f"the series «{series}» exists already — its next piece: delegate.py next {series} \"…\" (or "
+                      "choose another name).")
+    conf = bridge_settings()
+    limit = conf["max_parallel"] if a.max_parallel is None else max(0, min(a.max_parallel, 50))
+    p = {"brief": brief, "model": a.model, "cwd": folder, "title": a.title, "reference": reference, "series": series,
+         "piece": 1, "retries": conf["retries"] if a.retries is None else max(0, min(a.retries, 10)),
+         "max_parallel": limit, "claude_session": os.environ.get("CLAUDE_CODE_SESSION_ID", "")}
+    ls = connect()
+    if a.dry_run:
+        return dry_run(ls, p)
+    began = time.time()
+    queued: Optional[dict] = None
+    with slots(wait=True) if limit else contextlib.nullcontext():  # counting and starting in one step
+        busy, ahead = (active_tasks(ls), queued_tasks()) if limit else ([], [])
+        if limit and (len(busy) >= limit or ahead):
+            queued = enqueue(p)
+        else:
+            task, notes, why, created = start_task(ls, p)
+    if queued:
+        q = queued
+        ensure_supervisor()
+        print(f"⏸ Queued Antigravity task {q['id']}: {len(busy)} task{'s' if len(busy) != 1 else ''} run now "
+              f"(--max-parallel {limit})" + (f", {len(ahead)} queued ahead of it" if ahead else "")
+              + " — it starts by itself when a slot frees up.", flush=True)
+        if a.no_wait:
+            print(f"Follow it: delegate.py watch --follow (the Monitor tool), or delegate.py wait {q['id']} in the "
+                  "background; take it off the queue: delegate.py cancel " + q["id"])
+            return 0
+        task = wait_started(q, a.timeout)
+        if task is None:
+            print(f"⏳ Antigravity task {q['id']} is still queued after {span(time.time() - began)} — wait more: "
+                  f"delegate.py wait {q['id']} (in the background), or delegate.py cancel {q['id']}.")
+            return 3
+        print(f"Started queued task {q['id']} as {task['id']} — {task['label']}.", flush=True)
+        return finish(ls, task, max(a.timeout - (time.time() - began), 1.0))
+    print("\n".join(started_lines(task, notes, why, created)), flush=True)
+    if task.get("retries_max"):
+        ensure_supervisor()  # resumes it after an error even when nobody waits for it
     if a.no_wait:
-        print(f"Follow it with: delegate.py watch {cid[:8]} (with the Monitor tool: its questions and messages reach "
-              f"you as it works), or delegate.py wait {cid[:8]} in the background.")
+        print(f"Follow it with: delegate.py watch {task['id'][:8]} (with the Monitor tool: its questions and messages "
+              f"reach you as it works), or delegate.py wait {task['id'][:8]} in the background.")
         return 0
     return finish(ls, task, a.timeout)
 
 
+def dry_run(ls: LS, p: dict) -> int:
+    """run --dry-run: what would start, why, and what it is likely to cost — nothing is started."""
+    ms, default = models(ls)
+    groups = quota(ls)
+    model, notes, why = pick(p["model"], ms, default, groups)
+    recs = records()
+    est = estimate_of(model, groups, recs)
+    prompt = compose(p["brief"], p["cwd"], p["cwd"], p.get("reference") or "")
+    firsts = [int(c["first_call"]) for c in first_costs(model["label"], recs) if isinstance(c.get("first_call"), int)]
+    lines = [f"Would start on {model['label']} ({model['id']}) — {why}."] + ["  " + n for n in notes]
+    lines.append(f"  A task here: {estimate_text(est)}")
+    lines.append(f"  Its first message: {len(prompt)} characters (≈{kilo(len(prompt) // 4)} tokens), on top of "
+                 "Antigravity's own prompt"
+                 + (f" (a new conversation's first call reads ≈{kilo(int(statistics.median(firsts)))} tokens here, none of "
+                    "them from cache; follow-ups in the same conversation read it from the cache)" if firsts else ""))
+    if p.get("max_parallel"):
+        busy, ahead = active_tasks(ls), queued_tasks()
+        lines.append(f"  Slots: {len(busy)} of {p['max_parallel']} in use, {len(ahead)} queued"
+                     + (" — it would wait in the queue" if len(busy) >= p["max_parallel"] or ahead else ""))
+    lines.append("Nothing was started (--dry-run).")
+    print("\n".join(lines))
+    return 0
+
+
 def cmd_wait(a) -> int:
     task = task_for(a.id)
-    return finish(connect(), task, a.timeout)
+    began = time.time()
+    if task["id"].startswith("q-") and task.get("state") in ("canceled", "failed"):
+        text, code = queue_report(task)  # it never started: there is no conversation to wait for
+        print(text)
+        return code
+    if task["id"].startswith("q-"):
+        started = wait_started(task, a.timeout)
+        if started is None:
+            print(f"⏳ Antigravity task {task['id']} is still queued after {span(time.time() - began)} ("
+                  + queue_position(task) + ") — wait more: delegate.py wait " + task["id"])
+            return 3
+        print(f"Started queued task {task['id']} as {started['id']} — {started.get('label') or '?'}.", flush=True)
+        task = started
+    return finish(connect(), task, max(a.timeout - (time.time() - began), 1.0))
+
+
+# ─────────────────────────────── the queue and the supervisor ───────────────────────────────
+
+def enqueue(p: dict) -> dict:
+    """A task that waits for a free slot: a record «q-…» with everything start_task() needs."""
+    rec = {"id": "q-" + uuid.uuid4().hex[:10], "state": "queued", "queued": time.time(), "started": 0,
+           "params": p, "title": title_of(p["brief"], p.get("title") or ""), "cwd": p["cwd"], "model": p["model"],
+           "label": "", "brief": p["brief"][:400], "claude_session": p.get("claude_session") or "",
+           "series": p.get("series") or ""}
+    save(rec)
+    return rec
+
+
+def queued_tasks() -> List[dict]:
+    """The tasks waiting in the queue, oldest first. One a dispatcher claimed but didn't start within five minutes
+    (it was stopped) goes back in line."""
+    out = []
+    for r in records():
+        if r.get("state") == "starting" and not r.get("started_as") and time.time() - float(r.get("starting") or 0) > 300:
+            update(r, state="queued")
+        if r.get("state") == "queued":
+            out.append(r)
+    return sorted(out, key=lambda r: float(r.get("queued") or 0))
+
+
+def queue_position(q: dict) -> str:
+    queue = [r["id"] for r in queued_tasks()]
+    return f"number {queue.index(q['id']) + 1} of {len(queue)} in the queue" if q["id"] in queue else "not in the queue"
+
+
+def active_tasks(ls: Optional[LS], live: Optional[dict] = None) -> List[dict]:
+    """Our tasks that take a slot now (started in the last day): the conversation runs (an approval it waits for
+    included), or it ended its turn while work it started still runs; also one being started from the queue, and
+    one just started that the language server doesn't list yet."""
+    if live is None:
+        try:
+            live = (rpc(ls, "GetAllCascadeTrajectories", {}, timeout=30).get("trajectorySummaries") or {}) if ls else {}
+        except SOFT:
+            live = {}
+    out = []
+    for r in records():
+        if r.get("state") == "starting" and time.time() - float(r.get("starting") or 0) < 300:
+            out.append(r)
+            continue
+        if (r["id"].startswith("q-") or not r.get("started") or time.time() - float(r["started"]) > 86400
+                or r.get("state") not in ("running", "background", "timeout", "approval", "question")):
+            continue  # a question: it holds its slot while it works on, not while it waits for the answer
+        status = str((live.get(r["id"]) or {}).get("status") or "")
+        if status.endswith(("RUNNING", "BUSY")):
+            out.append(r)
+        elif status.endswith("IDLE") and r.get("state") in ("running", "background", "timeout") and ls:
+            if resume_state(r, live.get(r["id"]) or {}) or background_runs(ls, r["id"]):
+                out.append(r)  # about to be resumed, or its background work still runs
+        elif not status and time.time() - float(r["started"]) < 60:
+            out.append(r)
+    return out
+
+
+class slots:
+    """The lock that makes counting the running tasks and starting one a single step (DISPATCH_LOCK): dispatch()
+    and `run --max-parallel` hold it, so two of them never both take the last free slot. `wait`: block until it is
+    free (a run); else give up at once when another process holds it (a dispatcher: that one does the work)."""
+
+    def __init__(self, wait: bool) -> None:
+        self.wait, self.fh, self.held = wait, None, False
+
+    def __enter__(self) -> bool:
+        try:
+            os.makedirs(TASKS, exist_ok=True)
+            self.fh = open(DISPATCH_LOCK, "a+", encoding="utf-8")
+            if self.wait:
+                compat.lock(self.fh)
+                self.held = True
+            else:
+                self.held = try_lock(self.fh)
+        except OSError:
+            self.held = False
+        return self.held
+
+    def __exit__(self, *exc) -> None:
+        if self.fh:
+            if self.held:
+                compat.unlock(self.fh)
+            self.fh.close()
+
+
+def dispatch(ls: LS, live: Optional[dict] = None) -> List[str]:
+    """Start queued tasks while there are free slots, oldest first (each carries its own --max-parallel); one
+    dispatcher at a time (slots). Lines for the supervisor's log."""
+    log: List[str] = []
+    if not queued_tasks():
+        return log
+    with slots(wait=False) as mine:
+        if not mine:
+            return log  # another process is starting tasks right now
+        queue = queued_tasks()
+        busy = len(active_tasks(ls, live)) if queue else 0
+
+        def claim(rec: dict) -> bool:
+            if rec.get("state") != "queued":
+                return False
+            rec.update(state="starting", starting=time.time())
+            return True
+
+        for q in queue:
+            limit = int((q.get("params") or {}).get("max_parallel") or 0)
+            if limit and busy >= limit:
+                break  # first come, first served: the others wait behind it
+            if not transact(q, claim):
+                continue
+            try:
+                task, _notes, why, _created = start_task(ls, q["params"])
+            except Exception as e:  # Failure, a timeout, a file that can't be written: back in line, tried 3 times
+                tries = int(q.get("tries") or 0) + 1
+                update(q, state="queued" if tries < 3 else "failed", tries=tries, error=str(e)[:300] or repr(e))
+                log.append(f"couldn't start {q['id']} ({tries} of 3): {e!r}")
+                break
+            update(q, state="started", started_as=task["id"], why=why, label=task["label"])
+            update(task, queued_as=q["id"], queued=q.get("queued"))
+            busy += 1
+            log.append(f"started {q['id']} as {task['id']} on {task['label']}")
+    return log
+
+
+def try_lock(fh) -> bool:
+    """Lock a lock file without waiting: False when another process holds it."""
+    try:
+        if compat.WINDOWS:
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+
+
+def ensure_supervisor() -> None:
+    """Start the supervisor unless one runs already (it holds its lock; a second one would end at once)."""
+    if os.environ.get("AGP_DELEGATE_NO_SUPERVISOR"):
+        return
+    try:
+        os.makedirs(TASKS, exist_ok=True)
+        with open(SUPERVISOR_LOCK, "a+", encoding="utf-8") as fh:
+            if not try_lock(fh):
+                return
+    except OSError:
+        return
+    spawn_detached([sys.executable, "-X", "utf8", os.path.abspath(__file__), "supervise"])
+
+
+def note(msg: str) -> None:
+    """A line in the supervisor's log (kept under ~200 KB)."""
+    try:
+        if os.path.isfile(SUPERVISOR_LOG) and os.path.getsize(SUPERVISOR_LOG) > 200_000:
+            compat.replace(SUPERVISOR_LOG, SUPERVISOR_LOG + ".1")
+        with open(SUPERVISOR_LOG, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + f"[{os.getpid()}] {msg}\n")
+    except OSError:
+        pass
+
+
+def supervise_once(ls: LS, mine: List[dict], seen: Dict[str, int]) -> Tuple[List[str], bool]:
+    """One look: resume the tasks Antigravity stopped with an error, bring the records of tasks whose turn is over up
+    to date (done, background, a question for Claude Code, gone from Antigravity — once per change: `seen` holds the
+    step count each was last looked at), then start queued tasks for the free slots. Returns the lines for the log,
+    and whether anything still needs the supervisor: a task at work (a question or an approval waiting doesn't
+    count — a reply or a follow-up starts the supervisor again), or the queue."""
+    try:
+        live = rpc(ls, "GetAllCascadeTrajectories", {}, timeout=30).get("trajectorySummaries") or {}
+    except SOFT:
+        return [], True
+    out, busy = [], False
+    for r in mine:
+        s = live.get(r["id"])
+        if not isinstance(s, dict):
+            if gone(r, {}):  # Antigravity answered and no longer has it (deleted): nothing will come from it
+                update(r, state="gone", finished=time.time())
+                out.append(f"{r['id']} is gone from Antigravity")
+            else:
+                busy = True  # just started: not listed yet
+            continue
+        status = str(s.get("status") or "")
+        if status != "CASCADE_RUN_STATUS_IDLE":
+            if status in ("CASCADE_RUN_STATUS_RUNNING", "CASCADE_RUN_STATUS_BUSY") and not busy:
+                # an approval the user hasn't given yet keeps the conversation RUNNING without any work going on
+                busy = r.get("state") != "approval" or pending(ls, r["id"], int(r.get("turn") or 0))[0] is None
+            continue
+        what, entry = auto_resume(ls, r, s)
+        if what:
+            busy = True
+            if what == "resumed" and entry:
+                out.append(f"resumed {r['id']} after an error: {entry.get('error') or '?'}")
+            continue
+        count = int(s.get("stepCount") or 0)
+        if seen.get(r["id"]) == count and r.get("state") != "background":
+            continue  # nothing new since the last look
+        seen[r["id"]] = count
+        listen(ls, r, start=int(r.get("turn") or 0))  # a question at the end must not be taken for the end
+        state = "question" if open_questions(r) else idle_state(ls, r, s)
+        busy = busy or state in ("running", "background")
+        fields = recorded(r, state)
+        if fields:
+            update(r, **fields)
+            out.append(f"{r['id']} is {state}")
+    out += dispatch(ls, live)
+    return out, busy or bool(queued_tasks())
+
+
+def cmd_supervise(a) -> int:
+    """Runs by itself, detached (ensure_supervisor): while a task of ours is at work or waits in the queue, every
+    POLL seconds it resumes the ones Antigravity stopped with an error, keeps their records up to date and starts
+    queued ones for free slots. It ends SUPERVISE_IDLE seconds after the last of them, ten minutes after Antigravity
+    went away, or after 12 h. One at a time (its lock file)."""
+    os.makedirs(TASKS, exist_ok=True)
+    fh = open(SUPERVISOR_LOCK, "a+", encoding="utf-8")
+    try:
+        if not try_lock(fh):
+            return 0
+        note("started")
+        idle_since = away_since = time.time()
+        ends = time.time() + 12 * 3600
+        seen: Dict[str, int] = {}
+        while time.time() < ends:
+            recs = records()
+            queue = [r for r in recs if r.get("state") in ("queued", "starting")]
+            mine = [r for r in recs if r.get("state") in ("running", "background", "timeout", "question", "approval")
+                    and r.get("started") and not r["id"].startswith("q-") and time.time() - float(r["started"]) < 86400]
+            busy = bool(queue)
+            if queue or mine:
+                ls = discover()  # never starts Antigravity: a closed one is the user's choice
+                if ls:
+                    away_since = time.time()
+                    try:
+                        lines, at_work = supervise_once(ls, mine, seen)
+                        busy = busy or at_work
+                        for line in lines:
+                            note(line)
+                    except SOFT as e:
+                        busy = True
+                        note(f"a look failed: {e}")
+                    except Exception as e:  # keep supervising: one bad look mustn't end it
+                        busy = True
+                        note(f"a look crashed: {e!r}")
+                elif time.time() - away_since > 600:
+                    note("Antigravity isn't running — ending")
+                    break
+                else:
+                    busy = True
+            if busy:
+                idle_since = time.time()
+            elif time.time() - idle_since >= SUPERVISE_IDLE:
+                break
+            time.sleep(POLL)
+        note("ended")
+        return 0
+    finally:
+        fh.close()
+
+
+def wait_started(q: dict, timeout: float) -> Optional[dict]:
+    """Wait until a queued task has started and return the task it became; None if it is still queued after
+    `timeout`. While waiting it starts queued tasks itself too, in case no supervisor could run."""
+    deadline, last = time.time() + max(timeout, 1.0), 0.0
+    while time.time() < deadline:
+        rec = load(q["id"]) or {}
+        state = rec.get("state")
+        if state == "started" and rec.get("started_as"):
+            return load(str(rec["started_as"])) or task_for(str(rec["started_as"]))
+        if state == "canceled":
+            raise Failure(f"queued task {q['id']} was taken off the queue.")
+        if state == "failed":
+            raise Failure(f"queued task {q['id']} couldn't start: {rec.get('error') or '?'}")
+        if time.time() - last >= POLL:
+            last = time.time()
+            ls = discover()
+            if ls:
+                try:
+                    dispatch(ls)
+                except SOFT:
+                    pass
+        time.sleep(min(POLL, 3.0))
+    return None
 
 
 def recorded(task: dict, state: str) -> dict:
@@ -1739,18 +2882,39 @@ def recorded(task: dict, state: str) -> dict:
     if (not task.get("started") or state == task.get("state")
             or (task.get("state") == "canceled" and state in ("done", "background"))):
         return {}
-    return dict(state=state, **({"finished": time.time()} if state in ("done", "background") else {}))
+    return dict(state=state, **({"finished": time.time()} if state in ("done", "background", "gone") else {}))
+
+
+def queue_report(q: dict) -> Tuple[str, int]:
+    """The report of a task that hasn't started from the queue (yet)."""
+    short = q["id"]
+    if q.get("state") == "failed":
+        return f"❌ Antigravity task {short} couldn't start from the queue: {q.get('error') or '?'}", 1
+    if q.get("state") == "canceled":
+        return f"Antigravity task {short} was taken off the queue before it started.", 2
+    limit = int((q.get("params") or {}).get("max_parallel") or 0)
+    brief = next((ln.strip() for ln in str(q.get("brief") or "").splitlines() if ln.strip()), "")
+    return (f"⏸ Antigravity task {short} waits in the queue ({queue_position(q)}; at most {limit} run at once) — it "
+            f"starts by itself when a slot frees up.\nBrief: {brief[:160]}\nNext: wait for it → delegate.py wait {short} "
+            f"(in the background), or take it off the queue → delegate.py cancel {short}."), 3
 
 
 def cmd_result(a) -> int:
     task = task_for(a.id)
+    if task["id"].startswith("q-"):
+        text, code = queue_report(task)
+        print(text)
+        return code
     ls = connect()
     state, info = state_now(ls, task)
-    text, code = render(ls, task, state, info, full=a.full)
-    fields = recorded(task, state)
-    shown = [m["id"] for m in task.get("chat") or [] if m.get("from") == "antigravity" and m.get("id")]
+    text, code, facts = render(ls, task, state, info, full=a.full)
+    fields = recorded(task, "gone" if info.get("gone") else state)
+    shown = shown_end(task, state)
     if shown:
         fields["told_add"] = shown  # a watch won't repeat them
+    turn = str(int(task.get("turn") or 0))
+    if state == "done" and facts.get("calls") and turn not in (task.get("costs") or {}):
+        fields["costs"] = dict(task.get("costs") or {}, **{turn: facts})
     if fields:
         update(task, **fields)
     print(text)
@@ -1771,6 +2935,8 @@ def cmd_reply(a) -> int:
     task = task_for(a.id)
     message = read_message(a, "reply")
     s, asked = deliver(connect(), task, message)
+    if task.get("retries_max"):
+        ensure_supervisor()
     short = task["id"][:8]
     idle = s.get("status") == "CASCADE_RUN_STATUS_IDLE"
     print(("Answered its question" if asked else "Sent your message") + f" to Antigravity task {task['id']}"
@@ -1779,16 +2945,29 @@ def cmd_reply(a) -> int:
     return 0
 
 
+def untold_end(t: dict) -> bool:
+    """A task that is over, but no watch and no report has told Claude Code so yet (the supervisor or `list` saw the
+    end first, between two watches): the next watch tells it."""
+    if time.time() - float(t.get("finished") or 0) > 6 * 3600:
+        return False
+    told = set(t.get("told") or [])
+    if t["id"].startswith("q-"):
+        return t.get("state") == "failed" and f"start:{t['id']}" not in told
+    return t.get("state") in ("done", "gone") and f"end:{int(t.get('turn') or 0)}" not in told
+
+
 def watched(ids: List[str]) -> List[dict]:
-    """The tasks `watch` follows: the ids given, or else the running ones this Claude Code session started (from
-    this folder, when the session is unknown) in the last day."""
+    """The tasks `watch` follows: the ids given (a queued one too), or else the ones that this Claude Code session
+    started (from this folder, when the session is unknown) in the last day and that aren't over — or are, without
+    anyone having told Claude Code yet."""
     if ids:
         return [task_for(i) for i in ids]
     session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     here = os.path.realpath(os.getcwd())
     out = []
     for t in records():
-        if time.time() - float(t.get("started") or 0) > 86400 or t.get("state") not in NOT_OVER:
+        when = float(t.get("started") or t.get("queued") or 0)
+        if time.time() - when > 86400 or (t.get("state") not in NOT_OVER + ("starting",) and not untold_end(t)):
             continue
         cwd = str(t.get("cwd") or "")
         if (t.get("claude_session") == session) if session else (cwd and (inside(cwd, here) or inside(here, cwd))):
@@ -1812,92 +2991,200 @@ def final_status(ls: LS, cid: str, count: int) -> str:
     return ""
 
 
-def talk_events(task: dict, told: set) -> List[str]:
-    """The agent's messages Claude Code hasn't been shown yet, as `watch` events (and mark them shown)."""
+Event = Tuple[str, Optional[str]]  # (key, text): told once per key; a None text is only marked as told
+
+
+def talk_events(task: dict) -> List[Event]:
+    """The agent's messages to Claude Code as `watch` events (a question already answered is only marked told)."""
     short, out = task["id"][:8], []
     still_open = {m.get("id") for m in open_questions(task)}
     for m in task.get("chat") or []:
-        if m.get("from") != "antigravity" or m.get("id") in told:
+        if m.get("from") != "antigravity" or not m.get("id"):
             continue
-        told.add(m["id"])
-        if m.get("kind") == "question" and m.get("id") not in still_open:
-            continue  # you have answered it already
-        if m.get("kind") == "question":
-            out.append(f"❓ Antigravity task {short} asks you (its words, not the user's):\n{indent(m['text'])}\n"
-                       f"  → answer: delegate.py reply {short} \"…\" — it waits for the answer")
+        if m.get("kind") == "question" and m["id"] not in still_open:
+            out.append((m["id"], None))  # you have answered it already
+        elif m.get("kind") == "question":
+            out.append((m["id"], f"❓ Antigravity task {short} asks you (its words, not the user's):\n{indent(m['text'])}\n"
+                                 f"  → answer: delegate.py reply {short} \"…\" — it waits for the answer"))
         else:
-            out.append(f"💬 Antigravity task {short} tells you (its words, not the user's):\n{indent(m['text'])}\n"
-                       f"  (it keeps working; reply only if it helps: delegate.py reply {short} \"…\")")
+            out.append((m["id"], f"💬 Antigravity task {short} tells you (its words, not the user's):\n{indent(m['text'])}\n"
+                                 f"  (it keeps working; reply only if it helps: delegate.py reply {short} \"…\")"))
     return out
 
 
-def watch_events(ls: LS, task: dict, told: set) -> Tuple[List[str], bool]:
-    """New events of one task for `watch`, and whether the task is over."""
+def watch_events(ls: LS, task: dict) -> Tuple[List[Event], bool]:
+    """The events of one task for `watch` (each with its key), and whether the task is over."""
     short = task["id"][:8]
     listen(ls, task)
-    out = talk_events(task, told)
-    s = summary(ls, task["id"])
+    out = talk_events(task)
+    out += [(f"resume:{r.get('count')}", resume_line(task, r)) for r in task.get("resumes") or []]
+    found = listed(ls, task["id"])
+    key = f"end:{int(task.get('turn') or 0)}"
+    if gone(task, found):
+        out.append((key, f"❌ Antigravity task {short} is gone: Antigravity no longer lists its conversation (deleted in "
+                         "the app?) — nothing more comes from it"))
+        update(task, state="gone", finished=time.time())
+        return out, True
+    s = found or {}
     status = str(s.get("status") or "")
     if status in ("CASCADE_RUN_STATUS_RUNNING", "CASCADE_RUN_STATUS_BUSY"):
         ask, _ = pending(ls, task["id"], max(int(task.get("turn") or 0), int(task.get("since") or 0)))
-        key = f"approval:{ask.get('step')}" if ask else ""
-        if ask and key not in told:
-            told.add(key)
-            out.append(f"⏸ Antigravity task {short} waits for the user's approval in Antigravity: {ask.get('action')} "
-                       f"{ask.get('target')}".rstrip() + f" → tell the user (only they approve), or delegate.py cancel {short}")
+        if ask:
+            out.append((f"approval:{ask.get('step')}",
+                        f"⏸ Antigravity task {short} waits for the user's approval in Antigravity: {ask.get('action')} "
+                        f"{ask.get('target')}".rstrip() + f" → tell the user (only they approve), or delegate.py cancel {short}"))
         return out, False
     if not status or open_questions(task):
         return out, False  # it ended its turn to wait for your answer (or the summary didn't come): not over
+    what, entry = auto_resume(ls, task, s)
+    if what:
+        if entry:
+            out.append((f"resume:{entry['count']}", resume_line(task, entry)))
+        return out, False  # Antigravity stopped it with an error: resumed, or about to be
     if background_runs(ls, task["id"]):
         return out, False  # idle, but something it started still runs — it goes on when that finishes
     since = max(int(task.get("turn") or 0), int(task.get("since") or 0))
     if not answered(ls, task["id"], since):
         return out, False  # a message to it hasn't been picked up yet
     listen(ls, task, start=int(task.get("turn") or 0))  # once more over the whole turn before calling it over
-    out += talk_events(task, told)
+    out += talk_events(task)
     if open_questions(task):
         return out, False  # it ended its turn to wait for your answer
     ended = str(s.get("latestExecutorTerminationReason") or "")
     failed = FAILED_ENDS.get(ended)
     if failed:
-        out.append(f"❌ Antigravity task {short} {failed} → delegate.py result {short}")
+        err = ""
+        if ended.endswith("_ERROR"):
+            count = int(s.get("stepCount") or 0)
+            base = max(int(task.get("turn") or 0), count - 40)
+            try:
+                steps = rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": task["id"], "stepOffset": base}, timeout=30)
+                err = turn_error([x for x in steps.get("steps") or [] if isinstance(x, dict)], base)[0]
+            except SOFT:
+                pass
+        out.append((key, f"❌ Antigravity task {short} {failed}" + (f": «{err[:200]}»" if err else "")
+                    + f" → delegate.py result {short}"))
     else:
         verdict = final_status(ls, task["id"], int(s.get("stepCount") or 0))
-        out.append(f"✅ Antigravity task {short} finished" + (f" (STATUS: {verdict})" if verdict else "")
-                   + f" → read its report: delegate.py result {short}, then check it (delegate.py diff {short})")
+        out.append((key, f"✅ Antigravity task {short} finished" + (f" (STATUS: {verdict})" if verdict else "")
+                    + f" → read its report: delegate.py result {short}, then check it (delegate.py diff {short})"))
     update(task, state="canceled" if ended.endswith("USER_CANCELED") else "done", finished=time.time())
     return out, True
 
 
+def queue_events(q: dict) -> Tuple[List[Event], Optional[dict], bool]:
+    """A queued task for `watch`: its start (the task it became), or its end without starting. (events, the task
+    to follow now or None, whether this entry is over)."""
+    state = q.get("state")
+    if state == "started" and q.get("started_as"):
+        task = load(str(q["started_as"]))
+        if not task:
+            return [], None, True
+        return ([(f"start:{task['id']}", f"▶ Antigravity task {q['id']} left the queue: it runs now as {task['id'][:8]} "
+                                         f"on {task.get('label') or '?'} — events follow")], task, True)
+    if state == "failed":
+        return [(f"start:{q['id']}", f"❌ Antigravity task {q['id']} couldn't start: {q.get('error') or '?'} → "
+                                      "delegate.py list")], None, True
+    if state == "canceled":
+        return [], None, True
+    return [], None, False
+
+
+def number(text: str, n: int) -> str:
+    """«❓ Antigravity task …» → «❓ #3 Antigravity task …»."""
+    head, _, rest = text.partition(" ")
+    return f"{head} #{n} {rest}"
+
+
+def watching(task: dict, me: dict) -> bool:
+    """One watch per task: True when this watch (`me`) has the task — it takes over from an older watch, or from one
+    that stopped beating; False when a newer, live watch has it (then this one leaves it alone)."""
+    w = task.get("watcher") or {}
+    if w.get("id") == me["id"]:
+        if time.time() - float(w.get("beat") or 0) > 30:
+            take(task, me)
+        return True
+    if float(w.get("since") or 0) > me["since"] and time.time() - float(w.get("beat") or 0) < 90:
+        return False
+    take(task, me)
+    return True
+
+
+def take(task: dict, me: dict) -> None:
+    def change(rec: dict) -> bool:
+        rec["watcher"] = dict(me, beat=time.time(), pid=os.getpid())
+        return True
+    transact(task, change)
+
+
 def cmd_watch(a) -> int:
     """For Claude Code's Monitor tool: every stdout line is an event, so print only what to act on — the agent's
-    questions and messages, an approval it waits for, its end — and exit when every watched task is over."""
+    questions and messages, an approval it waits for, a resume after an error, a queued task that starts, the end —,
+    numbered per task (#1, #2 …) and never twice (each is claimed in the task's record before it is printed, and a
+    newer watch takes a task over). Ends when every watched task is over — with --follow it also takes the tasks
+    this session starts later and keeps going until --timeout (0: no limit)."""
+    follow = bool(getattr(a, "follow", False))
     tasks = watched(a.ids)
-    if not tasks:
-        print("No running Antigravity tasks to watch (delegate.py list shows the recent ones).")
+    if not tasks and not follow:
+        print("No running Antigravity tasks to watch (delegate.py list shows the recent ones; watch --follow waits "
+              "for new ones).")
         return 0
     ls = connect()
-    told = {t["id"]: set(t.get("told") or []) for t in tasks}
-    deadline = time.time() + max(a.timeout, 1.0)
-    live = list(tasks)
-    while live:
-        for t in list(live):
-            told[t["id"]] |= set(t.get("told") or [])  # what a wait or result has shown meanwhile
-            events, over = watch_events(ls, t, told[t["id"]])
+    me = {"id": uuid.uuid4().hex[:10], "since": time.time()}
+    live: Dict[str, dict] = {}
+    for t in tasks:
+        take(t, me)
+        live[t["id"]] = t
+    deadline = time.time() + a.timeout if a.timeout and a.timeout > 0 else None
+    printed, scanned, dispatched = 0, time.time(), 0.0
+    while True:
+        for tid in list(live):
+            t = load(tid) or live[tid]  # what a wait, a reply or the supervisor wrote meanwhile
+            if not watching(t, me):
+                del live[tid]  # a newer watch has it now: its events go there
+                continue
+            if tid.startswith("q-"):
+                events, task, over = queue_events(t)
+            else:
+                (events, over), task = watch_events(ls, t), None
             if events:
-                print("\n".join(events), flush=True)
-            if events or over:
-                update(t, told_add=sorted(told[t["id"]]))
+                keys = list(dict.fromkeys(k for k, _ in events))  # the last look reads the talk twice: once each
+                new, n = claim_events(t, keys, list(dict.fromkeys(k for k, text in events if text)))
+                lines, done_keys = [], set()
+                for key, text in events:
+                    if text and key in new and key not in done_keys:
+                        done_keys.add(key)
+                        lines.append(number(text, n))
+                        n += 1
+                if lines:
+                    print("\n".join(lines), flush=True)
+                    printed += len(lines)
             if over:
-                live.remove(t)
-        if not live:
-            break
-        if time.time() >= deadline:
-            print("⏳ Still running: " + ", ".join(t["id"][:8] for t in live) + " — watch again: delegate.py watch "
-                  + " ".join(t["id"][:8] for t in live), flush=True)
-            return 3
+                del live[tid]
+                if task and task["id"] not in live:
+                    take(task, me)
+                    live[task["id"]] = task
+        if follow and time.time() - scanned >= 10:
+            scanned = time.time()
+            for t in watched([]):
+                if t["id"] not in live and watching(t, me):
+                    live[t["id"]] = t
+        if not live and not follow:
+            return 0
+        if deadline and time.time() >= deadline:
+            if live:
+                ids = [i if i.startswith("q-") else i[:8] for i in live]
+                again = "delegate.py watch --follow" if follow else "delegate.py watch " + " ".join(ids)
+                print(f"⏳ watch: still running — {', '.join(ids)}; {printed} event{'s' if printed != 1 else ''} in "
+                      f"this watch. Start it again to go on: {again}", flush=True)
+            return 0
+        if any(i.startswith("q-") for i in live) and time.time() - dispatched >= POLL:
+            dispatched = time.time()  # in case no supervisor could run: start what a free slot allows
+            try:
+                dispatch(ls)
+            except SOFT:
+                pass
         time.sleep(WATCH_POLL)
-    return 0
 
 
 def cmd_talk(a) -> int:
@@ -1953,8 +3240,22 @@ def cmd_diff(a) -> int:
     return 0
 
 
+def follow_up(ls: LS, task: dict, message: str) -> dict:
+    """Send more work into a task's conversation once its turn is over (a follow-up or the next piece of a series):
+    the report from here on covers only this new turn."""
+    before = weekly_left(task["label"], quota(ls)) if task.get("label") else task.get("quota_before")
+    s, _ = deliver(ls, task, message, kind="follow-up")
+    update(task, turn=int(s.get("stepCount") or 0), sent=time.time(), quota_before=before, state="running")
+    if task.get("retries_max"):
+        ensure_supervisor()
+    return s
+
+
 def cmd_send(a) -> int:
     task = task_for(a.id)
+    if task["id"].startswith("q-"):
+        raise Failure(f"{task['id']} hasn't started yet (it waits in the queue): wait for it first, or cancel it and "
+                      "run a new task with the whole brief.")
     message = read_message(a, "follow-up message")
     ls = connect()
     s = summary(ls, task["id"])
@@ -1967,9 +3268,7 @@ def cmd_send(a) -> int:
         print(("Answered its question" if asked else "It is still working — sent as a message it reads between its "
                "steps") + f" (Antigravity task {task['id']}).", flush=True)
     else:
-        before = weekly_left(task["label"], quota(ls)) if task.get("label") else task.get("quota_before")
-        s, _ = deliver(ls, task, message, kind="follow-up")
-        update(task, turn=int(s.get("stepCount") or 0), sent=time.time(), quota_before=before)
+        follow_up(ls, task, message)
         print(f"Sent the follow-up to Antigravity task {task['id']}.", flush=True)
     if a.no_wait:
         print(f"Wait for it with: delegate.py wait {task['id'][:8]}  (run that in the background)")
@@ -1977,8 +3276,145 @@ def cmd_send(a) -> int:
     return finish(ls, task, a.timeout)
 
 
+def last_report(ls: LS, task: dict) -> str:
+    """The STATUS / CHANGED / CHECKS / NOTES lines of a task's last report, for a fresh conversation of its series."""
+    try:
+        steps = rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": task["id"]}, timeout=60).get("steps") or []
+    except SOFT:
+        return "(not available)"
+    for st in reversed([x for x in steps if isinstance(x, dict)]):
+        if st.get("type") == "CORTEX_STEP_TYPE_PLANNER_RESPONSE":
+            pr = st.get("plannerResponse") or {}
+            text = str(pr.get("modifiedResponse") or pr.get("response") or "").strip()
+            if re.search(r"^\W*STATUS\W*:", text, re.M):
+                return clean(text, task)[:2500]
+    return "(it left no report)"
+
+
+def cmd_next(a) -> int:
+    """The next piece of a series: in the same conversation once the previous piece is over, so the agent keeps what
+    it read and the cache keeps Antigravity's prompt — a new conversation reads its whole prompt uncached first. A
+    fresh conversation (--fresh, or when the context is nearly full) gets the series' templates, the last piece's
+    report and the new piece."""
+    name = valid_series(a.name)
+    task = series_task(name)
+    if not task:
+        raise Failure(f"no series «{name}» — start it with delegate.py run --series {name} … (its first piece).")
+    message = read_message(a, "piece")
+    if len(message) > BRIEF_LIMIT:  # before waiting for the last piece: it would be refused after the wait anyway
+        raise Failure(f"the piece has {len(message)} characters, more than the {BRIEF_LIMIT} a brief takes — nothing "
+                      "was sent. Put the details in a file in the project and point the piece at it.")
+    ls = connect()
+    began = time.time()
+    state, info = state_now(ls, task)
+    pieces = task.get("pieces") or [{"n": 1, "turn": 0}]
+    n = int(pieces[-1].get("n") or len(pieces)) + 1
+    if state == "question":
+        raise Failure(f"piece {n - 1} of «{name}» waits for your answer to its question — delegate.py reply "
+                      f"{task['id'][:8]} \"…\" first (delegate.py result {task['id'][:8]} shows it).")
+    if state == "approval":
+        raise Failure(f"piece {n - 1} of «{name}» waits for the user's approval in Antigravity — that comes first.")
+    if state in ("running", "background", "timeout"):
+        print(f"Piece {n - 1} of «{name}» is still running — waiting for it to end before piece {n} …", flush=True)
+        state, info = wait(ls, task, a.timeout)
+        text, code, facts = render(ls, task, state, info)
+        if state != "done":
+            print(text)
+            return code or 3
+        print(f"Piece {n - 1} of «{name}» ended — its report (the next piece's report replaces it in `result`):\n"
+              f"{text}\n", flush=True)  # read it now: after the next piece, `result` covers only the new turn
+        update(task, state="done", finished=time.time(),
+               costs=dict(task.get("costs") or {}, **{str(int(task.get("turn") or 0)): facts}))
+    table = prices()
+    use = usage(ls, task["id"], 0, table)
+    full = use.get("context", 0) > 0.75 * window_of(task.get("label") or "", table)
+    if a.fresh or full:
+        why = "--fresh" if a.fresh else f"its context is nearly full ({kilo(use['context'])} tokens)"
+        brief = FRESH_SERIES.format(name=name, done=n - 1, last=last_report(ls, task)) + message
+        p = {"brief": brief, "model": a.model or task.get("model") or "standard", "cwd": task.get("cwd") or os.getcwd(),
+             "title": f"{name} #{n}", "reference": task.get("series_reference") or "", "series": name, "piece": n,
+             "retries": int(task.get("retries_max") or 0), "claude_session": os.environ.get("CLAUDE_CODE_SESSION_ID", "")}
+        new, notes, model_why, created = start_task(ls, p)
+        print(f"Piece {n} of «{name}» starts a new conversation ({why}).", flush=True)
+        print("\n".join(started_lines(new, notes, model_why, created)), flush=True)
+        if new.get("retries_max"):
+            ensure_supervisor()
+        task = new
+    else:
+        follow_up(ls, task, PIECE.format(n=n, name=name, message=message))
+        update(task, pieces=(task.get("pieces") or [{"n": 1, "turn": 0, "at": task.get("started")}])
+               + [{"n": n, "turn": int(task.get("turn") or 0), "at": time.time(), "brief": message[:200]}])
+        print(f"Sent piece {n} of «{name}» to Antigravity task {task['id']} (same conversation, context "
+              f"{kilo(use.get('context', 0))} tokens).", flush=True)
+    if a.no_wait:
+        print(f"Wait for it with: delegate.py wait {task['id'][:8]}  (in the background), or keep a watch running.")
+        return 0
+    return finish(ls, task, max(a.timeout - (time.time() - began), 1.0))
+
+
+def cmd_series(a) -> int:
+    """The pieces of a series: which conversation, when, and the STATUS line each ended with."""
+    name = valid_series(a.name)
+    tasks = sorted((r for r in records() if r.get("series") == name and not r["id"].startswith("q-")),
+                   key=lambda r: float(r.get("started") or 0))
+    if not tasks:
+        raise Failure(f"no series «{name}».")
+    ls = discover()
+    lines = [f"Series «{name}» ({len(tasks)} conversation{'s' if len(tasks) != 1 else ''}):"]
+    for t in tasks:
+        steps: List[dict] = []
+        if ls:
+            try:
+                steps = [x for x in rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": t["id"]}, timeout=60).get("steps")
+                         or [] if isinstance(x, dict)]
+            except SOFT:
+                steps = []
+        pieces = t.get("pieces") or [{"n": 1, "turn": 0, "at": t.get("started")}]
+        lines.append(f"  {t['id'][:8]} — {t.get('label') or t.get('model') or '?'} · {t.get('state') or '?'}")
+        for i, pc in enumerate(pieces):
+            lo = int(pc.get("turn") or 0)
+            hi = int(pieces[i + 1].get("turn") or 0) if i + 1 < len(pieces) else len(steps)
+            status = ""
+            for st in steps[lo:hi]:
+                if st.get("type") == "CORTEX_STEP_TYPE_PLANNER_RESPONSE":
+                    pr = st.get("plannerResponse") or {}
+                    m = re.search(r"^\W*STATUS\W*:\W*([^\n]{1,80})", str(pr.get("modifiedResponse") or pr.get("response")
+                                                                          or ""), re.M)
+                    status = m.group(1).strip(" *_`") if m else status
+            when = time.strftime("%H:%M", time.localtime(float(pc.get("at") or t.get("started") or 0)))
+            brief = re.sub(r"\s+", " ", str(pc.get("brief") or "")).strip()
+            lines.append(f"    #{pc.get('n')} {when} {('STATUS: ' + status) if status else '(no report yet)'}"
+                         + (f" — {brief[:80]}" if brief else ""))
+    lines.append(f"Next piece: delegate.py next {name} \"…\" (same conversation; --fresh for a new one)")
+    print("\n".join(lines))
+    return 0
+
+
 def cmd_cancel(a) -> int:
-    task = task_for(a.id)
+    task = task_for(a.id, follow=False)
+    if task["id"].startswith("q-"):
+        deadline, seen = time.time() + 120, [""]
+
+        def take_off(rec: dict) -> bool:  # under the lock: a dispatcher can't start it between the look and the cancel
+            seen[0] = str(rec.get("state") or "")
+            if seen[0] in ("queued", "failed"):
+                rec["state"] = "canceled"
+                return True
+            return False
+
+        while True:
+            if transact(task, take_off):
+                print(f"Took Antigravity task {task['id']} off the queue — it never started.")
+                return 0
+            if seen[0] == "starting" and time.time() < deadline:
+                time.sleep(1)  # it is being started this very moment: stop what it becomes
+                continue
+            break
+        if seen[0] != "started" or not task.get("started_as"):
+            print(f"Antigravity task {task['id']} isn't in the queue ({seen[0] or '?'}).")
+            return 0
+        print(f"Queued task {task['id']} has started as {str(task['started_as'])[:8]} — stopping that.", flush=True)
+        task = task_for(str(task["started_as"]))
     ls = connect()
     try:
         rpc(ls, "CancelCascadeInvocation", {"cascadeId": task["id"]})
@@ -1992,8 +3428,10 @@ def cmd_cancel(a) -> int:
 
 
 def cmd_list(a) -> int:
-    tasks = records()[:a.limit]
-    if not tasks:
+    every = [r for r in records() if r.get("state") != "started"]  # a queued task that started is listed as itself
+    queue = sorted((r for r in every if r.get("state") in ("queued", "starting")), key=lambda r: float(r.get("queued") or 0))
+    tasks = [r for r in every if r not in queue][:a.limit]
+    if not tasks and not queue:
         print("No delegated tasks yet.")
         return 0
     ls = discover()  # just a list: don't start Antigravity for it
@@ -2008,14 +3446,23 @@ def cmd_list(a) -> int:
              and not open_questions(t)]
     def look(t: dict) -> str:
         try:
-            return idle_state(ls, t)
+            return idle_state(ls, t, live.get(t["id"]) or {})
         except SOFT:
             return ""
     found: Dict[str, str] = {}
     if probe:
         with ThreadPoolExecutor(max_workers=min(len(probe), 8)) as pool:
             found = dict(zip([t["id"] for t in probe], pool.map(look, probe)))
-    lines = ["Recent Antigravity tasks (newest first):"]
+    lines = []
+    if queue:
+        limit = max(int((q.get("params") or {}).get("max_parallel") or 0) for q in queue)
+        lines.append(f"Queued (they start by themselves, oldest first; at most {limit} run at once):")
+        for q in queue:
+            age = span(time.time() - float(q.get("queued") or time.time())) + " ago"
+            lines.append(f"  {q['id']}  {q.get('state'):10} {age:12} --model {q.get('model') or '?'}  "
+                         f"{q.get('title') or ''}  [{q.get('cwd') or ''}]")
+        lines.append("")
+    lines.append("Recent Antigravity tasks (newest first):")
     for t in tasks:
         state = "running" if status[t["id"]].endswith(("RUNNING", "BUSY")) else t.get("state") or "?"
         if open_questions(t) and state in NOT_OVER + ("done",):
@@ -2027,9 +3474,92 @@ def cmd_list(a) -> int:
                 update(t, **fields)
         elif state in ("running", "question") and status[t["id"]].endswith("IDLE"):
             state = "done"  # the language server couldn't say more
-        age = span(time.time() - (t.get("started") or time.time())) + " ago"
+        age = span(time.time() - float(t.get("started") or t.get("queued") or time.time())) + " ago"
+        extra = [f"resumed ×{len(t['resumes'])}"] if t.get("resumes") else []
+        if t.get("series"):
+            extra.append(f"series «{t['series']}» #{(t.get('pieces') or [{'n': 1}])[-1].get('n')}")
         lines.append(f"  {t['id'][:8]}  {state:10} {age:12} {t.get('label') or t.get('model') or '?'}  "
-                     f"{t.get('title') or ''}  [{t.get('cwd') or ''}]")
+                     f"{t.get('title') or ''}  [{t.get('cwd') or ''}]" + (f"  ({', '.join(extra)})" if extra else ""))
+    print("\n".join(lines))
+    return 0
+
+
+def cmd_settings(a) -> int:
+    """Show or change the bridge's own defaults."""
+    changes = {k: v for k, v in (("max_parallel", a.max_parallel), ("retries", a.retries)) if v is not None}
+    for key, v in changes.items():
+        if not 0 <= v <= (50 if key == "max_parallel" else 10):
+            raise Failure(f"--{key.replace('_', '-')} must be between 0 and {50 if key == 'max_parallel' else 10}.")
+    if changes:
+        try:
+            with open(BRIDGE_SETTINGS, encoding="utf-8") as f:
+                stored = json.load(f)
+        except (OSError, ValueError):
+            stored = {}
+        stored = dict(stored if isinstance(stored, dict) else {}, **changes)
+        os.makedirs(TASKS, exist_ok=True)
+        tmp = f"{BRIDGE_SETTINGS}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(stored, f, indent=1)
+        compat.replace(tmp, BRIDGE_SETTINGS)
+    s = bridge_settings()
+    print(("Saved. " if changes else "") + "The bridge's defaults (delegate.py settings; per task: run --max-parallel / "
+          "--retries):")
+    print(f"  max-parallel {s['max_parallel']}: " + (f"at most {s['max_parallel']} tasks run at once — more wait in a "
+                                                     "queue and start by themselves" if s["max_parallel"] else
+                                                     "no limit (0) — every run starts at once"))
+    print(f"  retries {s['retries']}: " + (f"a task Antigravity stops with an error is resumed up to {s['retries']} "
+                                           "time(s)" if s["retries"] else "no automatic resume (0)"))
+    for var in ("AGP_DELEGATE_MAX_PARALLEL", "AGP_DELEGATE_RETRIES"):
+        if os.environ.get(var):
+            print(f"  ({var}={os.environ[var]} overrides the saved value)")
+    return 0
+
+
+def cmd_wake(a) -> int:
+    """Start Antigravity if it isn't running, and wait until its language server answers and lists its models."""
+    began = time.time()
+    ls = connect(timeout=a.timeout)
+    n = ready_models(ls, began + max(a.timeout, 1.0))
+    if not n:
+        raise Failure(f"Antigravity runs but lists no models after {span(time.time() - began)} — is it signed in? Ask "
+                      "the user to look at it.")
+    found = compat.language_server()
+    version = f" {found.version}" if found and found.version else ""
+    print(f"Antigravity{version} is ready: {n} models (took {span(time.time() - began)}).")
+    return 0
+
+
+def cmd_estimate(a) -> int:
+    """What a task costs here, before handing it over: for the model --model picks now and for every tier."""
+    ls = connect()
+    ms, default = models(ls)
+    groups = quota(ls)
+    now = time.time()
+    recs = records()
+    filled = backfill(ls, recs)
+    if filled:
+        recs = records()
+    m, _notes, why = pick(a.model, ms, default, groups, now)
+    est = estimate_of(m, groups, recs)
+    lines = [f"--model {a.model} → {m['label']} ({why}):", f"  {estimate_text(est)}"]
+    if est.get("share"):
+        lines.append(f"  (quota per API dollar: {pct(est['rate'])} of the week, {est['rate_source']})")
+    firsts = [int(c["first_call"]) for c in first_costs(m["label"], recs) if isinstance(c.get("first_call"), int)]
+    if firsts:
+        lines.append(f"  A new conversation's first call reads ≈{kilo(int(statistics.median(firsts)))} tokens here, none "
+                     "from cache; a follow-up or the next piece of a series (run --series, next) reads it from the cache.")
+    lines += ["", "Every tier now:"]
+    for t in TIERS:
+        try:
+            tm, _n, _w = pick(t, ms, default, groups, now)
+        except Failure:
+            lines.append(f"  {t:9} nothing has quota left now")
+            continue
+        lines.append(f"  {t:9} {tm['label']}: {estimate_text(estimate_of(tm, groups, recs))}")
+    lines += ["", "Quota left:"] + quota_lines(groups, now)
+    if filled:
+        lines.append(f"(Read the cost of {filled} earlier task{'s' if filled != 1 else ''} from Antigravity for this.)")
     print("\n".join(lines))
     return 0
 
@@ -2057,6 +3587,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--brief-file", help="read the brief from this file")
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="seconds to wait (default 1800)")
     p.add_argument("--no-wait", action="store_true", help="print the task id and return at once")
+    p.add_argument("--template", action="append", metavar="FILE", help="a reference text for this kind of task, put "
+                   "before the brief (repeatable)")
+    p.add_argument("--series", metavar="NAME", help="the first piece of a series: later pieces go on in the same "
+                                                    "conversation with `next NAME`")
+    p.add_argument("--retries", type=int, help="resumes after Antigravity stops it with an error (default: settings, 2)")
+    p.add_argument("--max-parallel", type=int, help="queue it while this many tasks run (default: settings; 0: no limit)")
+    p.add_argument("--dry-run", action="store_true", help="show the model, why, and the expected cost; start nothing")
+    p = sub.add_parser("estimate", help="what a task costs here on each tier, from your past tasks")
+    p.add_argument("--model", "-m", default="standard", help="tier, model id or label (default standard)")
+    p = sub.add_parser("next", help="the next piece of a series, in the same conversation")
+    p.add_argument("name")
+    p.add_argument("message", nargs="*", help="the piece's brief ('-' or nothing: read stdin)")
+    p.add_argument("--fresh", action="store_true", help="start a new conversation for it (the series' templates and "
+                                                        "the last report go along)")
+    p.add_argument("--model", "-m", help="for a fresh conversation: the model (default: the series' own)")
+    p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    p.add_argument("--no-wait", action="store_true")
+    p = sub.add_parser("series", help="the pieces of a series and how each ended")
+    p.add_argument("name")
     p = sub.add_parser("wait", help="wait for a task and print its report")
     p.add_argument("id")
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
@@ -2073,10 +3622,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("message", nargs="?")
     p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     p.add_argument("--no-wait", action="store_true")
-    p = sub.add_parser("watch", help="for the Monitor tool: one line per event (questions, messages, approvals, the "
-                                     "end) until the tasks are over")
-    p.add_argument("ids", nargs="*", help="task ids (default: the running tasks this session started)")
-    p.add_argument("--timeout", type=float, default=WATCH_TIMEOUT, help="seconds before it stops (default 1780)")
+    p = sub.add_parser("watch", help="for the Monitor tool: one numbered line per event (questions, messages, "
+                                     "approvals, resumes, the end) until the tasks are over")
+    p.add_argument("ids", nargs="*", help="task ids (default: the tasks this session started that aren't over)")
+    p.add_argument("--follow", action="store_true", help="also the tasks this session starts later; run until --timeout")
+    p.add_argument("--timeout", type=float, default=WATCH_TIMEOUT, help="seconds before it stops (default 1780, just "
+                                                                        "under the Monitor tool's limit; 0: no limit)")
     p = sub.add_parser("reply", help="answer the agent's question, or tell it something while it works")
     p.add_argument("id")
     p.add_argument("message", nargs="*", help="the text ('-' or nothing: read stdin)")
@@ -2084,15 +3635,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         p = sub.add_parser(verb, help=("run by the Antigravity agent: " + ("a question for Claude Code" if verb == "ask"
                                                                            else "a message for Claude Code")))
         p.add_argument("text", nargs="*")
-    p = sub.add_parser("cancel", help="stop a task")
+    p = sub.add_parser("cancel", help="stop a task, or take a queued one off the queue")
     p.add_argument("id")
-    p = sub.add_parser("list", help="recent tasks")
+    p = sub.add_parser("list", help="recent tasks, the queue first")
     p.add_argument("--limit", type=int, default=15)
+    p = sub.add_parser("settings", help="the bridge's defaults: tasks at once (a queue for more), resumes after errors")
+    p.add_argument("--max-parallel", type=int, help="tasks running at once; more wait in a queue (0: no limit)")
+    p.add_argument("--retries", type=int, help="resumes per task after Antigravity stops it with an error (0: none)")
+    p = sub.add_parser("wake", help="start Antigravity if it isn't running and wait until it is ready")
+    p.add_argument("--timeout", type=float, default=START_TIMEOUT, help="seconds to wait (default 180)")
     sub.add_parser("statusline", help="as Claude Code's statusLine command: remember its rate_limits for budget")
+    sub.add_parser("supervise", help="(starts by itself) start queued tasks, resume tasks stopped by an error")
     a = ap.parse_args(argv)
     handlers = {"budget": cmd_budget, "models": cmd_models, "run": cmd_run, "wait": cmd_wait, "result": cmd_result,
                 "diff": cmd_diff, "send": cmd_send, "watch": cmd_watch, "reply": cmd_reply, "ask": cmd_talk,
-                "tell": cmd_talk, "cancel": cmd_cancel, "list": cmd_list, "statusline": cmd_statusline}
+                "tell": cmd_talk, "cancel": cmd_cancel, "list": cmd_list, "statusline": cmd_statusline,
+                "estimate": cmd_estimate, "next": cmd_next, "series": cmd_series, "settings": cmd_settings,
+                "wake": cmd_wake, "supervise": cmd_supervise}
     if a.cmd not in handlers:
         ap.print_help()
         return 1

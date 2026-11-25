@@ -934,6 +934,17 @@ def agents_status(ws: str) -> List[str]:
                                          if bypass.get("on") is True else "выключен (включить: «/bypass» в чате)"))
     except Exception as e:
         out.append(f"{WARN} не удалось прочитать состояние агентов: {e}")
+    try:  # hooks/procs.py: agents' commands and the user's own work
+        import procs
+        level, most, names = procs.config(memstore.settings() if memstore else {})
+        label = {"normal": "обычный", "below_normal": "ниже обычного", "idle": "фоновый (idle)"}[level]
+        heavy = (f"тяжёлых процессов агентов одновременно не больше {most} ({', '.join(names[:6])}"
+                 f"{'…' if len(names) > 6 else ''}; сейчас `procs.py heavy`)" if most
+                 else "тяжёлые программы агентов не ограничены (`memory.py config heavy-max 1`)")
+        out.append(f"ℹ️ приоритет команд агентов: {label}" + ("" if level != "normal" else
+                   " (`memory.py config agent-priority below_normal`, если они мешают вашей работе)") + f"; {heavy}")
+    except Exception as e:
+        out.append(f"{WARN} не удалось прочитать ограничения для агентов: {e}")
     try:
         sys.path.insert(0, os.path.join(PLUGIN, "skills", "ui-check", "scripts"))
         import ui_check

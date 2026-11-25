@@ -19,7 +19,8 @@ Reads, never writes:
   * ~/.gemini/antigravity-plus/guard.log — every guard match, one JSON per line {ts, conversation, tool, rule,
     subject} (hooks/guard.py log()); asks are matched to their tool step to see whether the command then ran;
     `overwrite:*` rules are commands the guard fixed on the fly (git flags, BypassSandbox) — «rewritten», neither
-    asks nor denials, so they never count as approved asks or false-positive candidates;
+    asks nor denials, so they never count as approved asks or false-positive candidates; `limit:*` ones are the
+    resource limits on agents' commands (agentPriority, a wait for a heavyMax slot) — «limited», likewise;
   * ~/.gemini/antigravity-plus/state/<id>.checks.json — files whose last edit check still found errors
     (hooks/check_edit.py: sigs «tool|code|msg»).
 Commands are shortened, the home folder shows as ~, and anything token-like is masked. User messages are never
@@ -109,8 +110,10 @@ REFUSED = re.compile(r"\b(denied|rejected|declined|refused)\b", re.I)
 DENY_RULES = {"secret-read", "secret-print", "fake-check", "memory-secret", "memory-elsewhere", "stale-write",
               "git-interactive-patch", "git-interactive", "git-continue-editor", "git-rebase-interactive",
               "gh-auth-login", "gh-web", "gh-prompt",
-              "orchestrator-unverified-plan"}  # hooks/guard.py + orchestrator.py + gitcheck.py (a banned plan step asks)
+              "orchestrator-unverified-plan",  # hooks/guard.py + orchestrator.py + gitcheck.py (a banned plan step asks)
+              "heavy-limit"}  # guard.py: heavyMax heavy processes of agents ran, none ended in time (hooks/procs.py)
 REWRITE_PREFIX = "overwrite:"  # guard.py's PreToolUse `overwrite`: the command ran in a fixed form, nobody was asked
+LIMIT_PREFIX = "limit:"  # guard.py's resource limits (agentPriority, heavyMax): the command ran, nobody was asked
 CHECK_LINE = re.compile(r"^✗ (.+?) — (.*)$")
 FIXED_LINE = re.compile(r"^✓ .+ — fixed")
 OLD_LINT = re.compile(r"^\d+ linter errors in this file")
@@ -520,7 +523,7 @@ def guard_entries(since: dt.datetime) -> List[dict]:
             continue
         rule = str(d["rule"])
         d["decision"] = ("logged (bypass)" if rule.startswith("bypass:") else "rewritten" if rule.startswith(REWRITE_PREFIX)
-                         else "deny" if rule in DENY_RULES else "ask")
+                         else "limited" if rule.startswith(LIMIT_PREFIX) else "deny" if rule in DENY_RULES else "ask")
         d["when"] = ts
         out.append(d)
     return out

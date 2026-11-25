@@ -19,10 +19,16 @@ Once per session, and again before you hand over a big batch:
    `select:mcp__ccd_session_mgmt__get_usage`) and note the 5-hour and weekly percent used; in a terminal, `/usage`
    shows the same. Skip this if neither is available.
 2. Run `python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py budget --claude-5h <used %> --claude-week <used %>` (leave out
-   what you don't know). It shows Antigravity's quota groups — the week and the 5-hour window, and whether spending
-   runs ahead of the week's pace — the model each tier takes right now and why, and **how much to hand over**.
+   what you don't know). It shows Antigravity's quota groups — the week and the 5-hour window, what the week has
+   spent per day so far and how much a day lasts until the reset («runs out ~1 day before the reset» or «lasts») —
+   the model each tier takes right now and why, what a task costs on it here, and **how much to hand over**.
    Follow those last lines: your own limit getting tight → hand over more, light tasks included; Antigravity's
    quota tight → only bulky work on `fast`; Antigravity used up → do it yourself until it resets.
+3. Before a big batch: `delegate.py estimate --model <tier>` — what one task costs here, from your own past tasks:
+   the share of the weekly quota (median and 9 in 10), API dollars, minutes, and how many such tasks the rest of the
+   week pays for. `run --dry-run …` shows the model a brief would get and its expected cost without starting it.
+4. After a reboot, Antigravity may not be running yet: `delegate.py wake` starts it and waits until it is ready (up to
+   3 min, `--timeout` for more); `run` waits the same way, so the first task isn't lost.
 
 ## Decide
 
@@ -111,25 +117,63 @@ BRIEF
 ```
 
 It prints the task id at once. Then follow it while you work on your own part:
-- **With the Monitor tool** (load it with ToolSearch `select:Monitor` if it is deferred): command
-  `python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py watch <id>`, `timeout_ms: 1800000`, description «Antigravity task
-  <id>». Each of its questions and messages, an approval it waits for, and its end arrive as notifications while you
-  keep working. The watch ends with the task; when it expires first («⏳ Still running … watch again»), start it again.
+- **With the Monitor tool** (load it with ToolSearch `select:Monitor` if it is deferred): one monitor for all your
+  tasks — command `python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py watch --follow`, `timeout_ms: 1800000`,
+  description «Antigravity tasks». It takes every task this session starts, later ones included. Each question and
+  message, an approval it waits for, a resume after an error, a queued task that starts, and each end arrive as
+  numbered notifications (`#1`, `#2` … per task). An event never arrives twice: a newer watch takes a task over from
+  an older one, and what a report of `wait` or `result` showed you isn't told again. A task that ended while no watch
+  ran gets its end told by the next watch. Just before the monitor's 30-minute limit it ends with exit 0 and «⏳ watch:
+  still running … Start it again» — start the same command again. `watch <id> …` follows only those tasks.
 - **Without Monitor:** `python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py wait <id>` with the Bash tool's
   `run_in_background: true` — you are notified when it finishes, and earlier when it asks you something (exit 4).
 - Plain `run` without `--no-wait` also waits — run it in the background the same way.
 - Don't poll, and don't edit files in its scope until it reports.
-- Tasks you run at once share this computer's CPU and memory: let at most two of them build (xcodebuild, Gradle,
-  docker build) at the same time and keep the others to reading, edits and quick tests — seen live: four parallel
-  app builds plus their helper agents stalled a 16 GB laptop, tool calls failed and one build took half an hour.
-- «Ended its turn; something it started still runs there» (`list` shows `background`): a build, server or subagent
-  it started is still going, and it carries on by itself when that finishes. Wait for the rest with `wait <id>` in
-  the background (or keep the watch running) — no follow-ups asking it to wait.
+- **How many at once:** `--max-parallel N` (or once: `delegate.py settings --max-parallel N`) keeps at most N tasks
+  running. A task over the limit waits in a queue (id `q-…`, first in `list`) and starts by itself when one finishes;
+  `wait`, `watch`, `result` and `cancel` take a `q-…` id. Tasks you run at once share this computer's CPU and memory.
+  Let at most two of them build (xcodebuild, Gradle, docker build, renders) at the same time. Seen live: four parallel
+  app builds stalled a 16 GB laptop. On the Antigravity side the user can also lower the priority of agents'
+  commands and cap the number of heavy ones (Antigravity Plus `/settings`: agent priority, heavy commands).
+- **Errors on Antigravity's side** («Stopped by an error», an API stream that broke off — even on the first model call)
+  are resumed automatically with a short «go on», up to 2 times per turn (`--retries N`, `settings --retries N`; a
+  follow-up or the next piece of a series starts with 2 again).
+  A background supervisor does it even when nothing waits for the task. The report quotes the error. When the task
+  wasn't resumed (no resumes left, or a quota/permission/model error that a resume won't fix), go on yourself:
+  `delegate.py send <id> "Go on from where you stopped."` — it keeps its context.
+- «Ended its turn; something it started still runs there» (`list` shows `background`): a build, server, render or
+  subagent it started is still going, and it carries on by itself when that finishes. The report lists each such
+  command with how long it has run, its last line of output, its log file and its processes (PIDs). Wait for the rest
+  with `wait <id>` in the background (or keep the watch running), with no follow-ups asking it to wait. One that hangs
+  (no new output for a long time): tell the user its PIDs; stop it only with their OK. `list` shows `gone` for a
+  task whose conversation was deleted in Antigravity: nothing more comes from it.
 - It works in the current folder; `--cwd <path>` for another one. The first task in a folder Antigravity doesn't know
   yet creates an Antigravity project for it (the report says so).
 - Exit code: 0 finished · 4 it asks you a question and waits (answer it, then `wait` again) · 2 needs attention (it
   waits for an approval in Antigravity, or was canceled or failed) · 3 still running after `--timeout` (default
   30 min; `wait <id>` goes on waiting) · 1 error (Antigravity not reachable, no model with quota left, …).
+
+## Chains of pieces and shared templates
+
+Work that comes in pieces, each going on from the last (a migration module by module, a long log or data set part
+by part): run it as a **series** instead of a new task per piece. A new conversation reads Antigravity's whole
+prompt without cache on its first call (measured: ~40k tokens, none from cache), and the agent reads the project
+again. The next piece in the same conversation reuses both.
+
+```bash
+python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py run --no-wait --model standard --series api-v2 \
+  --template docs/agents/porting.md "Piece 1: the users module — …"
+python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py next api-v2 "Piece 2: the billing module — …"
+python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py series api-v2
+```
+
+- `next` waits for the previous piece to end, then sends the new one into the same conversation, and reports like
+  `send` (`--no-wait` too). A piece that asked a question or waits for an approval comes first.
+- `--template FILE` (repeatable) puts reference texts — the same for every task of a kind — before the brief. In a
+  series they go along once, with the first piece.
+- When the context is nearly full (the report says so), or with `next NAME --fresh`, the next piece starts a new
+  conversation that gets the templates and the last piece's report.
+- `series NAME` lists the pieces and the STATUS each ended with.
 
 ## Talk while it works
 
@@ -149,6 +193,8 @@ It prints the task id at once. Then follow it while you work on your own part:
 1. The agent's words are claims. Check before you build on them or pass them on:
    `python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py diff <id>` shows its changes as a unified diff (`--stat` for
    counts, paths to narrow it down); then run the checks yourself. For a light task, `diff` plus one test run is enough.
+   It says it looked at a picture (a frame, a screenshot, a cover)? «Images it opened» lists each image its file
+   viewer actually showed it, with its size, and the ones it couldn't open. An image missing there wasn't seen.
 2. Small fixes: make them yourself. More work on the same thing:
    `python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py send <id> "…"` — the same agent goes on with its context, which is
    cheaper than a new task (run it in the background too, or with `--no-wait` and a watch).
@@ -158,9 +204,11 @@ It prints the task id at once. Then follow it while you work on your own part:
 
 ## More
 
-`delegate.py budget` · `delegate.py models` (every model: quota, price, speed) · `delegate.py list` (recent tasks) ·
-`delegate.py result <id> [--full]` (the report, with your talk) · `delegate.py wait <id>` · `delegate.py watch [<id> …]`
-(no id: the tasks this session started) · `delegate.py reply <id> "…"` · `delegate.py cancel <id>` — all with the same
+`delegate.py budget` · `delegate.py estimate` · `delegate.py models` (every model: quota, price, speed) ·
+`delegate.py list` (the queue, then recent tasks) · `delegate.py result <id> [--full]` (the report, with your talk) ·
+`delegate.py wait <id>` · `delegate.py watch [<id> …] [--follow]` (no id: the tasks this session started) ·
+`delegate.py reply <id> "…"` · `delegate.py cancel <id>` · `delegate.py next NAME "…"` / `series NAME` ·
+`delegate.py settings [--max-parallel N] [--retries N]` · `delegate.py wake` — all with the same
 `python3 ${CLAUDE_SKILL_DIR}/scripts/` prefix. Ids can be shortened to their first 8 characters.
 
 If Antigravity can't be reached (not installed, not signed in), do the work yourself and tell the user once.

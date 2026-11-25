@@ -35,6 +35,8 @@ MODULES: List[Dict] = [
                   "обновлениях выводятся плашками в UI без лишнего расхода токенов (`user_markdown`). "
                   "Встроенный MCP-сервер (`antigravity-plus_tools`) отдаёт 19 типизированных инструментов (`lsp_*`, "
                   "`ci_*`, `deps_audit`, `ui_check`, `mobile_*`, `memory_search`, `git_state`, `quota`). "
+                  "Команды агентов можно запускать с пониженным приоритетом и ограничить число тяжёлых программ "
+                  "одновременно (ffmpeg, blender, xcodebuild…), чтобы они не тормозили вашу работу (/settings). "
                   "Команды: /init (правила проекта в AGENTS.md), /remember, /settings, /doctor, /hooks, /update (новая версия "
                   "одной командой: раз в сутки агент сам скажет, что она вышла; откат одной командой). "
                   "Обязательна: остальные модули работают поверх неё.",
@@ -50,7 +52,9 @@ MODULES: List[Dict] = [
                   "one project don't overwrite each other's edits (returning compact diffs on stale-write conflicts). "
                   "Status banners for Bypass, limits, and updates render inline via `user_markdown` with zero extra model tokens. "
                   "A bundled MCP server (`antigravity-plus_tools`) exposes 19 typed tools (`lsp_*`, `ci_*`, `deps_audit`, "
-                  "`ui_check`, `mobile_*`, `memory_search`, `git_state`, `quota`). Commands: /init (project rules in AGENTS.md), "
+                  "`ui_check`, `mobile_*`, `memory_search`, `git_state`, `quota`). Agents' commands can run at a lower "
+                  "priority, and the number of heavy programs at once (ffmpeg, blender, xcodebuild…) can be capped, so "
+                  "they don't slow your own work (/settings). Commands: /init (project rules in AGENTS.md), "
                   "/remember, /settings, /doctor, /hooks, /update (a new release in one command: once a day the agent tells you "
                   "one is out; rolls back in one command). Required: every other module builds on it.",
         },
@@ -326,12 +330,17 @@ MODULES: List[Dict] = [
             "ru": "Навык antigravity для Claude Code (~/.claude/skills) и команда /claude в Antigravity: оба умеют "
                   "передавать подзадачи друг другу, сверяя квоты обеих сторон. Claude Code отдаёт лёгкую и объёмную "
                   "рутину агентам Antigravity (Gemini 4 Hydrogen, Neon, Carbon, Claude) и переговаривается с ними по ходу "
-                  "работы; агент Antigravity через /claude (claude_task.py) может запустить `claude -p` на подзадачу "
+                  "работы. Задачи сами продолжаются после ошибок Antigravity, ждут в очереди при лимите одновременных "
+                  "задач, идут сериями в одной беседе; отчёт показывает фоновые команды с PID и открытые картинки, "
+                  "а цену задачи видно до запуска. Агент Antigravity через /claude (claude_task.py) может запустить `claude -p` на подзадачу "
                   "и принять diff и отчёт (только по вашей просьбе или при полном доступе). Ставится, только если "
                   "на компьютере есть Claude Code.",
             "en": "The antigravity skill for Claude Code (~/.claude/skills) plus /claude in Antigravity: both sides "
                   "can hand sub-tasks to each other based on remaining limits. Claude Code sends light and bulky "
-                  "routine work to Antigravity agents (Gemini 4 Hydrogen, Neon, Carbon, Claude) and talks while they run; an "
+                  "routine work to Antigravity agents (Gemini 4 Hydrogen, Neon, Carbon, Claude) and talks while they run. "
+                  "Tasks resume by themselves after Antigravity's errors, wait in a queue under a limit of tasks at once "
+                  "and run as series in one conversation; reports show background commands with PIDs and the images "
+                  "opened, and a task's cost shows before it starts. An "
                   "Antigravity agent can use /claude (claude_task.py) to launch `claude -p` on a sub-task and review "
                   "its diff and report (only on your request or under full access). Installed only when Claude Code is "
                   "on the computer.",

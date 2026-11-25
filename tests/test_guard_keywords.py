@@ -95,4 +95,28 @@ for cmd, want in [
 ]:
     check(f"routes in syntax: {cmd[:70]}", rule(cmd), want)
 
+# 4. the plugin's own settings scripts with a quoted path (the form SKILL.md suggests) — up to 0.28.1 the emptied quotes
+# hid them, so turning secret protection off passed without a question — and the limits the user put on agents'
+# commands (agentPriority, heavyMax, heavyPrograms) are the user's to change; quoted text elsewhere stays data
+for cmd, want in [
+    ('python3 "/home/u/.gemini/config/plugins/antigravity-plus/skills/memory/scripts/memory.py" config protect-secrets off',
+     "protection-off"),
+    ('python3 "/Users/u/My Tools/skills/settings/scripts/settings.py" plugin protect-secrets "off"', "protection-off"),
+    ("python3 /p/skills/settings/scripts/settings.py plugin protect-secrets off", "protection-off"),
+    ('python3 "/p/skills/memory/scripts/memory.py" config heavy-max 0', "agent-limits"),
+    ("python3 /p/skills/settings/scripts/settings.py plugin agent-priority normal", "agent-limits"),
+    ('python3 "/p/skills/settings/scripts/settings.py" plugin heavy-programs "ffmpeg"', "agent-limits"),
+    ('python3 "/p/skills/settings/scripts/settings.py" mcp add docs --url https://mcp.example.com/mcp', "agent-tools"),
+    ("python3 /p/skills/settings/scripts/settings.py plugin auto-memory off", None),
+    ('python3 "/p/skills/settings/scripts/settings.py" show', None),
+    ("python3 /p/skills/memory/scripts/memory.py config", None),
+    ('git commit -m "memory.py config protect-secrets off"', None),
+    ('git commit -m "settings.py" -m "plugin heavy-max 2"', None),
+    ('echo "settings.py plugin protect-secrets off"', None),
+    ('ssh host python3 "/srv/app/skills/memory/scripts/memory.py" config heavy-max 0', None),  # another machine's
+]:
+    check(f"own settings: {cmd[-66:]}", rule(cmd), want)
+hit = guard.analyze_command('python3 "/p/skills/memory/scripts/memory.py" config heavy-max 0', system_only=True)
+check("own settings: the limits ask in Bypass Mode too", hit[0] if hit else None, "agent-limits")
+
 sys.exit(0 if ok else 1)

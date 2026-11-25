@@ -789,6 +789,7 @@
     if (t.status === 'approval') return h('span', { class: 'badge warn' }, 'ждёт вашего разрешения');
     if (t.status === 'running' || t.status === 'timeout') return h('span', { class: 'badge accent' }, 'работает');
     if (t.status === 'background') return h('span', { class: 'badge accent' }, 'работает в фоне');
+    if (t.status === 'queued' || t.status === 'starting') return h('span', { class: 'badge muted' }, 'в очереди');
     if (t.status === 'done') return h('span', { class: 'badge good' }, 'готово');
     if (t.status === 'failed') return h('span', { class: 'badge crit' }, 'ошибка');
     if (t.status === 'canceled') return h('span', { class: 'badge muted' }, 'отменено');
@@ -1031,7 +1032,7 @@
     if (err) { dot.className = 'dot'; txt.textContent = 'ошибка'; return; }
     const last = state.tab === 'session' && state.session && state.session.last_ts;
     const active = last && Date.now() - new Date(last).getTime() < 90000;
-    const activeAgents = isStatusTab && state.status && ((state.status.agents || []).length > 0 || (state.status.bridge || []).some((b) => b.waiting || ['running', 'question', 'approval', 'timeout', 'background'].includes(b.status)));
+    const activeAgents = isStatusTab && state.status && ((state.status.agents || []).length > 0 || (state.status.bridge || []).some((b) => b.waiting || ['running', 'question', 'approval', 'timeout', 'background', 'queued', 'starting'].includes(b.status)));
     dot.className = 'dot' + (active || activeAgents ? ' on' : '');
     const stamp = isStatusTab ? state.statusUpdatedAt : state.updatedAt;
     const ago = stamp ? Math.round((Date.now() - stamp) / 1000) : null;

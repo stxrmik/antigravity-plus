@@ -24,7 +24,8 @@ tools = len(re.findall(r'^    \{"name": "\w+", "script":', read("antigravity-plu
 check("counted 36 skills, 7 subagents, 6 hooks, 19 tools", (skills, agents, len(hooks), tools) == (36, 7, 6, 19), (skills, agents, len(hooks), tools))
 want = f"{skills} skills, {agents} subagents, {len(hooks)} hooks"
 check("AGENTS.md and plugin.json state the counts", want in agents_md and want in manifest and f"{tools}-tool" in agents_md and f"{tools}-tool" in manifest)
-check("README.md states the counts", f"{skills} команд, {agents} субагентов, {len(hooks)} хуков" in readme_ru and f"{tools} инструментов" in readme_ru)
+ru_tools = "инструмент" if tools % 10 == 1 and tools % 100 != 11 else ("инструмента" if 2 <= tools % 10 <= 4 and not 12 <= tools % 100 <= 14 else "инструментов")
+check("README.md states the counts", f"{skills} команд, {agents} субагентов, {len(hooks)} хуков" in readme_ru and f"{tools} {ru_tools}" in readme_ru)
 check("README.en.md states the counts", f"{skills} commands, {agents} subagents, {len(hooks)} hooks, a {tools}-tool" in readme_en)
 
 # --- AGENTS.md size and what it keeps ---

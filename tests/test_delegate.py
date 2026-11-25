@@ -253,7 +253,7 @@ open(fake, "w", encoding="utf-8").write(
 ENV = dict(os.environ, ANTIGRAVITY_LS_ADDRESS=f"127.0.0.1:{server.server_address[1]}", ANTIGRAVITY_CSRF_TOKEN="tok",
            AGP_DELEGATE_AGENTAPI=json.dumps([sys.executable, fake]), AGP_DELEGATE_POLL="0.3",
            AGP_DELEGATE_IDLE_GRACE="1", AGP_DELEGATE_NO_LAUNCH="1", AGP_DELEGATE_WATCH_POLL="0.3",
-           AGP_DELEGATE_IDLE_PROBE="1")
+           AGP_DELEGATE_IDLE_PROBE="1", AGP_DELEGATE_NO_SUPERVISOR="1")  # test_delegate_more.py runs the supervisor
 def run(*args, cwd=ws, env=None, stdin=None):
     r = subprocess.run([sys.executable, DELEGATE, *args], cwd=cwd, env=dict(ENV, **(env or {})), input=stdin,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180)
@@ -387,7 +387,8 @@ check("result: Orchestrator (Neon)'s calls split between the planner and Hydroge
       and "Model: Orchestrator (Neon) · 3 model calls (1 on Orchestrator (Neon), 2 on Gemini 4 Hydrogen (Orchestrator))" in out
       and "weekly «Gemini Models» limit 90.0% → 90.0% left" in out and "CHANGED: src.py — e = 6" in out, out)
 code, out = run("watch", CN[:8], "--timeout", "5")
-check("watch: … finished", code == 0 and "finished (STATUS: done)" in out, out)
+check("watch: … nothing new — the report showed its end already (0.29: an end is told once)", code == 0
+      and "finished" not in out, out)
 code, out = run("run", "--model", "gemini-4-neon-xhigh", "--no-wait", "Tidy the docs.", env={"FAKE_CID": CX})
 check("run --model gemini-4-neon-xhigh: that exact model", code == 0
       and f"Started Antigravity task {CX} — Gemini 4 Neon (XHigh)" in out and "Why this model: your choice" in out
@@ -479,8 +480,8 @@ check("wait after the answer: its report, with the talk, without the talk comman
       and f"it told you: {N1}" in out and f"it asked: {Q1}" in out and "you answered: Yes, keep the alias" in out
       and "NOTES: kept the alias" in out and "delegate.py\" ask" not in out and "Commands it ran" not in out, out)
 code, out = run("watch", C4[:8], "--timeout", "5")
-check("watch after wait: nothing told twice, only its end", code == 0 and N1 not in out and Q1 not in out
-      and "finished (STATUS: done)" in out and f"delegate.py result {C4[:8]}" in out, out)
+check("watch after wait: nothing told twice — its talk and its end were in the report", code == 0 and N1 not in out
+      and Q1 not in out and "finished" not in out, out)
 
 # a question from a command that went to the background, while the agent keeps working: watch (for Monitor)
 SESSION = {"CLAUDE_CODE_SESSION_ID": "sess-test-1"}
@@ -488,11 +489,11 @@ code, out = run("run", "--model", "fast", "--no-wait", "Start the dev server.", 
 check("run --no-wait: says how to follow it (watch with Monitor, or wait)", code == 0
       and f"delegate.py watch {C5[:8]}" in out and "Monitor" in out, out)
 code, out = run("watch", "--timeout", "2", env=SESSION)
-check("watch (no id: this session's running tasks): the question once, then how to go on", code == 3
-      and out.count(Q2) == 1 and f"asks you" in out and f"delegate.py reply {C5[:8]}" in out
-      and f"Still running: {C5[:8]}" in out and C4[:8] not in out, out)
+check("watch (no id: this session's running tasks): the question once, numbered, then how to go on (exit 0)",
+      code == 0 and out.count(Q2) == 1 and f"❓ #1 Antigravity task {C5[:8]} asks you" in out
+      and f"delegate.py reply {C5[:8]}" in out and f"still running — {C5[:8]};" in out and C4[:8] not in out, out)
 code, out = run("watch", C5[:8], "--timeout", "1")
-check("watch again: no repeat", code == 3 and Q2 not in out and "Still running" in out, out)
+check("watch again: no repeat", code == 0 and Q2 not in out and "still running" in out and "0 events" in out, out)
 code, out = run("watch", "--timeout", "1", env={"CLAUDE_CODE_SESSION_ID": "another-session"})
 check("watch in another session: not its tasks", code == 0 and "No running Antigravity tasks" in out, out)
 code, out = run("wait", C5[:8], "--timeout", "3")
@@ -515,8 +516,8 @@ check("the record keeps the talk and the session", rec5.get("claude_session") ==
 # seen live: the ask's step without its command line yet while the tell ran — the watch must not step over it
 code, out = run("run", "--model", "fast", "--no-wait", "Rename calc.", env={"FAKE_CID": C7})
 code, out = run("watch", C7[:8], "--timeout", "4")
-check("watch: a command step not filled in yet is looked at again — the question isn't lost", code == 3
-      and N7 in out and Q7 in out and "finished" not in out, out)
+check("watch: a command step not filled in yet is looked at again — the question isn't lost", code == 0
+      and N7 in out and Q7 in out and "finished" not in out and "💬 #1 " in out and "❓ #2 " in out, out)
 code, out = run("run", "--model", "fast", "--no-wait", "Rename parse_date.", env={"FAKE_CID": C8})
 rec_path = os.path.join(HOME, ".gemini", "antigravity-plus", "delegate", C8 + ".json")
 rec8 = json.load(open(rec_path, encoding="utf-8"))
@@ -525,7 +526,8 @@ json.dump(rec8, open(rec_path, "w", encoding="utf-8"))
 code, out = run("result", C8[:8])
 check("result: one last look over the whole turn finds a question the cursor went past", code == 4 and Q1 in out, out)
 code, out = run("watch", C8[:8], "--timeout", "2")
-check("watch: … and doesn't call such a task finished", "finished" not in out and code == 3, out)
+check("watch: … and doesn't call such a task finished", "finished" not in out and code == 0
+      and "still running" in out, out)
 
 # seen live: it ended its turn to wait for a long build it sent to the background — the summary says IDLE, but the
 # build still runs (WaitForConversationFullyIdle blocks), and the agent goes on when it is over: not finished yet
@@ -543,8 +545,8 @@ code, out = run("list", env={"ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:9"})
 check("list without the language server: the records answer", code == 0
       and list_state(out, CB) == "background", out)
 code, out = run("watch", "--timeout", "2", env=SESSION2)
-check("watch (this session's tasks, a background one among them): keeps watching while the build runs", code == 3
-      and "finished" not in out and f"Still running: {CB[:8]}" in out, out)
+check("watch (this session's tasks, a background one among them): keeps watching while the build runs", code == 0
+      and "finished" not in out and f"still running — {CB[:8]}" in out, out)
 code, out = run("wait", CB[:8], "--timeout", "20")
 check("wait: «background» after its grace time, as before", code == 0
       and f"Antigravity task {CB} ended its turn" in out and record_of(CB).get("state") == "background", out)
@@ -556,7 +558,7 @@ code, out = run("result", CB[:8])
 check("result: finished, with the report it wrote after the build", code == 0
       and f"✅ Antigravity finished task {CB} in 2 min" in out and "BUILD SUCCEEDED" in out and WAITING not in out, out)
 code, out = run("watch", CB[:8], "--timeout", "5")
-check("watch: finished", code == 0 and "finished (STATUS: done)" in out, out)
+check("watch: the end the report showed isn't told again", code == 0 and "finished" not in out, out)
 
 # errors
 code, out = run("run", "--model", "gpt-9", "x", env={"FAKE_CID": C1})
@@ -574,7 +576,8 @@ check("an unknown task id", code == 1 and "no delegated task" in out, out)
 # budget: Claude Code's own limits — unknown, given, from the statusLine — and what to do about them
 code, out = run("budget")
 check("budget: own limits unknown → how to get them", code == 0 and "Claude Code, your own plan: unknown" in out
-      and "get_usage" in out and "«Gemini Models»: week 90% left" in out and "on pace → fine" in out
+      and "get_usage" in out and "«Gemini Models»: week 90% left" in out
+      and "spent 10% a day so far → at that pace it lasts until the reset (15% a day would) → fine" in out
       and "Antigravity's quota is fine: hand over self-contained work, light tasks included" in out, out)
 code, out = run("budget", "--claude-5h", "81", "--claude-week", f"40@{iso(5 * 86400 + 1800)}")
 check("budget: own 5-hour limit at 81% → hand over more", code == 0 and "5 h 81% used" in out and "week 40% used (resets in 5 days" in out
@@ -600,7 +603,8 @@ check("budget: own limits from the statusLine record", "5 h 22% used (resets in 
 QUOTA.update(gemini=[0.3, 5 * 86400 + 1800], claude=[0.6, 20 * 3600 + 600])
 code, out = run("budget")
 check("budget: a quota spent ahead of pace is tight, one about to reset unused is to spend",
-      "«Gemini Models»: week 30% left (resets in 5 days" in out and "spending faster than the week lasts → tight — save it" in out
+      "«Gemini Models»: week 30% left (resets in 5 days" in out and "spent 35% a day so far → at that pace it runs out ~4 days" in out
+      and "before the reset; 6.0% a day would last → tight — save it" in out
       and "«Claude and GPT models»: week 60% left (resets in 20 h)" in out and "→ quota to spare — use it" in out, out)
 check("budget: fast stays on Hydrogen — every quota it draws on is tight",
       "fast      gemini-4-hydrogen-low" in out and "Every quota this tier draws on is tight" in out, out)

@@ -424,7 +424,7 @@ def _read_bridge(agp: str, home: str) -> List[dict]:
     delegate_dir = os.path.join(agp, "delegate")
     for p in glob.glob(os.path.join(delegate_dir, "*.json")):
         base = os.path.basename(p)
-        if base.startswith(".") or base in ("claude-limits.json", "speeds.json"):
+        if base.startswith(".") or base in ("claude-limits.json", "speeds.json", "settings.json"):
             continue
         d = _read_json_dict(p)
         tid = d.get("id")
@@ -432,10 +432,12 @@ def _read_bridge(agp: str, home: str) -> List[dict]:
             continue
         seen_ids.add(tid)
         state = str(d.get("state") or "?")
+        if state == "started":
+            continue  # a queued task that has started: its own record («the task it became») is listed instead
         waiting = bool(d.get("waiting")) or state == "question" or _open_questions(d)
         status = "question" if waiting and state in ("running", "question", "done") else state
         try:
-            started = float(d.get("started") or 0)
+            started = float(d.get("started") or d.get("queued") or 0)
         except (TypeError, ValueError):
             started = 0.0
         items.append({
@@ -477,9 +479,10 @@ def _read_bridge(agp: str, home: str) -> List[dict]:
         })
 
     # delegate.py's states: running, question, approval (the user has to approve a step in Antigravity), timeout
-    # (`wait` gave up, the agent goes on), background (its turn ended, its background work hasn't) — all still on.
-    active = [t for t in items if t["status"] in ("running", "question", "approval", "timeout", "background")
-              or t["waiting"]]
+    # (`wait` gave up, the agent goes on), background (its turn ended, its background work hasn't), queued /
+    # starting (it waits for a free slot: run --max-parallel) — all still on.
+    active = [t for t in items if t["status"] in ("running", "question", "approval", "timeout", "background", "queued",
+                                                  "starting") or t["waiting"]]
     recent = [t for t in items if t not in active]
     active.sort(key=lambda t: (-t["started"], t["id"]))
     recent.sort(key=lambda t: (-t["started"], t["id"]))

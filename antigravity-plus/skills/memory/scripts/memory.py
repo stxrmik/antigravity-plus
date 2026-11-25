@@ -20,8 +20,9 @@ the line for a new memory, so the agent only writes the memory file itself.
                    [finish-tasks on|off] [check-edits on|off] [auto-review on|off] [auto-verify on|off] [protect-secrets on|off]
                    [auto-setup on|off] [parallel-hints on|off] [speed-hints on|off] [fact-checks on|off]
                    [objective-answers on|off] [auto-ci on|off] [git-checks on|off] [lsp-checks on|off]
-                   [quota-hints on|off] [ui-notices on|off]
-                   (settings of the whole plugin live here)
+                   [quota-hints on|off] [ui-notices on|off] [agent-priority normal|below_normal|idle]
+                   [heavy-max N] [heavy-programs NAME,NAME…|default]
+                   (settings of the whole plugin live here; agent-priority and heavy-max: hooks/procs.py)
 
 Also imported by the hooks (session_start.py, guard.py, memory_sync.py). Stdlib only, Python 3.8+.
 """
@@ -55,7 +56,15 @@ DEFAULTS = {"autoMemory": True, "shareWithClaudeCode": True, "recentConversation
             "checkEdits": True, "autoReview": True, "autoVerify": True, "protectSecrets": True, "autoSetup": True,
             "parallelHints": True, "speedHints": True, "factChecks": True, "objectiveAnswers": True, "autoCi": True,
             "gitChecks": True, "updateCheck": True, "autoUpdate": False, "lspChecks": True, "quotaHints": True,
-            "uiNotices": True}
+            "uiNotices": True,
+            # agents' commands and the user's own work (hooks/procs.py): the OS priority of agent commands, and how
+            # many heavy processes (heavyPrograms, by executable name) agents may run at once (0: any number)
+            "agentPriority": "normal", "heavyMax": 0,
+            "heavyPrograms": ["ffmpeg", "blender", "HandBrakeCLI", "x264", "x265", "SvtAv1EncApp", "aomenc", "rav1e",
+                              "xcodebuild", "gradle", "gradlew"]}
+PRIORITIES = ("normal", "below_normal", "idle")  # agentPriority
+HEAVY_MAX = 64                                    # heavyMax at most
+PROGRAM_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")  # one name in heavyPrograms
 
 MAX_FILE = 64_000            # bytes read per memory file
 INDEX_LINES = 200            # like Claude Code: only the head of MEMORY.md goes into the conversation
@@ -77,7 +86,7 @@ LINK = re.compile(r"\]\(<?([^)<>\s]+?\.md)>?\)")
 # ─────────────────────────────── settings & locations ───────────────────────────────
 
 def settings() -> dict:
-    s = dict(DEFAULTS)
+    s = {k: list(v) if isinstance(v, list) else v for k, v in DEFAULTS.items()}  # a caller may change its copy
     try:
         with open(SETTINGS, encoding="utf-8") as f:
             d = json.load(f)
@@ -119,6 +128,27 @@ def save_settings(**changes) -> dict:
         finally:
             compat.unlock(lock_fh)
     return settings()
+
+
+def limit_value(key: str, text: str) -> Tuple[object, str]:
+    """`memory.py config` for agentPriority, heavyMax and heavyPrograms: (the value to save, "") or (None, why it is
+    refused). heavy-programs takes names separated by commas ("ffmpeg,blender"), or `default` for the built-in list."""
+    v = text.strip()
+    if key == "agentPriority":
+        level = v.lower().replace("-", "_")
+        return (level, "") if level in PRIORITIES else (None, "agent-priority is normal, below_normal or idle")
+    if key == "heavyMax":
+        if v.isdigit() and int(v) <= HEAVY_MAX:
+            return int(v), ""
+        return None, f"heavy-max is a whole number from 0 (no limit) to {HEAVY_MAX}"
+    if v.lower() == "default":
+        return list(DEFAULTS["heavyPrograms"]), ""
+    names = [n.strip() for n in v.split(",") if n.strip()]
+    bad = [n for n in names if not PROGRAM_NAME.match(n)]
+    if not names or bad or len(names) > 64:
+        return None, ("heavy-programs is a comma-separated list of program names (ffmpeg,blender,xcodebuild) or "
+                      "default" + (f"; not a program name: {', '.join(bad[:3])}" if bad else ""))
+    return list(dict.fromkeys(names)), ""
 
 
 def slug(path: str) -> str:
@@ -595,7 +625,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "finish-tasks on|off, check-edits on|off, auto-review on|off, auto-verify on|off, "
                          "protect-secrets on|off, auto-setup on|off, parallel-hints on|off, speed-hints on|off, "
                          "fact-checks on|off, objective-answers on|off, auto-ci on|off, git-checks on|off, "
-                         "lsp-checks on|off, quota-hints on|off, ui-notices on|off")
+                         "lsp-checks on|off, quota-hints on|off, ui-notices on|off, "
+                         "agent-priority normal|below_normal|idle, heavy-max N (0: off), "
+                         "heavy-programs NAME,NAME… (or default)")
     a = ap.parse_args(argv)
     ws = os.path.abspath(os.path.expanduser(getattr(a, "workspace", os.getcwd())))
 
@@ -624,14 +656,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "speed-hints": "speedHints", "fact-checks": "factChecks", "objective-answers": "objectiveAnswers",
                 "auto-ci": "autoCi", "git-checks": "gitChecks", "lsp-checks": "lspChecks",
                 "update-check": "updateCheck", "auto-update": "autoUpdate", "quota-hints": "quotaHints",
-                "ui-notices": "uiNotices"}
+                "ui-notices": "uiNotices", "agent-priority": "agentPriority", "heavy-max": "heavyMax",
+                "heavy-programs": "heavyPrograms"}
         p = a.pairs
         if len(p) % 2:
             ap.error("config takes pairs: <key> <value>")
         changes = {}
         for k, v in zip(p[::2], p[1::2]):
             key = keys.get(k)
-            if key == "recentConversations" and v.isdigit():
+            if key in ("agentPriority", "heavyMax", "heavyPrograms"):
+                value, why = limit_value(key, v)
+                if why:
+                    ap.error(f"bad setting: {k} {v} — {why}")
+                changes[key] = value
+            elif key == "recentConversations" and v.isdigit():
                 changes[key] = int(v)
             elif key and key != "recentConversations" and v in ("on", "off"):
                 changes[key] = v == "on"
@@ -641,7 +679,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "auto-verify on|off, protect-secrets on|off, auto-setup on|off, parallel-hints on|off, "
                          "speed-hints on|off, fact-checks on|off, objective-answers on|off, auto-ci on|off, "
                          "git-checks on|off, lsp-checks on|off, update-check on|off, auto-update on|off, "
-                         "quota-hints on|off, ui-notices on|off)")
+                         "quota-hints on|off, ui-notices on|off, agent-priority normal|below_normal|idle, "
+                         "heavy-max N, heavy-programs NAME,NAME…|default)")
         s = save_settings(**changes) if changes else settings()
         print(json.dumps(s, ensure_ascii=False, indent=2))
     return 0

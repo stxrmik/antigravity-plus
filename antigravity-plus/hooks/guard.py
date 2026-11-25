@@ -39,6 +39,10 @@ refusals that aren't questions (secrets printed, fake checks, stale files, git c
 What it lets through is still logged, as "bypass:<rule>".
 A delegated agent's `delegate.py ask|tell` (its questions and messages for Claude Code, which only print a line) gets
 "auto_approve" — only the installed script in ~/.claude/skills/antigravity, and only as one plain command.
+Resource limits on the commands it lets through or asks about (hooks/procs.py; in Bypass Mode too, as they are no
+permission prompts): agentPriority — the background helper lowers the command's processes to below normal or idle
+priority; heavyMax — a command that starts a heavyPrograms program (ffmpeg, blender, xcodebuild…) while that many
+heavy processes of agents run waits up to 20 s for one to end and is refused ("deny") if none does.
 
 Everything else gets "allow", which in Antigravity means "no objection — delegate to the next hook or the
 default policy" (it is NOT auto-approval; that is "auto_approve"), so your permission settings apply unchanged.
@@ -61,6 +65,7 @@ import re
 import shlex
 import socket
 import sys
+import time
 from typing import AbstractSet, Dict, List, Optional, Set, Tuple
 
 import checks
@@ -84,6 +89,7 @@ try:
     import orchestrator
 except Exception:  # optional: exit_plan_mode checks
     orchestrator = None
+procs = None  # hooks/procs.py, the resource limits on agents' commands: imported only when one is on (load_procs)
 
 PLUGIN = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.join(PLUGIN, "skills", "memory", "scripts"))
@@ -177,6 +183,10 @@ SEGMENT_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
      "компьютере."),
     ("protection-off", re.compile(r"\b(settings|memory)\.py\b.*\b(plugin|config)\b.*\bprotect-secrets\s+off\b"),
      "выключение защиты секретов: агент сможет выводить содержимое .env и ключей в разговор."),
+    ("agent-limits", re.compile(r"\b(settings|memory)\.py\b.*\b(plugin|config)\b.*\b(agent-priority|heavy-max|"
+                                r"heavy-programs)\s+\S"),
+     "изменение ограничений, которые пользователь поставил командам агентов (их приоритет, число тяжёлых программ "
+     "одновременно): их меняет только пользователь."),
     ("claude-permissions", re.compile(
         r"\b(claude_task\.py|claude(\.exe|\.cmd)?)\b.*(--dangerously-skip-permissions|"
         r"--permission-mode[=\s]+bypassPermissions|--allow(?:edTools)?[=\s]+[\"']?(?:Bash(?:\(\s*\*\s*\))?[\"']?(?:\s|$)|"
@@ -474,8 +484,8 @@ PIPE_RULES: List[Tuple[str, "re.Pattern[str]", str]] = [
 # DROP TABLE, cloud deletions, publishing, rm -rf of the current folder…) Bypass Mode lets through, and logs.
 SYSTEM_RULES = {"disk-format", "disk-format-win", "system-power", "system-power-win", "security-off", "security-off-win",
                 "sudo", "run-as-admin", "autostart", "kill-all", "fork-bomb", "secrets-read", "agent-tools",
-                "protection-off", "claude-permissions", "rm-dangerous", "system-files", "protected-file",
-                "agent-settings", "scheduled-sidecar"}
+                "protection-off", "agent-limits", "claude-permissions", "rm-dangerous", "system-files",
+                "protected-file", "agent-settings", "scheduled-sidecar"}
 # The stops that protect only this computer — its system folders and startup files, admin rights, OS settings, the
 # agent's own permissions. Text that runs on another machine or inside a container (runs_elsewhere: `ssh host "sudo
 # mkdir -p /root/backup"`, `docker exec app sh -c '…'`, the unquoted words of `ssh host crontab -e` or `kubectl exec
@@ -483,8 +493,13 @@ SYSTEM_RULES = {"disk-format", "disk-format-win", "system-power", "system-power-
 # kill -9 -1, fork bombs, reading private keys and every project-level rule still apply to it. Of check_writes' stops
 # only the recursive chmod/chown of / or a top-level folder stays there.
 LOCAL_RULES = {"system-files", "protected-file", "sudo", "run-as-admin", "autostart", "security-off",
-               "security-off-win", "agent-settings", "agent-tools", "protection-off", "claude-permissions",
-               "scheduled-sidecar", "conversation-delete"}
+               "security-off-win", "agent-settings", "agent-tools", "protection-off", "agent-limits",
+               "claude-permissions", "scheduled-sidecar", "conversation-delete"}
+# The rules on the plugin's own settings scripts read a quoted script path and quoted single words as written:
+# `python3 "<skill_dir>/scripts/settings.py" plugin protect-secrets "off"` is the form SKILL.md suggests, and emptied
+# quotes hid it from them up to 0.28.1. Other quoted text stays data for them too (a commit message about it).
+OWN_SETTINGS_RULES = {"protection-off", "agent-tools", "agent-limits"}
+OWN_QUOTED = re.compile(r"""(["'])([^"'\n]*?\b(?:settings|memory)\.py|[\w.:-]+)\1""")
 
 # Programs whose arguments are just text (a commit message or a search pattern can mention `rm -rf /`).
 TEXT_PROGRAMS = {"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "git-grep", ":", "true", "test", "["}
@@ -1585,8 +1600,10 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
         # other rules read all the words, as before (`docker exec app cat ~/.ssh/id_rsa`).
         there = elsewhere_words(seg)
         here = _bare(there[0]) if there else target
+        own = QUOTED.sub("''", OWN_QUOTED.sub(r"\2", seg))  # script paths and single words unquoted, the rest emptied
         for rid, rx, reason in SEGMENT_RULES:
-            if keep(rid) and rx.search(here if rid in LOCAL_RULES else target):
+            if keep(rid) and (rx.search(here if rid in LOCAL_RULES else target)
+                              or (rid in OWN_SETTINGS_RULES and not there and rx.search(own))):
                 return rid, reason
         # the panel's routes, the language server's control plane, a message that switches Bypass Mode on, and the
         # removal of a conversation — in all the words (`ssh -R 9999:localhost:…` brings a server's request here);
@@ -2449,6 +2466,201 @@ def memory_elsewhere(payload: dict, path: str, content: str) -> Optional[str]:
             f"разговор. Запишите тот же текст сюда: write_file \"{os.path.join(first, name)}\"{alt}.")
 
 
+# ── resource limits on agents' commands (hooks/procs.py): agentPriority, heavyMax with heavyPrograms ──
+# Programs that run a command given after their own options, and their options that take a value: `timeout 600 ffmpeg
+# …`, `nice -n 10 blender …`, `xargs -P 4 -I {} ffmpeg …`, `xcrun xcodebuild …`.
+RUNNERS: Dict[str, Set[str]] = {
+    "timeout": {"-s", "--signal", "-k", "--kill-after"}, "gtimeout": {"-s", "--signal", "-k", "--kill-after"},
+    "nice": {"-n", "--adjustment"}, "ionice": {"-c", "--class", "-n", "--classdata"}, "taskset": set(), "chrt": set(),
+    "stdbuf": {"-i", "-o", "-e"}, "caffeinate": {"-t", "-w"}, "arch": set(), "watch": {"-n", "--interval"},
+    "xcrun": {"-sdk", "--sdk", "-toolchain", "--toolchain"},
+    "xargs": {"-I", "-n", "-P", "-L", "-d", "-s", "-E", "-a", "--max-args", "--max-procs", "--delimiter", "--arg-file",
+              "--replace", "--max-lines", "--max-chars", "--eof"},
+    "parallel": {"-j", "--jobs", "-S", "--sshlogin", "--delay", "--timeout", "--joblog", "--results", "-a", "--arg-file",
+                 "-d", "--delimiter", "-I", "--replace", "--colsep"},
+}
+RUNNER_VALUE = re.compile(r"^[\d.,:x+-]+[smhd]?$", I)  # a runner's own value: `timeout 600`, `taskset 0x3`, `chrt 10`
+START_PROCESS = {"start-process", "saps", "start"}  # PowerShell: Start-Process [-FilePath] prog [-ArgumentList] args
+START_VALUE_OPTS = {"-workingdirectory", "-windowstyle", "-verb", "-credential", "-redirectstandardoutput",
+                    "-redirectstandarderror", "-redirectstandardinput", "-environment"}
+SHELL_COMMAND_FLAG = re.compile(r"^(?:-[a-zA-Z]*c|/[ck]|-command)$", I)  # bash -c / -lc, cmd /c, powershell -Command
+# A run that only prints information: `blender --version`, `xcodebuild -list`, `gradlew --stop`. ffmpeg works only on
+# an input (-i), so without one it is never heavy (`ffmpeg -version`, `ffmpeg -h encoder=libx264`).
+INFO_ARGS = re.compile(r"^(?:--?(?:version|help|h|usage|list|showsdks|license|stop|status)|-v|-\?|/\?)$", I)
+NEEDS_INPUT = {"ffmpeg", "avconv"}
+HEAVY_REASON = ("🛡️ Antigravity Plus: сейчас уже идут тяжёлые процессы агентов — {busy}, а одновременно пользователь "
+                "разрешил не больше {most}. За {wait} с ни один не закончился, поэтому команда с `{prog}` не запущена. "
+                "Займитесь пока другой частью задачи или дождитесь своей фоновой команды (command_status), а эту "
+                "запустите снова позже. Не повторяйте её в цикле с паузами: место от этого раньше не освободится. "
+                "Лимит выбрал пользователь — не меняйте его сами.")
+
+
+def load_procs():
+    """hooks/procs.py, imported on first use — with both limits off (the default) no command pays for it; None when
+    it can't be imported (the limits are optional, like facts)."""
+    global procs
+    if procs is None:
+        try:
+            import procs as module
+        except Exception:
+            return None
+        procs = module
+    return procs
+
+
+def _runner_rest(args: List[str], opts: AbstractSet[str]) -> List[str]:
+    """The command a runner (RUNNERS) runs: its words after the runner's own options and their values."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return args[i + 1:]
+        if a in opts:
+            i += 2
+        elif a.startswith("-") and len(a) > 1 or RUNNER_VALUE.match(a):
+            i += 1
+        else:
+            break
+    return args[i:]
+
+
+def _start_process(args: List[str]) -> List[str]:
+    """PowerShell's `Start-Process [-FilePath] prog [[-ArgumentList] args] [-Wait …]`: the program and its words."""
+    prog, rest, i = "", [], 0
+    while i < len(args):
+        a, low = args[i], args[i].lower()
+        if low in ("-filepath", "-file", "-fi") and i + 1 < len(args):
+            prog, i = args[i + 1], i + 2
+        elif low in ("-argumentlist", "-args", "-arg", "-a") and i + 1 < len(args):
+            rest, i = rest + re.split(r"[\s,]+", args[i + 1]), i + 2
+        elif low in START_VALUE_OPTS:
+            i += 2
+        elif a.startswith("-"):  # -Wait, -NoNewWindow, -PassThru
+            i += 1
+        elif not prog:
+            prog, i = a, i + 1
+        else:
+            rest, i = rest + re.split(r"[\s,]+", a), i + 1
+    return [prog] + [r for r in rest if r] if prog else []
+
+
+def _heavy_words(words: List[str], names: AbstractSet[str], depth: int) -> str:
+    """heavy_program() for the words of one simple command, its prefixes taken off (strip_prefixes)."""
+    for _ in range(6):  # runners in a row: `nohup nice -n 5 timeout 600 ffmpeg …`
+        if not words:
+            return ""
+        prog, args = procs.norm(words[0]), words[1:]
+        if prog in names:
+            if prog in NEEDS_INPUT:
+                return prog if re.search(r"(?:^|[\s,])-i(?:[\s,=]|$)", " ".join(args)) else ""
+            return "" if args and all(INFO_ARGS.match(a) for a in args) else prog
+        if prog in RUNNERS:
+            words = _runner_rest(args, RUNNERS[prog])
+        elif prog in START_PROCESS:
+            words = _start_process(args)
+        elif prog == "find":  # find … -exec ffmpeg -i {} … \;
+            at = next((i for i, w in enumerate(args) if w in ("-exec", "-execdir", "-ok", "-okdir")), -1)
+            words = args[at + 1:] if at >= 0 else []
+        elif prog in SH_RUNNERS or prog in ("cmd", "powershell", "pwsh"):
+            at = next((i for i, w in enumerate(args) if SHELL_COMMAND_FLAG.match(w)), -1)
+            if at >= 0:  # the command line it is handed: `bash -c '…'`, `cmd /c …`, `powershell -Command "…"`
+                return heavy_program(" ".join(args[at + 1:]), names, depth + 1)
+            words = [w for w in args if not w.startswith("-")] if prog in SH_RUNNERS else []  # `sh ./gradlew build`
+        else:
+            return ""
+    return ""
+
+
+def heavy_program(cmd: str, names: AbstractSet[str], depth: int = 0) -> str:
+    """The first of `names` (procs.norm(): lower-case, no .exe) the command starts on this computer, or "": as its own
+    program (`cd x && ffmpeg …`, `& "C:/ffmpeg/bin/ffmpeg.exe" …`, `./gradlew build`), after a runner (RUNNERS, `find
+    … -exec ffmpeg`, `Start-Process ffmpeg`), in what it hands a shell (`bash -c '…'`, `cmd /c …`, `powershell
+    -Command "…"`, a heredoc), in $(…) and in a block (`… | ForEach-Object { ffmpeg -i $_ … }`). Not what runs on
+    another machine or in a container (runs_elsewhere), nor a run that only prints information (INFO_ARGS)."""
+    if not cmd or not cmd.strip() or not names or depth > 3 or load_procs() is None:
+        return ""
+    if compat.WINDOWS:  # PowerShell/cmd: backslashes are path separators
+        cmd = cmd.replace("\\", "/")
+    cmd, docs = _heredocs(re.sub(r"\\\r?\n", " ", cmd))
+    for seg in split_unquoted(cmd):
+        prog = program(seg).lower()
+        inner = _substitutions(seg)
+        if prog not in TEXT_PROGRAMS and prog not in ("git", "git.exe"):  # their braces are text: `echo '{ ffmpeg }'`
+            inner += re.findall(r"\{([^{}]*)\}", seg)[:32]  # a JSON body has many: enough for the blocks of a script
+        for text in inner:
+            hit = heavy_program(text, names, depth + 1)
+            if hit:
+                return hit
+        if ELSEWHERE_HINT.search(seg) and runs_elsewhere(seg):
+            continue
+        hit = _heavy_words(strip_prefixes(tokenize(seg)), names, depth)
+        if hit:
+            return hit
+    for before, rest, body in docs:  # `bash <<'EOF' … EOF`: the body runs here
+        owner = heredoc_owner(before, rest)
+        if program(owner) in SHELLS and not runs_elsewhere(owner):
+            hit = heavy_program(body, names, depth + 1)
+            if hit:
+                return hit
+    return ""
+
+
+def heavy_limit(payload: dict, cmd: str, most: int, names: List[str]) -> Optional[dict]:
+    """heavyMax: a command that starts a heavy program waits for one of `most` slots (procs.take_slot) — up to
+    AGP_HEAVY_WAIT (20) s, well inside the hook's 30 — and is refused when none frees up; None when it may start."""
+    prog = heavy_program(cmd, frozenset(names))
+    if not prog:
+        return None
+    try:
+        wait = float(os.environ.get("AGP_HEAVY_WAIT", "") or procs.WAIT)
+    except ValueError:
+        wait = procs.WAIT
+    wait = max(0.0, min(wait, 25.0))
+    cid = str(payload.get("conversationId") or "")
+    start, waited = time.time(), False
+    while True:
+        busy = procs.take_slot(prog, most, names, cid)
+        if busy is None:
+            if waited:
+                log(payload, "run_command", "limit:heavy-wait", cmd)
+            return None
+        left = wait - (time.time() - start)
+        if left <= 0:
+            break
+        time.sleep(min(1.0, left))
+        waited = True
+    log(payload, "run_command", "heavy-limit", cmd)
+    running, waiting = busy
+    what = ([f"{procs.norm(p.name)} (PID {p.pid})" for p in running]
+            + [f"{s['program']} (место уже отдано другой команде, она запускается)" for s in waiting])
+    shown = ", ".join(what[:6]) + (f" и ещё {len(what) - 6}" if len(what) > 6 else "")
+    return {"decision": "deny", "reason": HEAVY_REASON.format(busy=shown, most=most, wait=f"{wait:g}", prog=prog)}
+
+
+def limits(payload: dict, cmd: str) -> Optional[dict]:
+    """The resource limits on an agent command the guard lets through or asks about (hooks/procs.py) — in Bypass
+    Mode too: they are no permission prompts. heavyMax first (a refusal, heavy_limit), then agentPriority: the
+    background helper hears of the command and lowers its processes (logged when it had to be started). None when
+    the command may go on. Never raises: a broken limit must not stop the agent."""
+    if not memstore:
+        return None
+    try:
+        s = memstore.settings()
+        if s.get("agentPriority") in (None, "normal") and not s.get("heavyMax"):
+            return None  # both off, the default
+        if load_procs() is None:
+            return None
+        level, most, names = procs.config(s)
+        stop = heavy_limit(payload, cmd, most, names) if most else None
+        if stop:
+            return stop
+        if level != "normal" and procs.kick(level) == "started":
+            log(payload, "run_command", "limit:agent-priority", cmd)
+    except Exception as e:
+        print(f"guard: limits: {e}", file=sys.stderr)
+    return None
+
+
 def decide(payload: dict) -> dict:
     call = payload.get("toolCall") or {}
     tool = call.get("name") or ""
@@ -2547,9 +2759,16 @@ def decide(payload: dict) -> dict:
             if speed and speed.needs_bypass_sandbox(payload, effective, args):
                 overwrite["BypassSandbox"] = True
                 log(payload, tool, "overwrite:bypass-sandbox", subject)
+            stop = limits(payload, effective)  # heavyMax, agentPriority: resource limits, in Bypass Mode too
+            if stop:
+                return stop
         base = AUTO if tool in ("run_command", "write_file", "edit_file") and (bypass or full()) else PASS
         return {**base, "overwrite": overwrite} if overwrite else base
     rid, reason = hit
+    if tool == "run_command":  # what the user may still approve gets the same limits
+        stop = limits(payload, rewritten[1] if rewritten else subject)
+        if stop:
+            return stop
     log(payload, tool, rid, subject)
     shown = subject if len(subject) <= 160 else subject[:159] + "…"
     if not rid.startswith("user-said"):

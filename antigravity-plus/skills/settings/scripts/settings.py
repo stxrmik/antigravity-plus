@@ -7,7 +7,7 @@
   settings.py mcp add NAME --command CMD [--env KEY[=VALUE]]… [-- ARG …]   add or replace a local (stdio) server
   settings.py mcp add NAME --url URL           a remote (Streamable HTTP) server
   settings.py mcp remove NAME
-  settings.py plugin [KEY on|off …]            Antigravity Plus settings (same as memory.py config)
+  settings.py plugin [KEY VALUE …]             Antigravity Plus settings (same as memory.py config)
 
 `--env KEY` without a value takes it from the environment or the workspace's .env, so the secret never appears in
 the conversation. MCP changes are applied right away (the language server reloads its servers). Antigravity's own
@@ -47,7 +47,17 @@ PLUGIN_KEYS = [("auto-memory", "autoMemory"), ("share-with-claude-code", "shareW
                ("parallel-hints", "parallelHints"), ("speed-hints", "speedHints"), ("quota-hints", "quotaHints"), ("fact-checks", "factChecks"),
                ("objective-answers", "objectiveAnswers"), ("auto-ci", "autoCi"),
                ("git-checks", "gitChecks"), ("lsp-checks", "lspChecks"), ("update-check", "updateCheck"),
-               ("auto-update", "autoUpdate"), ("ui-notices", "uiNotices")]
+               ("auto-update", "autoUpdate"), ("ui-notices", "uiNotices"), ("agent-priority", "agentPriority"),
+               ("heavy-max", "heavyMax"), ("heavy-programs", "heavyPrograms")]
+
+
+def shown(value: object) -> str:
+    """A setting's value as `settings.py plugin` takes it: on|off, a number, a word, names joined by commas."""
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, list):
+        return ",".join(str(v) for v in value) or "—"
+    return str(value)
 
 
 def load_json(path: str) -> dict:
@@ -131,9 +141,9 @@ def show(ws: str) -> str:
     except (OSError, ValueError) as e:
         out.append(f"- the file isn't valid JSON: {e}")
     s = memstore.settings()
-    out.append("\n## Antigravity Plus — `settings.py plugin <key> on|off`")
-    out.append("- " + " · ".join(f"{k} {('on' if s[v] else 'off') if isinstance(s[v], bool) else s[v]}"
-                                 for k, v in PLUGIN_KEYS if v in s))
+    out.append("\n## Antigravity Plus — `settings.py plugin <key> <value>` (on|off; recent-conversations N; "
+               "agent-priority normal|below_normal|idle; heavy-max N; heavy-programs a,b,c|default)")
+    out.append("- " + " · ".join(f"{k} {shown(s[v])}" for k, v in PLUGIN_KEYS if v in s))
     since = conv._project_grant(ws, None)
     out.append(f"- Full access for this project: {'on since ' + since if since else 'off (per conversation only)'}")
     try:  # skills/update: what the daily check found (no network here)

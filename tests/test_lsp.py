@@ -38,8 +38,9 @@ def states():
     return out
 def alive(pid):
     if os.name == "nt":
-        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True)
-        return str(pid) in r.stdout
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace")  # a Russian Windows prints in cp866: the pid's digits survive
+        return str(pid) in (r.stdout or "")
     try:
         os.kill(pid, 0)
         return True
