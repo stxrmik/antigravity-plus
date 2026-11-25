@@ -325,6 +325,12 @@ def dev_tools() -> bool:
 _REJECTED: Dict[str, str] = {}  # configured server id → why server_command() refused its command (shown to the user)
 
 
+def _rooted(path: str) -> bool:
+    """An absolute path — or, on Windows, one rooted on the current drive (`/opt/x`, `\\x`): Python 3.13 no longer
+    calls those absolute there, but they never depend on the working directory either."""
+    return os.path.isabs(path) or path.startswith(("/", "\\"))
+
+
 def command_problem(cmd: List[str]) -> str:
     """Why a command of your own (lsp.json) can't start, or "" when it can — or when we can't tell. Only certain
     things reject: an executable that is neither a file (after `~`) nor on PATH, and an absolute (or `~`) path
@@ -332,16 +338,16 @@ def command_problem(cmd: List[str]) -> str:
     starts with the project root as its working directory, which isn't known here. Flags (`--stdio`, `--log=/x`)
     and the value of a flag (`--log-file /tmp/x.log`, which may be created) are left alone; `-jar x.jar` is checked."""
     exe = os.path.expanduser(cmd[0])
-    relative_path = (os.sep in exe or "/" in exe) and not os.path.isabs(exe)  # «./bin/x»: against the project root
+    relative_path = (os.sep in exe or "/" in exe) and not _rooted(exe)  # «./bin/x»: against the project root
     if not (relative_path or os.path.isfile(exe) or which(cmd[0]) is not None or which(exe) is not None):
         return f"{cmd[0]} isn't a file or on PATH"
     for prev, arg in zip(cmd[:-1], cmd[1:]):
-        if arg.startswith("-") or "://" in arg or ("=" in arg and not os.path.isabs(os.path.expanduser(arg))):
+        if arg.startswith("-") or "://" in arg or ("=" in arg and not _rooted(os.path.expanduser(arg))):
             continue
         if prev.startswith("-") and "=" not in prev and prev != "-jar":
             continue
         path = os.path.expanduser(arg)
-        if os.path.isabs(path) and not os.path.exists(path):
+        if _rooted(path) and not os.path.exists(path):
             return f"{arg} doesn't exist"
     return ""
 
