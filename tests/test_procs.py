@@ -86,6 +86,7 @@ print(json.dumps(pids), flush=True)
 time.sleep(300)
 """)
 SHELL_ENV = {"FAKE_PY": sys.executable, "FAKE_SLEEPER": SLEEPER}
+NORMAL = 0x00000020  # Windows: NORMAL_PRIORITY_CLASS
 
 
 def agent_shell(session=False):
@@ -107,7 +108,8 @@ def hook_shell():
 def start_ls(specs):
     """A fake language server with these children: (its pid, the children's pids)."""
     # Windows: CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP — its shells share one hidden console, no window pops up
-    kw = {"creationflags": 0x08000000 | 0x00000200} if compat.WINDOWS else {"start_new_session": True}
+    # Windows: NORMAL_PRIORITY_CLASS too — a CI runner may run below normal itself, and its children inherit that
+    kw = {"creationflags": 0x08000000 | 0x00000200 | NORMAL} if compat.WINDOWS else {"start_new_session": True}
     ls = subprocess.Popen([sys.executable, FAKE_LS, json.dumps(specs)], stdout=subprocess.PIPE, stdin=DEVNULL,
                           text=True, encoding="utf-8", errors="replace", **kw)
     fakes.append(ls)
@@ -184,7 +186,8 @@ try:
         spawner = ("import subprocess, sys, time\ntime.sleep(1.5)\n"
                    "q = subprocess.Popen([sys.executable, sys.argv[1], '60'])\nprint(q.pid, flush=True)\ntime.sleep(60)\n")
         kid = subprocess.Popen([sys.executable, "-c", spawner, SLEEPER], stdout=subprocess.PIPE, stdin=DEVNULL,
-                               text=True, encoding="utf-8", errors="replace")
+                               text=True, encoding="utf-8", errors="replace",
+                               **({"creationflags": NORMAL} if compat.WINDOWS else {}))
         time.sleep(0.3)
         check("a new process runs at normal priority", level_of(kid.pid) == "normal", level_of(kid.pid))
         check("lower() lowers it", procs.lower(kid.pid, "below_normal") is True)
@@ -246,8 +249,12 @@ try:
             if shutil.which("sleep"):
                 sleep = os.path.join(SP, "fakesleep", "ffmpeg")
                 os.makedirs(os.path.dirname(sleep), exist_ok=True)
-                shutil.copy2(shutil.which("sleep"), sleep)
-                tries.append(([sleep], {}))
+                try:
+                    shutil.copyfile(shutil.which("sleep"), sleep)
+                    os.chmod(sleep, 0o755)
+                    tries.append(([sleep], {}))
+                except OSError as e:
+                    print(f"   (no copy of sleep: {e})")
         for argv, env in tries:
             q = subprocess.Popen(argv + ["20"], env=dict(os.environ, **env), stdin=DEVNULL, stdout=DEVNULL, stderr=DEVNULL)
             time.sleep(1.5)

@@ -1907,6 +1907,9 @@ def command_pids(lines: List[str], ls_pid: int = 0) -> Dict[str, List["compat.Pr
         if len(key) < 4:
             continue
         hits = {pid for pid in under if key in norm(table[pid].cmdline)}
+        rest = key.partition(" ")[2]  # its words after the program: a program that runs under another path than
+        if not hits and len(rest) >= 8:  # the one written (macOS's framework Python, a resolved shim) has them too
+            hits = {pid for pid in under if rest in norm(table[pid].cmdline)}
         procs: List[compat.Proc] = []
         for top in sorted(pid for pid in hits if table[pid].ppid not in hits)[:2]:  # the outermost of each
             procs += [table[top]] + [table[c] for c in compat.descendants(table, top) if c in table]
@@ -3646,7 +3649,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--timeout", type=float, default=START_TIMEOUT, help="seconds to wait (default 180)")
     sub.add_parser("statusline", help="as Claude Code's statusLine command: remember its rate_limits for budget")
     sub.add_parser("supervise", help="(starts by itself) start queued tasks, resume tasks stopped by an error")
-    a = ap.parse_args(argv)
+    a, extra = ap.parse_known_args(argv)
+    # Before Python 3.12, argparse doesn't give a text that follows an option to the positional before the option
+    # (`next NAME --fresh "…"`, `send ID --no-wait "…"`): those words come back unparsed. They are the text.
+    if extra and a.cmd in ("next", "reply", "send") and not any(x.startswith("-") for x in extra):
+        if isinstance(a.message, list):
+            a.message = list(a.message) + extra
+        elif not a.message:
+            a.message = " ".join(extra)
+        else:
+            ap.error(f"unrecognized arguments: {' '.join(extra)}")
+    elif extra:
+        ap.error(f"unrecognized arguments: {' '.join(extra)}")
     handlers = {"budget": cmd_budget, "models": cmd_models, "run": cmd_run, "wait": cmd_wait, "result": cmd_result,
                 "diff": cmd_diff, "send": cmd_send, "watch": cmd_watch, "reply": cmd_reply, "ask": cmd_talk,
                 "tell": cmd_talk, "cancel": cmd_cancel, "list": cmd_list, "statusline": cmd_statusline,
