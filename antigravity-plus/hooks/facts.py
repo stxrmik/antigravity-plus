@@ -868,6 +868,8 @@ def references(answer: str, ev: dict, ws: str, art: str = "", roots: Optional[Li
         for raw in targets:
             if raw.startswith("#"):
                 continue  # an anchor in the same page
+            if re.match(r"^(?:\.{3,}|…)[\\/]", raw):
+                continue  # «.../12345/a1b2.jpeg»: a path or URL cut short on purpose, not one to look for
             ref = LINE_REF.search(raw)
             bare = raw[:ref.start()] if ref else raw
             path = _local(unquote(bare), ws)

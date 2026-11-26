@@ -245,7 +245,7 @@ FAILED_ENDS = {
     "EXECUTOR_TERMINATION_REASON_HALTED_STEP": "stopped at a halted step",
 }
 
-RULES = """{mark} This task comes from Claude Code, another AI coding agent that works on this project for the same user, at the same time as you. The user doesn't watch this conversation; Claude Code does, and it answers.
+RULES = """{mark} This task comes from Claude Code, another AI coding agent that works on this project for the same user, at the same time as you. Claude Code watches this conversation and answers; the user doesn't answer here, but may read it in Antigravity.
 
 Rules for this run:
 1. Do exactly the task below. Change only what it covers. No commits, pushes, deploys, global installs or settings changes; don't run /init, /git-init or /handoff and don't save memories.
@@ -256,11 +256,16 @@ Rules for this run:
 3. Keep going with tool calls until the task is done — a message without a tool call ends your run.
 4. After your last change, run the checks the task names (or the tests or build of the code you touched) and fix what fails.
 5. Stop any server or watcher you started before you finish. When you end your turn to wait for a long command running in the background, say in one line which command you wait for.
-6. End with one message in this format, under 250 words, without file contents:
-STATUS: done | partial | blocked
-CHANGED: <path> — <what changed> (one line per file, or "nothing")
-CHECKS: <command> → <result, with the exact numbers> (or "none")
-NOTES: <choices you made, what is left, risks> (or "none")
+6. End with one message that sums the task up, for Claude Code and for the user reading along: plain words in the language the task below is written in, under 200 words, no file contents.
+   - Its first line starts with ✅ (done), ⚠️ (partly done) or ⛔ (blocked) and says what you did and how it came out, with the numbers that matter.
+   - Then, after an empty line, a short list, one item per line: each file you changed (`path` — what changed), each check you ran (`command` → its result, with the exact numbers), the choices you made, what is left, risks. Leave out what doesn't apply.
+   For example:
+   ✅ Empty passwords are rejected now; all 14 tests pass.
+
+   - `app/forms.py` — an empty-password check in `LoginForm.clean()`
+   - `pytest -q` → 14 passed
+   - Kept the old error text: the UI tests look for it.
+   Only this last message takes that shape: a line you wait with, or a note beside a tool call, is a plain sentence.
 
 {reference}{where}
 
@@ -276,7 +281,12 @@ FRESH_SERIES = ("This continues the series «{name}»: pieces 1–{done} ran in 
                 "in the project's files. The last piece's report:\n{last}\n\n")
 
 FOLLOW_UP = ("Follow-up from Claude Code: {message}\n\n(Same rules as before: questions go to Claude Code with the ask "
-             "command, check your work after the last change, end with the STATUS / CHANGED / CHECKS / NOTES report.)")
+             "command, check your work after the last change, end with the short report: ✅, ⚠️ or ⛔ and what came out, "
+             "in plain words, then the list.)")
+# The first line of the agent's report (RULES 6) starts with one of these. Reports from before 0.30.1 had a
+# «STATUS: done | partial | blocked» line instead (then CHANGED / CHECKS / NOTES): report_head() reads both.
+VERDICTS = (("✅", "done"), ("⚠", "partly done"), ("⛔", "blocked"), ("❌", "blocked"), ("🚫", "blocked"))
+STATUS_LINE = re.compile(r"^\W*STATUS\W*:\W*([^\n]{1,80})", re.M)
 # Claude Code's replies while the agent works. The plugin's hooks know them by these openings (hooks/conversation.py
 # CLAUDE_SAYS): an agent that asked and waits is left alone until one of them arrives.
 ANSWER = "Claude Code answers your question «{question}»:\n{message}"
@@ -2978,8 +2988,33 @@ def watched(ids: List[str]) -> List[dict]:
     return out
 
 
+def report_head(text: str) -> Tuple[str, str]:
+    """How the agent's report says the task went: («done» | «partly done» | «blocked», the rest of its first line)
+    for a first line that starts with ✅ ⚠️ ⛔ (also under a heading, in bold or as a list item); the words after
+    «STATUS:» and no line for a report in the older STATUS / CHANGED / CHECKS / NOTES form; ("", "") for a message
+    that is no report (a line it waits with, a question)."""
+    text = str(text or "")
+    for line in [ln.strip() for ln in text.splitlines() if ln.strip()][:3]:
+        bare = line.lstrip("*_#>-•· \t")
+        for mark, word in VERDICTS:
+            if bare.startswith(mark):
+                rest = re.sub(r"\*\*|__|`", "", bare[len(mark):]).lstrip("\ufe0f").strip(" *_:—–-")
+                return word, re.sub(r"\s+", " ", rest).strip()
+    m = STATUS_LINE.search(text)  # «STATUS: done», also as «**STATUS:** done»
+    return (m.group(1).strip(" *_`"), "") if m else ("", "")
+
+
+def verdict_text(text: str, n: int = 90) -> str:
+    """«done — <its first line>» for `watch` and `series`; "" for a message that is no report."""
+    word, line = report_head(text)
+    if word and line:
+        return f"{word} — «{line if len(line) <= n else line[:n - 1].rstrip() + '…'}»"
+    return word
+
+
 def final_status(ls: LS, cid: str, count: int) -> str:
-    """The STATUS line of the agent's last message («done», «partial: …»), or ""."""
+    """How the agent's last message says the task went («done — «…»», «partly done — «…»», «partial: …» from an
+    older report), or ""."""
     try:
         steps = rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": cid, "stepOffset": max(count - 6, 0)},
                     timeout=30).get("steps") or []
@@ -2988,9 +3023,9 @@ def final_status(ls: LS, cid: str, count: int) -> str:
     for st in reversed([s for s in steps if isinstance(s, dict)]):
         if st.get("type") == "CORTEX_STEP_TYPE_PLANNER_RESPONSE":
             pr = st.get("plannerResponse") or {}
-            m = re.search(r"^\W*STATUS\W*:\W*([^\n]{1,60})", str(pr.get("modifiedResponse") or pr.get("response") or ""), re.M)
-            if m:  # «STATUS: done», also as «**STATUS:** done»
-                return m.group(1).strip(" *_`")
+            said = verdict_text(str(pr.get("modifiedResponse") or pr.get("response") or ""))
+            if said:
+                return said
     return ""
 
 
@@ -3069,7 +3104,7 @@ def watch_events(ls: LS, task: dict) -> Tuple[List[Event], bool]:
                     + f" → delegate.py result {short}"))
     else:
         verdict = final_status(ls, task["id"], int(s.get("stepCount") or 0))
-        out.append((key, f"✅ Antigravity task {short} finished" + (f" (STATUS: {verdict})" if verdict else "")
+        out.append((key, f"✅ Antigravity task {short} finished" + (f" ({verdict})" if verdict else "")
                     + f" → read its report: delegate.py result {short}, then check it (delegate.py diff {short})"))
     update(task, state="canceled" if ended.endswith("USER_CANCELED") else "done", finished=time.time())
     return out, True
@@ -3280,7 +3315,8 @@ def cmd_send(a) -> int:
 
 
 def last_report(ls: LS, task: dict) -> str:
-    """The STATUS / CHANGED / CHECKS / NOTES lines of a task's last report, for a fresh conversation of its series."""
+    """A task's last report (RULES 6, or the older STATUS / CHANGED / CHECKS / NOTES form), for a fresh conversation
+    of its series."""
     try:
         steps = rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": task["id"]}, timeout=60).get("steps") or []
     except SOFT:
@@ -3289,7 +3325,7 @@ def last_report(ls: LS, task: dict) -> str:
         if st.get("type") == "CORTEX_STEP_TYPE_PLANNER_RESPONSE":
             pr = st.get("plannerResponse") or {}
             text = str(pr.get("modifiedResponse") or pr.get("response") or "").strip()
-            if re.search(r"^\W*STATUS\W*:", text, re.M):
+            if report_head(text)[0]:
                 return clean(text, task)[:2500]
     return "(it left no report)"
 
@@ -3356,7 +3392,7 @@ def cmd_next(a) -> int:
 
 
 def cmd_series(a) -> int:
-    """The pieces of a series: which conversation, when, and the STATUS line each ended with."""
+    """The pieces of a series: which conversation, when, and how each ended by its report."""
     name = valid_series(a.name)
     tasks = sorted((r for r in records() if r.get("series") == name and not r["id"].startswith("q-")),
                    key=lambda r: float(r.get("started") or 0))
@@ -3381,13 +3417,11 @@ def cmd_series(a) -> int:
             for st in steps[lo:hi]:
                 if st.get("type") == "CORTEX_STEP_TYPE_PLANNER_RESPONSE":
                     pr = st.get("plannerResponse") or {}
-                    m = re.search(r"^\W*STATUS\W*:\W*([^\n]{1,80})", str(pr.get("modifiedResponse") or pr.get("response")
-                                                                          or ""), re.M)
-                    status = m.group(1).strip(" *_`") if m else status
+                    status = verdict_text(str(pr.get("modifiedResponse") or pr.get("response") or ""), 70) or status
             when = time.strftime("%H:%M", time.localtime(float(pc.get("at") or t.get("started") or 0)))
             brief = re.sub(r"\s+", " ", str(pc.get("brief") or "")).strip()
-            lines.append(f"    #{pc.get('n')} {when} {('STATUS: ' + status) if status else '(no report yet)'}"
-                         + (f" — {brief[:80]}" if brief else ""))
+            lines.append(f"    #{pc.get('n')} {when}" + (f" «{brief[:60]}»" if brief else "")
+                         + f" → {status or '(no report yet)'}")
     lines.append(f"Next piece: delegate.py next {name} \"…\" (same conversation; --fresh for a new one)")
     print("\n".join(lines))
     return 0

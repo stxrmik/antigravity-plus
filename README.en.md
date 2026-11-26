@@ -789,7 +789,9 @@ Good to know:
   creates one), and starts the conversation
   through Antigravity's own `agentapi`. Claude Code's brief gets the run rules: Claude Code watches and answers — ask
   it with `ask`, tell it what matters with `tell` (the exact commands, with the script's path); no commits, pushes or
-  deploys; check the work after the last change; end with a STATUS / CHANGED / CHECKS / NOTES report.
+  deploys; check the work after the last change; end with a short report a person can read, in the task's language:
+  a first line with ✅ done, ⚠️ partly done or ⛔ blocked and what came out, with numbers; then a list of what changed,
+  which checks ran and how they ended, what's left (the conversation can be opened and read in Antigravity).
 - The talk: `ask` and `tell` in the agent's terminal only print a JSON line — no file access, so they work inside
   the terminal sandbox too. Claude Code reads those lines from the conversation itself (the command's output, or
   Antigravity's message about a command that went to the background) — `watch` (for Monitor: a line per event, ends

@@ -353,6 +353,10 @@ prompt = argv[3] if len(argv) > 3 else ""
 check("run: the prompt starts with the delegation mark and carries the rules, the folder and the brief",
       prompt.startswith("[Delegated from Claude Code]") and "No commits, pushes, deploys" in prompt
       and f"Working folder: {ws}" in prompt and prompt.rstrip().endswith("Task:\nGoal: set b to 3.\nDone: tests pass."), prompt)
+check("run: the report it asks for is one a person reads — ✅/⚠️/⛔ and what came out, then a list; no STATUS lines",
+      "starts with ✅ (done), ⚠️ (partly done) or ⛔ (blocked)" in prompt and "in the language the task below is written in"
+      in prompt and "Only this last message takes that shape" in prompt and "STATUS:" not in prompt
+      and "CHANGED:" not in prompt, prompt)
 check("report: finished, model and cost", "✅ Antigravity finished task " + C1 + " in 2 min" in out
       and "Model: Gemini 4 Hydrogen (Medium) · 2 model calls · 22k tokens read (20k from cache) · 400 written" in out
       and "weekly «Gemini Models» limit 90.0% → 90.0% left" in out, out)
@@ -412,7 +416,8 @@ check("run --no-wait: returns at once with the id", code == 0 and f"delegate.py 
 code, out = run("send", C1[:8], "Also set c to 4.")
 call = agentapi_calls()[-1]
 check("send: agentapi send-message to the conversation", call["argv"][:3] == ["send-message", "--title=Claude Code", C1]
-      and call["argv"][3].startswith("Follow-up from Claude Code: Also set c to 4."), call)
+      and call["argv"][3].startswith("Follow-up from Claude Code: Also set c to 4.")
+      and "end with the short report: ✅, ⚠️ or ⛔" in call["argv"][3] and "STATUS" not in call["argv"][3], call)
 check("send: the report covers the follow-up turn only", code == 0 and "CHECKS: pytest -q → 4 passed" in out
       and "✓ pytest -q → 0 · 4 passed in 0.2s" in out and "unittest" not in out, out)
 code, out = run("diff", C1[:8], "--stat")
@@ -457,7 +462,7 @@ check("tell from a delegated conversation goes out", code == 0 and '"to_claude_c
 prompt = next(c["argv"][3] for c in agentapi_calls() if c["argv"][0] == "new-conversation")
 check("the brief gives the agent both talk commands, quoted, and says Claude Code answers",
       f'"{os.path.abspath(DELEGATE)}" ask "<your question>"' in prompt and f'"{os.path.abspath(DELEGATE)}" tell "' in prompt
-      and "Claude Code does, and it answers" in prompt and "Nobody watches" not in prompt, prompt[:1500])
+      and "Claude Code watches this conversation and answers" in prompt and "Nobody watches" not in prompt, prompt[:1500])
 
 # … and Claude Code's: a question stops the wait with exit 4; reply answers it and wakes the agent; the report has the talk
 code, out = run("run", "--model", "fast", "Rename parse_date to parse_day.", env={"FAKE_CID": C4})

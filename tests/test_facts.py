@@ -401,6 +401,13 @@ start("git-refs-bad")
 answer("Ветка `nosuch/v9.9.9` и файл `nosuch/app.py`.")
 reason = stop(roots=[REPO])[0]
 check("…a name that is neither a ref nor a file → still named", "nosuch/v9.9.9" in reason and "nosuch/app.py" in reason, reason)
+# A path cut short on purpose isn't one to look for: `.../12345/a1b2c3d4.jpeg` (the tail of a poster URL) was named
+# «no such file or folder», and the agent sent its whole report a second time (seen live).
+start("elided-paths")
+answer("Постеры: `.../12345/a1b2c3d4.jpeg`, `…/67890/e5f6a7b8.jpeg` и `..../a/b.png`; код — `nosuch/app.py`.")
+reason = stop(roots=[REPO])[0]
+check("a path elided with «...» or «…» isn't named missing — an invented one still is", "12345" not in reason
+      and "67890" not in reason and "a/b.png" not in reason and "nosuch/app.py" in reason, reason)
 
 # ── links and recalled facts ──
 start("url", "Какая последняя версия fastcache?")

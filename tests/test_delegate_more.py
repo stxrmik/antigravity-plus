@@ -46,7 +46,10 @@ def talk(verb, mid, text):
     wire = json.dumps({"to_claude_code": kind, "id": mid, "text": text})
     return step("RUN_COMMAND", runCommand={"commandLine": line, "exitCode": 0, "combinedOutput": {
         "full": f"Command exited with code 0.\n\nCommand output:\n{wire}\n"}})
-DONE = "STATUS: done\nCHANGED: src.py — a = 2\nCHECKS: pytest -q → 3 passed\nNOTES: none"
+DONE = "STATUS: done\nCHANGED: src.py — a = 2\nCHECKS: pytest -q → 3 passed\nNOTES: none"  # a report from before 0.30.1
+REPORT = "✅ Done: `a` is 2 now; all 3 tests pass.\n\n- `src.py` — a = 2\n- `pytest -q` → 3 passed"
+PARTLY = ("**⚠️ Partly done:** the lexer reads numbers and names, not strings yet.\n\n- `src.py` — a = 2\n"
+          "- `pytest -q` → 3 passed, 1 skipped\n- Strings are left for the next piece.")
 SLOW = [sys.executable, os.path.join(SP, "slow_job.py"), "--frames", "900"]
 open(SLOW[1], "w", encoding="utf-8").write("import time\ntime.sleep(120)\n")
 open(os.path.join(SP, "fake_ls.py"), "w", encoding="utf-8").write(
@@ -74,8 +77,8 @@ BASE = {
     RUN2: [step("USER_INPUT"), said("")], QD2: [step("USER_INPUT"), said(DONE)],
     W1: [step("USER_INPUT"), said(""), talk("ask", "aaaa1111", "Which port?"), said("Waiting for the answer.")],
     W2: [step("USER_INPUT"), said(""), talk("ask", "bbbb2222", "Keep the old name?"), said("Waiting for the answer.")],
-    SR1: [step("USER_INPUT"), said(DONE)], SR2: [step("USER_INPUT"), said(DONE)],
-    W3: [step("USER_INPUT"), said(""), talk("tell", "cccc3333", "The old tests were red before my change."), said(DONE)],
+    SR1: [step("USER_INPUT"), said("Waiting for `pytest -q` (task-3)."), said(REPORT)], SR2: [step("USER_INPUT"), said(DONE)],
+    W3: [step("USER_INPUT"), said(""), talk("tell", "cccc3333", "The old tests were red before my change."), said(REPORT)],
     W4: [step("USER_INPUT"), said(""), talk("ask", "dddd4444", "Keep the alias?"),
          step("RUN_COMMAND", status="CORTEX_STEP_STATUS_RUNNING", runCommand={"commandLine": "pytest -q"})],
     E5: [step("USER_INPUT"), said("")] + error_steps(EOF_ERR),
@@ -111,7 +114,8 @@ def steps_of(c):
     if c == BG:
         return bg_steps()
     if c == SR1:
-        return BASE[c] + [s for _ in range(n) for s in (step("SYSTEM_MESSAGE"), said(DONE))]
+        return BASE[c] + [s for _ in range(n) for s in (step("SYSTEM_MESSAGE"), said("Waiting for `pytest -q` (task-5)."),
+                                                         said(PARTLY))]
     if c in (RUN1, RUN2) and c in finished:
         return BASE[c] + [said(DONE)]
     return BASE.get(c, [])
@@ -373,12 +377,16 @@ check("next: the next piece goes into the same conversation", code == 0 and "Sen
       and msg.startswith("Follow-up from Claude Code: Piece 2 of the series «port-7»:\nPiece 2: the lexer.")
       and [p["n"] for p in record(SR1)["pieces"]] == [1, 2], (out, msg))
 code, out = run("series", "port-7")
-check("series: its pieces and how each ended", code == 0 and "#1 " in out and "#2 " in out and "STATUS: done" in out, out)
+check("series: its pieces and how each ended, by the first line of each report", code == 0
+      and "→ done — «Done: a is 2 now; all 3 tests pass.»" in out.split("#2 ")[0] and "#1 " in out
+      and "#2 " in out and "«Piece 2: the lexer.» → partly done — «Partly done: the lexer reads numbers and names, not "
+      "strings yet.»" in out and "Waiting for" not in out, out)
 code, out = run("next", "port-7", "--fresh", "Piece 3: the printer.", "--no-wait", env={"FAKE_CID": SR2})
 prompt = calls()[-1]["argv"][-1]
 check("next --fresh: a new conversation with the series' template, the last report and the new piece",
       code == 0 and "starts a new conversation (--fresh)" in out and "This continues the series «port-7»: pieces 1–2" in prompt
-      and "port-conventions.md" in prompt and "STATUS: done" in prompt and prompt.rstrip().endswith("Piece 3: the printer.")
+      and "port-conventions.md" in prompt and "The last piece's report:\n**⚠️ Partly done:** the lexer" in prompt
+      and "Strings are left for the next piece." in prompt and prompt.rstrip().endswith("Piece 3: the printer.")
       and record(SR2).get("series") == "port-7" and record(SR2)["pieces"][0]["n"] == 3, (out, prompt[-900:]))
 
 # 8. estimate (and filling in the cost of a task from before reports saved it), dry run
@@ -401,14 +409,16 @@ check("run --dry-run: the model, why, the expected cost — and nothing started"
 # once, a deleted conversation, a long piece, a template that isn't UTF-8
 code, out = run("run", "--model", "fast", "--no-wait", "Fix the tests.", env={"FAKE_CID": W3})
 code, out = run("watch", W3[:8], "--timeout", "5")
-check("watch: a message just before the end comes once, numbered, then the end", code == 0
-      and out.count("The old tests were red before my change.") == 1 and "💬 #1 " in out and "✅ #2 " in out, out)
+check("watch: a message just before the end comes once, numbered, then the end with the report's first line", code == 0
+      and out.count("The old tests were red before my change.") == 1 and "💬 #1 " in out
+      and f"✅ #2 Antigravity task {W3[:8]} finished (done — «Done: a is 2 now; all 3 tests pass.») → read its report"
+      in out, out)
 code, out = run("run", "--model", "fast", "--no-wait", "Small fix.", env={"FAKE_CID": FIN, "CLAUDE_CODE_SESSION_ID": "s-2"})
 code, out = run("list")
 check("list: records the finished task as done (no watch told Claude Code)", record(FIN)["state"] == "done", record(FIN))
 code, out = run("watch", "--follow", "--timeout", "4", env={"CLAUDE_CODE_SESSION_ID": "s-2"})
-check("watch --follow: the end of a task that was over before the watch began still arrives, once",
-      f"✅ #1 Antigravity task {FIN[:8]} finished" in out, out)
+check("watch --follow: the end of a task that was over before the watch began still arrives, once — an older STATUS "
+      "report read too", f"✅ #1 Antigravity task {FIN[:8]} finished (done) → read its report" in out, out)
 code, out = run("watch", "--follow", "--timeout", "3", env={"CLAUDE_CODE_SESSION_ID": "s-2"})
 check("… and the next watch doesn't repeat it", FIN[:8] not in out, out)
 

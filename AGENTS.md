@@ -1,6 +1,6 @@
 # Antigravity Plus
 
-Claude Code-style engineering discipline plugin (`0.30.0`) for **Google Antigravity 2.x** (verified on 2.35.1): 36 skills, 7 subagents, 6 hooks (5 events), 19-tool bundled stdio MCP server, always-on rules, 4-tab Control Center sidecar, selectable **modules** (`modules.py`), and a two-way **Claude Code ↔ Antigravity** bridge. Pure Python 3.8+ stdlib (+ bundled Node 24 for the usage sidecar); macOS, Linux, Windows.
+Claude Code-style engineering discipline plugin (`0.30.1`) for **Google Antigravity 2.x** (verified on 2.35.1): 36 skills, 7 subagents, 6 hooks (5 events), 19-tool bundled stdio MCP server, always-on rules, 4-tab Control Center sidecar, selectable **modules** (`modules.py`), and a two-way **Claude Code ↔ Antigravity** bridge. Pure Python 3.8+ stdlib (+ bundled Node 24 for the usage sidecar); macOS, Linux, Windows.
 
 ## Commands
 - Install / update (`~/.gemini/config/plugins/antigravity-plus`): `./install.sh` (Windows: `.\install.cmd` or `python3 install.py`); `--choose`, `--list`, `--modules core,git`, `--without mobile`, `--all`, `--no-claude`; the choice is saved in `~/.gemini/antigravity-plus/modules.json`; the `claude` module installs into `~/.claude/skills/antigravity` when `~/.claude` exists

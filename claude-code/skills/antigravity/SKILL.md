@@ -97,8 +97,10 @@ Once per session, and again before you hand over a big batch:
 
 The script adds the run rules itself: you watch and answer, so it may ask you (only when a wrong guess would cost
 rework) and tell you what you should know; no commits or pushes; check the work after the last change; end with a
-STATUS / CHANGED / CHECKS / NOTES report. You write the task, for a capable engineer who hasn't seen this
-conversation — a light task needs two or three lines:
+short report a person can read (the user may open the conversation in Antigravity): a first line with ✅ done, ⚠️
+partly done or ⛔ blocked and what came out, then the files it changed, the checks with their numbers and what's left —
+in the language of your task. You write the task, for a capable engineer who hasn't seen this conversation — a light
+task needs two or three lines:
 - **Goal** — what to achieve, in one or two sentences.
 - **Context** — files to read first (paths, line numbers), conventions, what you already found or ruled out. Point at
   files instead of pasting them.
@@ -173,7 +175,7 @@ python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py series api-v2
   series they go along once, with the first piece.
 - When the context is nearly full (the report says so), or with `next NAME --fresh`, the next piece starts a new
   conversation that gets the templates and the last piece's report.
-- `series NAME` lists the pieces and the STATUS each ended with.
+- `series NAME` lists the pieces and how each ended (the first line of its report).
 
 ## Talk while it works
 
