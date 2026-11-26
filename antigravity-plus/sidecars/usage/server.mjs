@@ -38,6 +38,7 @@ export const TOGGLE_CLI_KEYS = Object.freeze({
   autoSetup: 'auto-setup',
   parallelHints: 'parallel-hints',
   speedHints: 'speed-hints',
+  progressHints: 'progress-hints',
   quotaHints: 'quota-hints',
   factChecks: 'fact-checks',
   objectiveAnswers: 'objective-answers',

@@ -841,6 +841,7 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 | Memory shared with Claude Code | "don't share memory with Claude Code" | `share-with-claude-code` |
 | Recent conversations at the start (3) | "show the last 5 conversations", `0` turns it off | `recent-conversations` |
 | Finishing `task.md` | "don't make me finish tasks" | `finish-tasks` |
+| Interim updates while working and after a failed background command | "no interim updates" | `progress-hints` |
 | Edit checks | "don't check edits" | `check-edits` |
 | Review after substantial changes | "don't review on your own" | `auto-review` |
 | Reminder to verify work | "don't remind me about tests" | `auto-verify` |

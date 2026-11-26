@@ -366,7 +366,7 @@ import {{ SAFE_TOGGLES, validateTogglePayload, validateLspTarget, registerRoutes
 // 1. Allowlist contents
 const expectedAllowed = [
   'autoMemory', 'finishTasks', 'checkEdits', 'autoReview', 'autoVerify',
-  'autoSetup', 'parallelHints', 'speedHints', 'quotaHints', 'factChecks',
+  'autoSetup', 'parallelHints', 'speedHints', 'progressHints', 'quotaHints', 'factChecks',
   'objectiveAnswers', 'autoCi', 'gitChecks', 'lspChecks', 'updateCheck',
 ];
 assert.equal(SAFE_TOGGLES.size, expectedAllowed.length);

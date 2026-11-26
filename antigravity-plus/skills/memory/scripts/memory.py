@@ -54,7 +54,7 @@ INDEX = "MEMORY.md"
 TYPES = ("user", "feedback", "project", "reference")
 DEFAULTS = {"autoMemory": True, "shareWithClaudeCode": True, "recentConversations": 3, "finishTasks": True,
             "checkEdits": True, "autoReview": True, "autoVerify": True, "protectSecrets": True, "autoSetup": True,
-            "parallelHints": True, "speedHints": True, "factChecks": True, "objectiveAnswers": True, "autoCi": True,
+            "parallelHints": True, "speedHints": True, "progressHints": True, "factChecks": True, "objectiveAnswers": True, "autoCi": True,
             "gitChecks": True, "updateCheck": True, "autoUpdate": False, "lspChecks": True, "quotaHints": True,
             "uiNotices": True,
             # agents' commands and the user's own work (hooks/procs.py): the OS priority of agent commands, and how
@@ -653,7 +653,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "recent-conversations": "recentConversations", "finish-tasks": "finishTasks",
                 "check-edits": "checkEdits", "auto-review": "autoReview", "auto-verify": "autoVerify",
                 "protect-secrets": "protectSecrets", "auto-setup": "autoSetup", "parallel-hints": "parallelHints",
-                "speed-hints": "speedHints", "fact-checks": "factChecks", "objective-answers": "objectiveAnswers",
+                "speed-hints": "speedHints", "progress-hints": "progressHints", "fact-checks": "factChecks", "objective-answers": "objectiveAnswers",
                 "auto-ci": "autoCi", "git-checks": "gitChecks", "lsp-checks": "lspChecks",
                 "update-check": "updateCheck", "auto-update": "autoUpdate", "quota-hints": "quotaHints",
                 "ui-notices": "uiNotices", "agent-priority": "agentPriority", "heavy-max": "heavyMax",

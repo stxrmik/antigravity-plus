@@ -59,6 +59,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "autoSetup": True,
     "parallelHints": True,
     "speedHints": True,
+    "progressHints": True,
     "factChecks": True,
     "objectiveAnswers": True,
     "autoCi": True,

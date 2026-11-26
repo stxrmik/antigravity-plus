@@ -15,7 +15,8 @@ Subagents (no user messages in their transcript) get nothing of that. Everyone, 
 problems hooks/check_edit.py found in files written since the previous step, the other agents working in the
 project (hooks/coord.py), hints that keep it working while its subagents and background commands run
 (hooks/parallel.py), and hints on the sandbox, the context budget and loops of failing commands (hooks/speed.py).
-The main agent also hears when the plan's limits of its model get short (hooks/quota.py).
+The main agent also hears when the plan's limits of its model get short (hooks/quota.py), and when to tell the user
+how it's going: a background command failed, or a long run of tool calls went without a word (hooks/progress.py).
 When the user switches Bypass Mode («/bypass», «/bypass off»), this hook applies it for every conversation
 (hooks/conversation.py) and tells the agent once; a switch made in another conversation is mentioned once too.
 The main agent also gets, with a new user message, the saved memories it is about, and hears when the message sounds
@@ -255,6 +256,16 @@ def speed_work(payload: dict) -> Optional[str]:
     return msg
 
 
+def progress_work(payload: dict) -> Optional[str]:
+    """An interim update for the user: after a failed background command or a long silent run (hooks/progress.py)."""
+    import progress
+    st = conv.load(payload)
+    msg = progress.message(payload, st)
+    if st is not None and isinstance(payload.get("conversationId"), str):
+        conv.store(payload["conversationId"], st)
+    return msg
+
+
 def quota_work(payload: dict) -> Optional[Tuple[str, str]]:
     """The plan's limits of the conversation's model when they get short (main agent only; hooks/quota.py)."""
     import quota
@@ -334,7 +345,7 @@ def main() -> None:
     show_ui = ui_notices_enabled()
     if isinstance(payload, dict):
         for part in (bypass_work, decide, edit_checks, other_agents, parallel_work, orchestrator_work, speed_work,
-                     quota_work, lsp_work, memory_work, facts_work, objective_work):
+                     progress_work, quota_work, lsp_work, memory_work, facts_work, objective_work):
             try:
                 res = part(payload)
             except Exception as e:  # a hook must never break the conversation

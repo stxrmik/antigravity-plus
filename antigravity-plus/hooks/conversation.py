@@ -44,7 +44,15 @@ AGENT_ID = re.compile(r'"conversationId":\s*"([\w-]{8,80})"')
 REPORT = re.compile(rb"\[Message\] timestamp=(\S+) sender=([\w./:-]+)")
 GONE_IDLE = re.compile(rb"Subagent ([\w-]{8,80}) has gone idle")
 SUBAGENT_ERROR = re.compile(rb'The subagent [^\n]{1,200} with id \\?"([\w-]{8,80})\\?" encountered an error')
+STILL_RUNNING = b"content=Background command is still running"
 BG_FINISHED_MSG = re.compile(rb'Task id \\?"([^"\\]+)\\?" finished with result:')
+# The result a finished background command reports (decoded): what says it failed, the first match is shown
+# (hooks/progress.py). An `echo "EXIT=$?"` after a failing build still exits 0, so its words count too.
+BG_RESULT = re.compile(r'Task id "?([^"\s]+)"? finished with result:(.*?)(?=\[Message\] timestamp=|</SYSTEM_MESSAGE>|\Z)', re.S)
+BG_FAILED = re.compile(r"\bBUILD FAILED\b|^FAILURE: |Traceback \(most recent call last\)|\b[1-9]\d* (?:failed|failing|errors?)\b|"
+                       r"^FAILED\b|\bFAILED \(|npm ERR!|^error(?:\[\w+\])?: |^E\s{2,}\w", re.M)
+BG_EXIT = re.compile(r"(?:exited with code|exit code:?|\bEXIT\w*=)\s*[1-9]\d*")  # when nothing above says why
+PIGGY_POLLS = (3, 10)     # steps that check on running work alongside other calls: polling hints at these counts
 STATUS_CHECK = re.compile(r"\b(status|progress|done yet|are you done|finished yet|ready yet|answer now|provide (your|the) "
                           r"(answer|result|report)|how(?:'s| is) it going)\b|как\s+(дела|успехи|прогресс)|готов[оа]?\s*\?|"
                           r"\bстатус|\bну\s+что\b", re.I)
@@ -220,7 +228,7 @@ def load(payload: dict, save: bool = True) -> Optional[dict]:
             if text:
                 st["users"].append({"step": step, "ts": d.get("created_at", ""), "text": text,
                                     "prev_agent": st.get("last_agent", "")})
-                st.setdefault("calls", {})["search_run"] = 0
+                st.setdefault("calls", {}).update(search_run=0, quiet=0)
         elif d.get("type") == "CHECKPOINT":
             st["checkpoints"].append(step)
         elif d.get("type") == "PLANNER_RESPONSE" and (d.get("content") or "").strip():
@@ -233,8 +241,10 @@ def load(payload: dict, save: bool = True) -> Optional[dict]:
 
 def track_background(st: dict, kind: bytes, raw: bytes) -> None:
     """Keep st["bg"] = {id: {"k": "agent"|"cmd"|"timer"|"swarm", "t": type, "r": role or description, "s": step,
-    "ts": started, "st": "run"|"done"|"killed", "end": ts}} (a swarm member's id is `swarm:<name>`) and st["calls"] =
-    {"search_run": web-search-only steps in a row, "poll_step": the last step that only checked on running work,
+    "ts": started, "st": "run"|"done"|"killed", "end": ts, "fail": the line of a finished command's result that says it
+    failed}} (a swarm member's id is `swarm:<name>`) and st["calls"] =
+    {"search_run": web-search-only steps in a row, "poll_step": the last step that only checked on running work (or
+    the PIGGY_POLLS-th that checked on it beside other calls: "piggy" counts those while work runs),
     "swarm_ts": when the agent last used the swarm or its board}."""
     bg = st.setdefault("bg", {})
     calls = st.setdefault("calls", {})
@@ -243,6 +253,8 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
             sm = STEP.search(raw[:120])
             st["claude_said"] = int(sm.group(1)) if sm else st["last_step"]
         for m in REPORT.finditer(raw):
+            if STILL_RUNNING in raw[m.end():m.end() + 160]:
+                continue  # Antigravity's «still running after 300s» notice: not a report, the command goes on
             it = bg.get(m.group(2).decode())
             if it and it.get("st") == "run":
                 it.update(st="done", end=m.group(1).decode())
@@ -258,6 +270,20 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
             it = bg.get(m.group(1).decode("utf-8", errors="replace"))
             if it and it.get("st") == "run":
                 it.update(st="done", end="")
+        if BG_FINISHED_MSG.search(raw):
+            try:
+                text = json.loads(raw).get("content") or ""
+            except ValueError:
+                text = ""
+            for r in BG_RESULT.finditer(text):
+                it = bg.get(r.group(1))
+                if not it or it.get("k") != "cmd" or it.get("res"):
+                    continue  # the first result counts: a later copy of it says nothing new
+                it["res"] = True
+                out = r.group(2)[-20000:]
+                f = BG_FAILED.search(out) or BG_EXIT.search(out)
+                if f:
+                    it["fail"] = out[f.start():].split("\n", 1)[0].strip()[:100] or "failed"
         return
     if kind == b"GENERIC":
         if CREATED not in raw and BG_STARTED not in raw:
@@ -285,11 +311,15 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
     step = d.get("step_index", st["last_step"])
     names = [str(c.get("name") or "") for c in tcs]
     pending: List[dict] = []
-    polling = bool(tcs) and any(it.get("st") == "run" and it.get("k") in ("agent", "cmd", "swarm") for it in bg.values())
+    working = any(it.get("st") == "run" and it.get("k") in ("agent", "cmd", "swarm") for it in bg.values())
+    polling = bool(tcs) and working
+    checks = False  # a status check on running work, maybe beside real work (seen live: one in each of 36 steps)
     for name, c in zip(names, tcs):
         raw_args = c.get("args")
         a: dict = raw_args if isinstance(raw_args, dict) else {}
         action = str(a.get("Action") or a.get("action") or "list").lower()
+        if name in ("manage_task", "manage_subagents") and action in ("list", "status"):
+            checks = True
         if name in SWARM_TOOLS:
             calls["swarm_ts"] = d.get("created_at", "")  # the board is how a coordinator waits: never polling
             if name == "swarm":
@@ -338,7 +368,8 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
         if name == "run_command" and CLAUDE_ASK.search(str(a.get("CommandLine") or "")):
             st["claude_ask"] = step  # it asked Claude Code; the answer arrives as a message
     st["bg_pending"] = pending
-    if polling:
+    calls["piggy"] = calls.get("piggy", 0) + 1 if checks and working else (calls.get("piggy", 0) if working else 0)
+    if polling or (checks and calls["piggy"] in PIGGY_POLLS):
         calls["poll_step"] = step
     calls["search_run"] = calls.get("search_run", 0) + 1 if tcs and all(n == "search_web" for n in names) else 0
 
@@ -487,7 +518,8 @@ def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
     sbx_new — keys that then worked with BypassSandbox (to remember for the project); sbx_ok — keys that worked inside
     the sandbox; big — the latest very large tool result (a whole long file, a huge output). For hooks/memory_hints.py:
     remote — [{k: command key, s: step}] of commands on servers and deploys; loop — the current run of 3+ failing
-    commands; fixed — [{what, n, s}] such runs that a success soon ended; mem_any / mem_saved — the latest step that
+    commands; fixed — [{what, n, s}] such runs that a success soon ended; quiet / quiet_from — tool-calling steps in a
+    row without a word to the user, and the first of them (hooks/progress.py); mem_any / mem_saved — the latest step that
     wrote into a memory folder / wrote a memory (not a handoff note); mem_files — the memories written here."""
     calls = st.setdefault("calls", {})
     if kind == b"PLANNER_RESPONSE":
@@ -504,8 +536,18 @@ def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
                 calls["ctx_at"] = m.group(1).decode("ascii", "replace")
         if b'"tool_calls"' not in raw:
             st["calls_pending"] = []
+            calls["quiet"] = 0  # a message that ends the turn: the user heard from it
             return
         d = json.loads(raw)
+        if d.get("tool_calls"):
+            if (d.get("content") or "").strip():
+                calls["quiet"] = 0  # a line for the user beside its tool calls
+            else:
+                calls["quiet"] = calls.get("quiet", 0) + 1  # tool calls without a word (hooks/progress.py)
+                if calls["quiet"] == 1:
+                    calls["quiet_from"] = d.get("step_index", st["last_step"])
+        else:
+            calls["quiet"] = 0
         pending = []
         for c in d.get("tool_calls") or []:
             a = c.get("args") if isinstance(c, dict) and isinstance(c.get("args"), dict) else {}

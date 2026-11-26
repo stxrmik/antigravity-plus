@@ -234,7 +234,7 @@ def off_line(key: str, warn: str) -> str:
 MODULE_KEYS = {"quality": ("checkEdits", "finishTasks", "autoReview", "autoVerify"),
                "facts": ("factChecks", "objectiveAnswers"), "memory": ("autoMemory", "recentConversations"),
                "parallel": ("parallelHints",), "speed": ("speedHints", "quotaHints"), "git": ("autoCi", "gitChecks"),
-               "lsp": ("lspChecks",), "core": ("uiNotices",)}
+               "lsp": ("lspChecks",), "core": ("uiNotices", "progressHints")}
 
 
 def modules_line() -> str:
