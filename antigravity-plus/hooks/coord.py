@@ -251,16 +251,24 @@ def _sweep_snaps(here: str, agents: dict) -> None:
 
 def _index_row(cid: str) -> Tuple[str, str, str]:
     """(title, preview, parent conversation id) from Antigravity's own conversation index."""
-    try:
-        con = sqlite3.connect(f"file:{INDEX_DB}?immutable=1", uri=True, timeout=1)
+    dbs = [os.path.join(d, "conversation_summaries.db") for d in compat.data_dirs()]
+    if INDEX_DB and INDEX_DB not in dbs:
+        dbs.append(INDEX_DB)
+    for db in dbs:
+        if not os.path.isfile(db):
+            continue
         try:
-            row = con.execute("SELECT title, preview, parent_conversation_id FROM conversation_summaries "
-                              "WHERE conversation_id = ?", (cid,)).fetchone()
-        finally:
-            con.close()
-    except sqlite3.Error:
-        row = None
-    return (str(row[0] or ""), str(row[1] or ""), str(row[2] or "")) if row else ("", "", "")
+            con = sqlite3.connect(f"file:{db}?immutable=1", uri=True, timeout=1)
+            try:
+                row = con.execute("SELECT title, preview, parent_conversation_id FROM conversation_summaries "
+                                  "WHERE conversation_id = ?", (cid,)).fetchone()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            continue
+        if row:
+            return (str(row[0] or ""), str(row[1] or ""), str(row[2] or ""))
+    return ("", "", "")
 
 
 def conversation_info(cid: str) -> Tuple[str, str]:

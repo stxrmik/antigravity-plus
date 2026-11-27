@@ -3,6 +3,7 @@
 #   ./install.sh                     install / update into ~/.gemini/config/plugins/antigravity-plus
 #   ./install.sh --uninstall         remove the plugin (memory and settings are kept)
 #   ./install.sh --uninstall --purge also remove its memory and settings (~/.claude memory is never touched)
+#   ./install.sh --choose | --list | --plain | --demo   (python3 install.py --help)
 cd "$(dirname "$0")" || exit 1
 if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 is required (macOS: xcode-select --install; Linux: install it with your package manager)" >&2

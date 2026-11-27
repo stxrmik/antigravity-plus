@@ -574,7 +574,16 @@
   // Plan limits: one persistent card, refilled in place so polling never resets the rest of the view.
   const limitsCard = h('div', { class: 'card' });
   const WINDOWS = { '5h': '5 часов', weekly: 'Неделя' };
-  const family = (name) => (String(name || '').match(/gemini|claude|gpt|orchestrator/i) || [''])[0].toLowerCase();
+  const family = (ctx) => {
+    if (!ctx) return [];
+    const fl = String(ctx.family_label || '').trim().toLowerCase();
+    if (fl) {
+      const first = fl.split(/[^\p{L}\p{N}]+/u).find(Boolean) || '';
+      return first && first !== fl ? [fl, first] : [fl];
+    }
+    const m = (String(ctx.model || '').match(/gemini|claude|gpt|orchestrator/i) || [''])[0].toLowerCase();
+    return m ? [m] : [];
+  };
   const groupTitle = (g) => String(g.displayName || '').replace(/\s+models?$/i, '').replace(/\band\b/g, 'и');
   function fmtIn(iso) {
     const min = Math.max(1, Math.round((new Date(iso).getTime() - Date.now()) / 60000));
@@ -591,16 +600,18 @@
           : state.limits ? 'Antigravity не сообщает лимиты для этого аккаунта.' : 'Загрузка…'));
       return;
     }
-    const cur = family(state.tab === 'session' && state.session && state.session.context ? state.session.context.model : '');
+    const needles = family(state.tab === 'session' && state.session ? state.session.context : null);
     limitsCard.replaceChildren(
       h('h3', null, 'Лимиты ', h('span', { class: 'muted' }, '— сколько израсходовано')),
       ...groups.map((g) => {
         const models = String(g.description || '').replace(/^.*?:\s*/, '');
+        const hay = `${g.displayName || ''} ${g.description || ''}`.toLowerCase();
+        const isCur = needles.some((n) => hay.includes(n));
         const buckets = (g.buckets || []).slice().sort((a, b) => (a.window === '5h' ? 0 : 1) - (b.window === '5h' ? 0 : 1));
         return h('div', { class: 'lim' },
           h('div', { class: 'row' }, h('span', { style: 'font-weight:600' }, groupTitle(g)),
             h('span', { class: 'small muted ellipsis grow', title: models }, models),
-            cur && `${g.displayName} ${g.description}`.toLowerCase().includes(cur) ? h('span', { class: 'chip' }, 'модель разговора') : null),
+            isCur ? h('span', { class: 'chip' }, 'модель разговора') : null),
           h('div', { class: 'limits' }, buckets.map((b) => {
             const left = Math.min(1, Math.max(0, Number(b.remainingFraction) || 0));
             const used = 1 - left, fresh = left >= 0.9995;
@@ -636,14 +647,20 @@
 
     // hero + caption
     const models = (d.models || []).join(', ') || d.default_model || '—';
+    const unknown = d.unknown_price_models || [];
+    const unknownSet = new Set(unknown);
+    const otherUnpriced = (d.unpriced_models || []).filter((m) => !unknownSet.has(m));
     out.push(h('div', { class: 'card' },
       h('div', { class: 'row between' },
-        h('div', { class: 'small muted' }, 'Стоимость по API (эквивалент)'),
+        h('div', { class: 'row', style: 'gap:6px' },
+          h('div', { class: 'small muted' }, 'Стоимость по API (эквивалент)'),
+          d.runtime === 'cli' ? h('span', { class: 'chip' }, 'CLI') : null),
         h('div', { class: 'small muted' }, d.duration || '')),
       h('div', { class: 'hero', title: 'API-эквивалент, а не ваш счёт' }, fmtUsd(t.cost)),
       h('div', { class: 'small muted ellipsis', title: models }, `${models} · ${turnsW(d.turns.length)} · ${calls(t.calls)}`),
-      d.model_guessed_calls ? note('info', `Модель не записана в транскрипт (так бывает у разговоров, запущенных через agentapi) — ${ru(d.model_guessed_calls, 'вызов оценён', 'вызова оценены', 'вызовов оценены')} по цене ${d.default_model}.`) : null,
-      (d.unpriced_models || []).length ? note('warn', `Нет цены для: ${d.unpriced_models.join(', ')} — их токены в стоимость не входят. Добавьте цену в skills/usage/pricing.json.`) : null,
+      d.model_guessed_calls ? note('info', `Модель не записана в транскрипт (так бывает у разговоров, запущенных через agentapi) — ${ru(d.model_guessed_calls, 'вызов оценён', 'вызова оценены', 'вызовов оценены')} по цене ${d.default_model || '—'}${d.default_model_source === 'client' ? ' (модель по умолчанию у клиента)' : ''}.`) : null,
+      unknown.length ? note('warn', `Цена неизвестна: ${unknown.join(', ')} — модели и её семейства нет в pricing.json, токены в сумму не входят.`) : null,
+      otherUnpriced.length ? note('warn', `Нет цены для: ${otherUnpriced.join(', ')} — их токены в стоимость не входят. Добавьте цену в skills/usage/pricing.json.`) : null,
       t.saved > 0 ? h('div', { class: 'small muted', style: 'margin-top:4px' }, `Кэш сэкономил ${fmtUsd(t.saved)} — без кэша было бы ${fmtUsd(t.cost_no_cache)}`) : null));
 
     out.push(limitsCard);
@@ -659,6 +676,7 @@
         h('div', { class: 'row between' }, h('h3', { style: 'margin:0' }, 'Контекст'),
           h('span', { class: 'num', title: ctx.window_source === 'antigravity' ? 'Окно — столько Antigravity дал последнему вызову модели'
             : ctx.window_source === 'recorded' ? 'Окно — последнее, что Antigravity сообщал для этой модели'
+            : ctx.window_source === 'client' ? 'Окно — из списка моделей клиента Antigravity (до первого вызова модели)'
             : 'Окно — из pricing.json: Antigravity пока не сообщал его для этой модели' },
             `${fmtK(ctx.current)} / ${fmtK(ctx.window)} · ${fmtPct(f)}`)),
         h('div', { class: 'meter', role: 'meter', 'aria-valuenow': Math.round(f * 100), 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-label': 'Заполнение контекста' },
@@ -750,12 +768,24 @@
     if (!r) return [h('div', { class: 'empty muted' }, 'Загрузка…')];
     const out = [];
     const unpriced = (r.by_model || []).filter((m) => !m.priced && m.tokens > 0);
+    const unknown = unpriced.filter((m) => m.unknown);
+    const otherUnpriced = unpriced.filter((m) => !m.unknown);
+    const rtKeys = Object.keys(r.by_runtime || {});
+    const rtLabels = { desktop: 'Desktop', cli: 'CLI' };
+    const rtLine = rtKeys.length > 1
+      ? rtKeys
+          .sort((a, b) => (a === 'desktop' ? -1 : b === 'desktop' ? 1 : a.localeCompare(b)))
+          .map((k) => `${rtLabels[k] || k} ${fmtUsd((r.by_runtime[k] || {}).cost)}`)
+          .join(' · ')
+      : null;
     out.push(h('div', { class: 'card' },
       h('div', { class: 'small muted' }, `За ${r.days} дней (API-эквивалент)`),
       h('div', { class: 'hero' }, fmtUsd(r.period.cost)),
       h('div', { class: 'small muted' }, `сегодня ${fmtUsd(r.today.cost)} · ${fmtK(r.period.tokens)} токенов · ${calls(r.period.calls)}`),
-      unpriced.length ? note('warn', `Без цены (не входят в сумму): ${unpriced.map((m) => `${m.model} — ${fmtK(m.tokens)} токенов`).join('; ')}.`) : null,
-      (r.by_model || []).some((m) => m.guessed) ? note('info', 'У части разговоров (например, запущенных через agentapi) модель не записана в транскрипт — они оценены по цене модели по умолчанию.') : null));
+      rtLine ? h('div', { class: 'small muted' }, rtLine) : null,
+      unknown.length ? note('warn', `Цена неизвестна: ${unknown.map((m) => `${m.model} — ${fmtK(m.tokens)} токенов`).join('; ')} — модели и её семейства нет в pricing.json, токены в сумму не входят.`) : null,
+      otherUnpriced.length ? note('warn', `Без цены (не входят в сумму): ${otherUnpriced.map((m) => `${m.model} — ${fmtK(m.tokens)} токенов`).join('; ')}.`) : null,
+      (r.by_model || []).some((m) => m.guessed) ? note('info', `У части разговоров (например, запущенных через agentapi) модель не записана в транскрипт — они оценены ${r.default_model ? `по цене ${r.default_model}${r.default_model_source === 'client' ? ' (модель по умолчанию у клиента)' : ''}` : 'по цене модели по умолчанию'}.`) : null));
     out.push(limitsCard);
 
     out.push(h('div', { class: 'card' }, h('h3', null, 'По дням'),
@@ -776,7 +806,11 @@
       (r.conversations || []).length ? h('table', null,
         h('thead', null, h('tr', null, h('th', null, 'Разговор'), h('th', { class: 'r w-n' }, 'Контекст'), h('th', { class: 'r w-m' }, '$'))),
         h('tbody', null, r.conversations.map((c) => h('tr', { class: 'click', title: 'Открыть статистику разговора', onclick: () => { select(c.id); setTab('session'); } },
-          h('td', null, h('div', { class: 'ellipsis', style: 'max-width:100%' }, c.title || c.id), h('div', { class: 'small muted ellipsis' }, `${fmtAgo(c.last_ts)} · ${turnsW(c.turns)} · ${c.model_guessed && (c.models || []).length <= 1 ? 'модель не записана' : (c.models || []).join(', ')}`)),
+          h('td', null,
+            h('div', { class: 'row', style: 'gap:6px' },
+              h('div', { class: 'ellipsis grow' }, c.title || c.id),
+              c.runtime === 'cli' ? h('span', { class: 'chip', style: 'flex:none' }, 'CLI') : null),
+            h('div', { class: 'small muted ellipsis' }, `${fmtAgo(c.last_ts)} · ${turnsW(c.turns)} · ${c.model_guessed && (c.models || []).length <= 1 ? 'модель не записана' : (c.models || []).join(', ')}`)),
           h('td', { class: 'r' }, c.context ? fmtPct(c.context.fraction) : '—'),
           h('td', { class: 'r' }, fmtUsd(c.cost) + (c.unpriced_models && c.unpriced_models.length ? '*' : '')))))) :
         h('div', { class: 'muted small' }, 'Разговоров пока нет.'),
@@ -1074,7 +1108,19 @@
       foot.textContent = 'Состояние из ~/.gemini/antigravity-plus/ — управление правами доступа (Bypass Mode, protectSecrets, /update) остаётся только в чате.';
     } else {
       const pu = (state.session && state.session.pricing_updated) || (state.recent && state.recent.pricing_updated) || '?';
-      foot.textContent = `Оценка по ценам API из pricing.json (обновлён ${pu}), а не ваш реальный счёт. Данные — из транскриптов Antigravity, те же, что у /usage; лимиты — от самого Antigravity.`;
+      const cl = (state.session && state.session.client) || (state.recent && state.recent.client);
+      let clStr = '';
+      if (cl && cl.source) {
+        const isLive = cl.source === 'desktop' || cl.source === 'cli';
+        const atDate = cl.at && !Number.isNaN(new Date(cl.at).getTime()) ? new Date(cl.at).toLocaleDateString('ru-RU') : '';
+        const src = isLive
+          ? `клиент${atDate ? ` от ${atDate}` : ''}${cl.stale ? ' · устарели' : ''}`
+          : cl.source === 'bundled' ? 'встроенный снимок'
+          : cl.source === 'pricing' ? 'только pricing.json'
+          : cl.source;
+        clStr = ` · модели: ${cl.version ? `Antigravity ${cl.version}` : 'Antigravity'} · ${src}`;
+      }
+      foot.textContent = `Оценка по ценам API из pricing.json (обновлён ${pu}), а не ваш реальный счёт. Данные — из транскриптов Antigravity, те же, что у /usage; лимиты — от самого Antigravity${clStr}.`;
     }
     renderLive();
   }

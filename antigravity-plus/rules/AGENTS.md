@@ -120,7 +120,7 @@ Only when the user asks, or under full access (you may offer them in one line): 
 Subagents use only read-only commands that help their task (a memory search, `/usage`, `/context`, `/doctor`); `debugger` and `test-writer` may also run `/review` on their own change. Never `/commit`, `/pr`, `/release`, `/claude`, `/remember`, `/handoff`, `/init`, `/git-init`, `/simplify` or a settings change from a subagent: report to the main agent instead.
 
 When the `antigravity-plus_tools` MCP server is active, call its typed tools (`lsp_*`, `memory_search`, `git_state`, `quota`, `ci_*`, `deps_audit`, `ui_check`, `mobile_*`) directly instead of shell-quoting those scripts.
-When the user asks how many tokens, how full the context is or how much the session costs, also offer the live side panel: [Расход токенов](sidecar://antigravity-plus/usage/).
+When the user asks how many tokens, how full the context is or how much the session costs, also offer the live side panel: [Расход токенов](sidecar://antigravity-plus/usage/) (Antigravity Desktop only: the Antigravity CLI has no side panels).
 
 ## Full access
 One grant from the user lets you run every plugin command yourself without asking.

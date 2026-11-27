@@ -212,14 +212,15 @@ def main() -> None:
         args = call.get("args") or {}
         if isinstance(args, str):
             args = json.loads(args)
-        path = args.get("Path") or args.get("TargetFile") or args.get("path") or ""
+        path = args.get("Path") or args.get("TargetFile") or args.get("AbsolutePath") or args.get("path") or ""  # App/CLI names, then the docs' older ones (write_to_file, view_file)
         if isinstance(path, str) and len(path) >= 2 and path[0] == path[-1] == '"':
             path = json.loads(path)
+        name = compat.tool(call.get("name"))  # one name whichever spelling came (view_file → read_file, …)
         cid = payload.get("conversationId")
         ws = workspace_of(path, payload) if isinstance(path, str) and path else None
         if ws:
-            coord.record(payload, call.get("name") or "", path)  # what this agent saw and changed (hooks/coord.py)
-        if call.get("name") == "read_file":
+            coord.record(payload, name, path)  # what this agent saw and changed (hooks/coord.py)
+        if name == "read_file":
             ws = None  # reads are only recorded, not checked
         if (ws and isinstance(cid, str) and not payload.get("error") and enabled()
                 and not SKIP_PARTS.intersection(os.path.relpath(os.path.realpath(path), ws).split(os.sep))):

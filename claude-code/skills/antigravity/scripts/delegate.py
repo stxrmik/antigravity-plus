@@ -63,7 +63,7 @@ Replies go back with `agentapi send-message`: between the agent's steps while it
 ended its turn to wait.
 
 Choosing by the limits left: a tier (fast, standard, strong, ultra, claude) is a list of models, best first; the
-models in no tier are «Experimental» (EXPERIMENTAL: a word on when each may fit) and go by their exact id. Each model
+models in no tier are «Experimental» (Antigravity's own tag and note, FAMILY_NOTES) and go by their exact id. Each model
 belongs to a quota group of Antigravity's plan (Gemini; Claude and GPT) with a weekly and a 5-hour window. A group is
 "exhausted", "tight" (under 15% left, or spending ahead of the week's pace), "spend" (much left and the week
 resets soon, or far behind pace) or "ok". A tier skips exhausted models, takes tight groups last and — for standard
@@ -116,6 +116,13 @@ try:
 except ImportError:  # the installer copies compat.py next to this script
     print("❌ delegate.py: compat.py is missing next to it — reinstall Antigravity Plus (./install.sh).")
     sys.exit(1)
+try:  # client.py: what the Antigravity client itself says about its models (next to compat.py; optional)
+    import client
+except ImportError:
+    client = None
+sys.path.insert(0, HERE)
+import agy_cli  # noqa: E402  the Antigravity CLI backend (--via cli), next to this script
+agy_cli.bind(sys.modules[__name__])
 
 HOME = os.path.expanduser("~")
 PROJECTS = os.path.join(HOME, ".gemini", "config", "projects")
@@ -174,22 +181,27 @@ PCT_PER_USD = (("claude", 2.5), ("gpt", 2.5), ("carbon", 0.125), ("", 0.042))  #
 #    benchmark's 540 s (9 min) cap — every Carbon (High) and Orchestrator (Carbon) run did (Carbon (Medium) still
 #    finished 4/4 hidden tests at 499.6 s before cutoff).
 # Reclassification: `gemini-4-neon-low` enters `standard` right after Hydrogen (Medium); `gemini-4-hydrogen-xhigh` moves
-# ahead of `orchestrator-neon` in `strong`; all models leaving on 2026-11-30 (Gemini 3.8 Flash, Gemini 4 Argon,
-# Orchestrator (Argon), GPT-OSS 120B) move out of `TIERS` into `EXPERIMENTAL` (paid Pro includes Neon & Carbon since
-# 2.34, Free/Plus includes Hydrogen). Orchestrator default Planner/Executor effort changed to High on 2.35.0, and
-# Planner/Executor roles are configurable in Settings > Models (`plan_execute:true` in annotations). `--timeout` defaults to
-# 1800 s: don't lower it when delegating to `ultra` or Orchestrator models (on 2026-11-20 Carbon (High) took 11–26 min).
-TIERS: Dict[str, List[str]] = {
-    "fast": ["gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-neon-low", "claude-sonnet-5-5-low"],
-    "standard": ["gemini-4-hydrogen-medium", "gemini-4-neon-low", "gemini-4-hydrogen-high", "gemini-4-neon-medium",
-                 "claude-sonnet-5-5-medium"],
-    "strong": ["gemini-4-neon-medium", "gemini-4-hydrogen-high", "gemini-4-neon-high", "gemini-4-hydrogen-xhigh",
-               "gemini-pro-orchestrator-neon", "claude-sonnet-5-5-high", "claude-opus-5-5-high"],
-    "ultra": ["gemini-4-carbon-high", "gemini-pro-orchestrator", "gemini-4-carbon-medium", "gemini-4-neon-high",
-              "claude-opus-5-5-high"],
-    "claude": ["claude-sonnet-5-5-high", "claude-opus-5-5-high", "claude-sonnet-5-5-medium", "claude-opus-5-5-medium",
-               "gemini-4-neon-medium"],
+# ahead of `orchestrator-neon` in `strong`. `--timeout` defaults to 1800 s: don't lower it when delegating to `ultra` or
+# Orchestrator models (on 2026-11-20 Carbon (High) took 11–26 min).
+# A tier is a list of rules (model family, effort) in that measured order — keep it by hand. client.resolve() turns a
+# rule into the live model id of what Antigravity offers now (hooks/client.py: a renamed family goes on as its
+# successor); a rule without a live model is skipped, an empty tier takes Antigravity's default model.
+TIERS: Dict[str, List[Tuple[str, str]]] = {
+    "fast": [("gemini-4-hydrogen", "low"), ("gemini-4-hydrogen", "medium"), ("gemini-4-neon", "low"),
+             ("claude-sonnet-5-5", "low")],
+    "standard": [("gemini-4-hydrogen", "medium"), ("gemini-4-neon", "low"), ("gemini-4-hydrogen", "high"),
+                 ("gemini-4-neon", "medium"), ("claude-sonnet-5-5", "medium")],
+    "strong": [("gemini-4-neon", "medium"), ("gemini-4-hydrogen", "high"), ("gemini-4-neon", "high"),
+               ("gemini-4-hydrogen", "xhigh"), ("orchestrator", "neon"), ("claude-sonnet-5-5", "high"),
+               ("claude-opus-5-5", "high")],
+    "ultra": [("gemini-4-carbon", "high"), ("orchestrator", "carbon"), ("gemini-4-carbon", "medium"),
+              ("gemini-4-neon", "high"), ("claude-opus-5-5", "high")],
+    "claude": [("claude-sonnet-5-5", "high"), ("claude-opus-5-5", "high"), ("claude-sonnet-5-5", "medium"),
+               ("claude-opus-5-5", "medium"), ("gemini-4-neon", "medium")],
 }
+# Today's ids for a rule when there is no client snapshot at all (client.py missing): its naming scheme.
+LEGACY_IDS = {("orchestrator", "carbon"): "gemini-pro-orchestrator", ("orchestrator", "neon"): "gemini-pro-orchestrator-neon",
+              ("orchestrator", "argon"): "gemini-pro-orchestrator-argon"}
 TIER_USE = {
     "fast": "light tasks and lookups: a small function with its test, a rename, a lint fix, docs, «where is X used», "
             "summaries of files or logs, babysitting a long command — ~0.5 min, ~0.005% of the weekly Gemini quota",
@@ -206,34 +218,19 @@ TIER_USE = {
               "per task",
 }
 # Experimental: the models Antigravity offers that are in no tier — an exact `--model <id>` still takes them. `models`
-# and `budget` list every such model under «Experimental» with a word on when it may fit; one Antigravity adds later
-# shows up there too, with Antigravity's own description until it gets one here. Numbers from the 2026-11-20 &
-# 2026-11-24 benchmarks where a model ran in them.
-EXPERIMENTAL = {
-    "gemini-4-neon-xhigh": "Neon at its Extra High reasoning budget — the deepest Neon: a hard debugging task took it "
-                           "7.7 min against Neon (Medium)'s 2.6, same result; for a problem Neon (High) left unsure",
-    "gemini-4-carbon-low": "Carbon with little thinking — its knowledge and long-horizon habits at less time: a "
-                           "question in a niche domain that needs Carbon's knowledge more than its depth",
-    "gemini-4-argon-high": "Argon at high effort (the original Gemini 4 pro model, ~4× Hydrogen's quota per token); "
-                           "Antigravity removes Argon on 2026-11-30 — prefer Carbon (High) or Neon (High)",
-    "gemini-4-argon-medium": "Argon at medium effort (~4× Hydrogen's quota per token); Antigravity removes Argon on "
-                             "2026-11-30 — prefer Neon (Medium) or Carbon (Medium)",
-    "gemini-4-argon-low": "Argon with little thinking (~4× Hydrogen's quota per token); Antigravity removes Argon on "
-                          "2026-11-30 — prefer Neon (Low) or Hydrogen",
-    "gemini-pro-orchestrator-argon": "Orchestrator with Argon planning and Hydrogen executing; Antigravity removes Argon on "
-                                     "2026-11-30 and hasn't said what happens to Orchestrator (Argon) — prefer Orchestrator "
-                                     "(Carbon) or Orchestrator (Neon)",
-    "gemini-3.8-flash-high": "Gemini 3.8 Flash (High), 256k context window, 5–6 min even on light tasks; Antigravity "
-                             "removes 3.8 Flash on 2026-11-30 — prefer Gemini 4 Hydrogen",
-    "gemini-3.8-flash-medium": "Gemini 3.8 Flash (Medium), 256k context window, slower than Gemini 4 Hydrogen at "
-                               "similar cost; Antigravity removes 3.8 Flash on 2026-11-30 — prefer Gemini 4 Hydrogen",
-    "gemini-3.8-flash-low": "Gemini 3.8 Flash (Low), 256k context window; Antigravity removes 3.8 Flash on 2026-11-30 "
-                            "— prefer Gemini 4 Hydrogen (Low)",
-    "claude-opus-5-5-low": "Claude Opus with little thinking: a quick Claude-quality review, wording or answer on "
-                           "Antigravity's Claude quota (~2.5% of its week per API dollar)",
-    "gpt-oss-120b-medium": "OpenAI's open-weight GPT-OSS 120B on the «Claude and GPT models» quota, 80k context window "
-                           "in Antigravity: a second opinion from neither Google nor Anthropic; Antigravity removes it "
-                           "on 2026-11-30",
+# and `budget` list each with Antigravity's own tag and description (client.py: «New», «Leaving on …») and, for some
+# families, a word of ours on when it may fit (numbers from the 2026-11-20 & 2026-11-24 benchmarks).
+FAMILY_NOTES = {
+    "gemini-4-neon": "Neon at its deepest effort: a hard debugging task took Neon (XHigh) 7.7 min against Neon "
+                     "(Medium)'s 2.6, same result — for a problem Neon (High) left unsure",
+    "gemini-4-carbon": "Carbon's knowledge and long-horizon habits: at a low effort for a question in a niche domain "
+                       "that needs its knowledge more than its depth",
+    "gemini-4-argon": "Argon, the original Gemini 4 pro model (~4× Hydrogen's quota per token)",
+    "claude-opus-5-5": "Claude Opus on Antigravity's Claude quota (~2.5% of its week per API dollar): a quick "
+                       "Claude-quality review or answer",
+    "claude-sonnet-5-5": "Claude Sonnet on Antigravity's Claude quota (~2.5% of its week per API dollar)",
+    "gpt-oss": "an open-weight model on the «Claude and GPT models» quota: a second opinion from neither Google nor "
+               "Anthropic",
 }
 STATE_RANK = {"spend": 0, "ok": 1, "tight": 2, "exhausted": 3}
 FAILED_ENDS = {
@@ -416,6 +413,45 @@ def ready_models(ls: "LS", deadline: float) -> int:
         if time.time() >= deadline:
             return 0
         time.sleep(2)
+
+
+VIAS = ("auto", "desktop", "cli")
+
+
+def choose_via(arg: Optional[str] = None) -> str:
+    """Where a new task runs: --via, else AGP_DELEGATE_VIA, else auto — Antigravity Desktop when its language server
+    answers, else the Antigravity CLI when `agy` is installed, else Desktop (which connect() then tries to start,
+    with its usual error when it can't)."""
+    via = (arg or os.environ.get("AGP_DELEGATE_VIA") or "auto").strip().lower()
+    if via not in VIAS:
+        raise Failure(f"--via is one of {', '.join(VIAS)}, not {via!r}.")
+    if via == "cli" and not agy_cli.available():
+        raise Failure(agy_cli.NOT_INSTALLED)
+    if via == "auto":
+        via = "desktop" if discover() else "cli" if agy_cli.available() else "desktop"
+    return via
+
+
+def connect_for(task: Optional[dict]) -> Optional[LS]:
+    """The language server a task's commands need — none for a task of the Antigravity CLI. A Desktop task whose
+    Antigravity was closed meanwhile: connect() starts it again or says why it can't."""
+    return None if agy_cli.is_cli(task) else connect()
+
+
+def client_snapshot_models() -> Dict[str, dict]:
+    """{id: entry} from the client's model snapshot (hooks/client.py), {} without one."""
+    try:
+        got = client.models() if client else {}
+        return got if isinstance(got, dict) else {}
+    except Exception:
+        return {}
+
+
+def client_default_model() -> str:
+    try:
+        return str(client.default_model() or "") if client else ""
+    except Exception:
+        return ""
 
 
 def rpc(ls: LS, method: str, body: dict, timeout: float = 20.0) -> dict:
@@ -644,28 +680,93 @@ def verdict(s: dict) -> str:
     return STATE_TEXT[s["status"]]
 
 
+_CLIENT_FRESH = [False]
+
+
+def fresh_client() -> None:
+    """Refresh the client's model snapshot when it is stale (once per run; the bridge isn't a hook, it may ask the
+    language server). Nothing happens without client.py, and a failed refresh keeps the old snapshot."""
+    if _CLIENT_FRESH[0] or client is None:
+        return
+    _CLIENT_FRESH[0] = True
+    try:
+        if client.stale():
+            client.refresh(timeout=6.0)
+    except Exception:
+        pass
+
+
+def client_line() -> str:
+    """Where the model data comes from: the client's version and how fresh its snapshot is."""
+    if client is None:
+        return "Model data: client.py isn't installed next to this script — tiers use today's id scheme."
+    try:
+        snap = client.snapshot() or {}
+        at = float(snap.get("at") or 0)
+        age = f", taken {span(time.time() - at)} ago" if at else ""
+        src = {"desktop": "from Antigravity Desktop", "bundled": "the snapshot shipped with the plugin"}.get(
+            str(snap.get("source") or ""), str(snap.get("source") or "?"))
+        stale = " (stale)" if client.stale(snap) else ""
+        return f"Model data: Antigravity {client.version() or '?'}, {src}{age}{stale}."
+    except Exception as e:
+        return f"Model data: client.py failed ({e!r}) — tiers use today's id scheme."
+
+
+def rule_id(family: str, effort: str) -> str:
+    """The live model id of a tier rule; "" when Antigravity has no such model."""
+    if client is not None:
+        try:
+            got = str(client.resolve(family, effort) or "")
+            if got:
+                return got
+            if client.snapshot():
+                return ""
+        except Exception:
+            pass
+    return LEGACY_IDS.get((family, effort), f"{family}-{effort}")
+
+
+def tier_ids(tier: str, ms: List[dict], default: str = "") -> List[str]:
+    """A tier's live model ids, best first: its rules resolved and found among the models offered now; an empty
+    tier takes Antigravity's default model."""
+    live = {m["id"] for m in ms}
+    out: List[str] = []
+    for family_, effort in TIERS.get(tier, []):
+        mid = rule_id(family_, effort)
+        if mid in live and mid not in out:
+            out.append(mid)
+        elif mid not in live:  # an id the snapshot knows, not offered here: today's scheme as a second look
+            alt = LEGACY_IDS.get((family_, effort), f"{family_}-{effort}")
+            if alt in live and alt not in out:
+                out.append(alt)
+    if not out:
+        dflt = client_default_model() or default
+        out = [dflt] if dflt in live else ([default] if default in live else [])
+    return out
+
+
+def family_of(mid: str) -> str:
+    entry = client_snapshot_models().get(mid) or {}
+    if entry.get("family"):
+        return str(entry["family"])
+    return re.sub(r"-(?:low|medium|high|xhigh|max)$", "", mid)
+
+
 def experimental(ms: List[dict]) -> List[Tuple[dict, str]]:
-    """The models Antigravity offers right now that are in no tier, each with a word on when it may fit."""
-    tiered = {i for ids in TIERS.values() for i in ids}
-    return [(m, EXPERIMENTAL.get(m["id"]) or m.get("note") or "no description yet — try it on a small task first")
-            for m in ms if m["id"] not in tiered]
-
-
-def generic(tier: str, ms: List[dict], default: str) -> List[dict]:
-    """When Antigravity has renamed its models: the closest ones by label, best first."""
-    pats = {"fast": [r"hydrogen.*\(low\)", r"hydrogen.*\(medium\)", r"neon.*\(low\)", r"claude.*sonnet.*\(low\)"],
-            "standard": [r"hydrogen.*\(medium\)", r"neon.*\(low\)", r"hydrogen.*\(high\)", r"neon.*\(medium\)", ""],
-            "strong": [r"neon.*\(medium\)", r"hydrogen.*\(high\)", r"neon.*\(high\)", r"hydrogen.*\(xhigh\)",
-                       r"^orchestrator \(neon\)", r"\(high\)"],
-            "ultra": [r"carbon.*\(high\)", r"^orchestrator \(carbon\)", r"carbon.*\(medium\)", r"neon.*\(high\)",
-                      r"\(high\)"],
-            "claude": [r"claude.*sonnet.*\(high\)", r"claude.*opus.*\(high\)", r"claude"]}[tier]
-    out: List[dict] = []
-    for p in pats:
-        for m in ms:
-            if m not in out and ((not p and m["id"] == default) or (p and re.search(p, m["label"].lower()))):
-                out.append(m)
-    return out or [m for m in ms if m["id"] == default] or ms[:1]
+    """The models Antigravity offers right now that are in no tier, each with Antigravity's own tag and description
+    and our word on its family, when there is one."""
+    tiered = {i for t in TIERS for i in tier_ids(t, ms)}
+    snap = client_snapshot_models()
+    out = []
+    for m in ms:
+        if m["id"] in tiered:
+            continue
+        entry = snap.get(m["id"]) or {}
+        tag, said = str(m.get("tag") or entry.get("tag") or ""), str(m.get("note") or entry.get("note") or "")
+        ours = next((v for k, v in FAMILY_NOTES.items() if family_of(m["id"]).startswith(k)), "")
+        parts = [x for x in ((f"«{tag}» " if tag else "") + said, ours) if x.strip()]
+        out.append((m, " — ".join(p.strip() for p in parts) or "no description yet — try it on a small task first"))
+    return out
 
 
 def pick(arg: str, ms: List[dict], default: str, groups: Optional[List[dict]] = None,
@@ -688,21 +789,33 @@ def pick(arg: str, ms: List[dict], default: str, groups: Optional[List[dict]] = 
         return "" if state(m)["status"] == "ok" or not group_of(m["label"], groups) else f"; {where(m)}"
     by_id = {m["id"].lower(): m for m in ms}
     notes: List[str] = []
-    if a in ("flash_lite", "flash", "pro"):
-        return ({"id": a, "label": f"{a} (Antigravity's alias)", "left": None, "reset": "", "enum": "", "tag": "",
+    aliases = {}
+    try:
+        aliases = dict(client.aliases() or {}) if client else {}
+    except Exception:
+        aliases = {}
+    if a in ("flash_lite", "flash", "pro") or a in aliases:
+        to = f" → {aliases[a]}" if aliases.get(a) else ""
+        return ({"id": a, "label": f"{a} (Antigravity's alias{to})", "left": None, "reset": "", "enum": "", "tag": "",
                  "note": ""}, notes, "Antigravity's own alias, as its subagents use it")
+    stand_in = False
     if a in TIERS:
-        listed = [by_id[c] for c in TIERS[a] if c in by_id] or generic(a, ms, default)
+        listed = [by_id[c.lower()] for c in tier_ids(a, ms, default) if c.lower() in by_id]
+        if not listed:
+            stand_in, listed = True, ms[:1]
     else:
         m = by_id.get(a) or next((x for x in ms if x["label"].lower() == a), None) or fuzzy(a, ms)
         if not m:
-            raise Failure(f"unknown model {arg!r}. Use a tier ({', '.join(TIERS)}) or one of: "
-                          + ", ".join(x["id"] for x in ms))
+            near = difflib.get_close_matches(a, list(by_id), n=3, cutoff=0.5)
+            raise Failure(f"unknown model {arg!r} — Antigravity doesn't offer it now"
+                          + (f"; the closest: {', '.join(near)}" if near else "")
+                          + f". Use a tier ({', '.join(TIERS)}) or one of: " + ", ".join(x["id"] for x in ms))
         if ok(m):
             return m, notes, ("your choice" + unless_fine(m) + (" — a lower tier would save it"
                                                                 if state(m)["status"] == "tight" else ""))
-        tier = next((t for t, ids in TIERS.items() if m["id"] in ids), "")
-        listed = [m] + [by_id[c] for c in TIERS.get(tier, []) if c in by_id and by_id[c] is not m]
+        tier = next((t for t in TIERS if m["id"] in tier_ids(t, ms)), "")
+        listed = [m] + [by_id[c.lower()] for c in (tier_ids(tier, ms) if tier else []) if c.lower() in by_id
+                        and by_id[c.lower()] is not m]
     def used_up(x: dict) -> str:
         if not usable(x):
             return "quota used up" + (f" — resets {until(x['reset'])}" if x["reset"] else "")
@@ -728,7 +841,8 @@ def pick(arg: str, ms: List[dict], default: str, groups: Optional[List[dict]] = 
     elif passed:
         why = f"{notes[0]} → next with quota left" + unless_fine(m)
     else:
-        why = (f"first choice of {a}" if a in TIERS else "your choice") + unless_fine(m)
+        why = (f"none of {a}'s models is offered here — took {m['label']}, the first one listed" if stand_in
+               else f"first choice of {a}" if a in TIERS else "your choice") + unless_fine(m)
     if all(state(x)["status"] == "tight" for x in live):
         why += ". Every quota this tier draws on is tight: hand over only what's worth it"
     if notes:
@@ -950,7 +1064,14 @@ def call_cost(label: str, fresh: int, cached: int, out: int, table: List[dict]) 
 
 
 def window_of(label: str, table: List[dict]) -> int:
-    """The context window Antigravity gives this model (pricing.json `context_window`), 512k when unknown."""
+    """The context window Antigravity gives this model: the client snapshot's window, else pricing.json's
+    `context_window`, 512k when neither knows."""
+    try:
+        got = client.window(label) if client else None
+        if isinstance(got, int) and got > 0:
+            return got
+    except Exception:
+        pass
     for m in table:
         try:
             if re.search(m["match"], label, re.I) and isinstance(m.get("context_window"), int):
@@ -1329,6 +1450,8 @@ def auto_resume(ls: LS, task: dict, s: Optional[dict] = None) -> Tuple[str, Opti
     it too. Returns ("resumed", the entry — None when another process sent it), ("wait", None) while the error is
     fresh or the send failed (it is tried again), or ("", None): nothing to resume, or an error a resume won't fix
     (quota, permissions, a model Antigravity doesn't offer — kept in the record, so the report says so)."""
+    if agy_cli.is_cli(task):
+        return "", None  # agy_cli.resume() does it between turns
     s = summary(ls, task["id"]) if s is None else s
     state = resume_state(task, s)
     if state != "due":
@@ -1449,6 +1572,8 @@ def wait(ls: LS, task: dict, timeout: float) -> Tuple[str, dict]:
     """("done" | "approval" | "question" | "background" | "timeout", details). "question": the agent asked Claude
     Code something (`ask`) that no reply has answered yet. "background": the agent ended its turn but something it
     started (a subagent, a command) still runs for longer than IDLE_GRACE."""
+    if agy_cli.is_cli(task):
+        return agy_cli.wait(task, timeout)
     cid = task["id"]
     began = time.time()
     deadline = began + max(timeout, 1.0)
@@ -1534,6 +1659,8 @@ def idle_state(ls: LS, task: dict, s: Optional[dict] = None) -> str:
 def state_now(ls: LS, task: dict) -> Tuple[str, dict]:
     """Without waiting: "question", "running", "approval", "background" (it ended its turn, but something it
     started still runs) or "done"."""
+    if agy_cli.is_cli(task):
+        return agy_cli.state_now(task)
     found = listed(ls, task["id"])
     if gone(task, found):
         return "done", {"gone": True}
@@ -1624,6 +1751,8 @@ def talk_in(steps: List[dict], base: int) -> Tuple[List[dict], int]:
 def listen(ls: LS, task: dict, start: Optional[int] = None) -> List[dict]:
     """Read what the agent said to Claude Code since the last look, keep it in the task's record (`chat`), and
     return what is new. `start`: look again from that step (before calling a task finished), cursor untouched."""
+    if agy_cli.is_cli(task):
+        return []  # agy_cli.state_now() reads the talk from the turn's events
     off = int(task.get("heard") or 0) if start is None else max(int(start), 0)
     try:
         steps = rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": task["id"], "stepOffset": off}, timeout=30).get("steps")
@@ -1677,6 +1806,11 @@ def deliver(ls: LS, task: dict, message: str, kind: str = "") -> Tuple[dict, boo
     """Send Claude Code's message into the agent's conversation: the answer to its open question, a message while
     it works, or (kind "follow-up") more work after it finished. Returns the conversation's summary as it was before,
     and whether this answered a question."""
+    if agy_cli.is_cli(task):
+        asked = bool(open_questions(task)) and kind != "follow-up"
+        how = agy_cli.deliver(task, message, kind)
+        return {"status": "CASCADE_RUN_STATUS_IDLE" if how == "sent" else "CASCADE_RUN_STATUS_RUNNING",
+                "via": "cli", "how": how}, asked
     s = summary(ls, task["id"])
     if not s:
         raise Failure(f"Antigravity doesn't know conversation {task['id']}.")
@@ -1714,7 +1848,9 @@ def nobody_watches(cid: str) -> bool:
         names = os.listdir(TASKS)
     except OSError:
         return False
-    return cid + ".json" not in names
+    if cid + ".json" in names:
+        return False
+    return not any(r.get("cid") == cid for r in records())  # a CLI task: its record is named by its own id
 
 
 # ─────────────────────────────── the report ───────────────────────────────
@@ -1760,6 +1896,8 @@ def rel(path: str, task: dict) -> str:
 
 def changed_files(ls: LS, task: dict) -> List[dict]:
     """The files the agent wrote or edited (not its plan artifacts), with the text before and after."""
+    if agy_cli.is_cli(task):
+        return agy_cli.changed_files(task)[0]
     try:
         d = rpc(ls, "GetTrajectoryFileDiffs", {"conversationId": task["id"]}, timeout=60)
     except TIMEOUTS:
@@ -1966,6 +2104,8 @@ def split_text(by_label: Dict[str, int]) -> str:
 def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tuple[str, int, dict]:
     """The report of a task in `state`, its exit code, and what the turn measured (calls, tokens, API dollars,
     seconds, the weekly quota before and after) for `estimate`."""
+    if agy_cli.is_cli(task):
+        return agy_cli.render(task, state, info, full)
     cid, short = task["id"], task["id"][:8]
     if info.get("gone"):
         return (f"❌ Antigravity task {cid} is gone: Antigravity no longer lists its conversation (deleted in the "
@@ -1978,17 +2118,12 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
     except TIMEOUTS:
         steps = []
     steps = [x for x in steps if isinstance(x, dict)]
-    final = ""
+    final = assemble_report(turn_messages(steps, turn))
     commands = []
     for i, st in enumerate(steps):
         if i < turn:
             continue
-        if st.get("type") == "CORTEX_STEP_TYPE_PLANNER_RESPONSE":
-            pr = st.get("plannerResponse") or {}
-            text = str(pr.get("modifiedResponse") or pr.get("response") or "").strip()
-            if text:
-                final = text
-        elif st.get("type") == "CORTEX_STEP_TYPE_RUN_COMMAND":
+        if st.get("type") == "CORTEX_STEP_TYPE_RUN_COMMAND":
             rc = st.get("runCommand") or {}
             line = re.sub(r"\s+", " ", str(rc.get("commandLine") or rc.get("proposedCommandLine") or "")).strip()
             still = isinstance(st.get("taskDetails"), dict) and str(st.get("status") or "") in UNFINISHED
@@ -2026,6 +2161,10 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
     table = prices()
     use = usage(ls, cid, turn, table)
     model = task.get("label") or ", ".join(use.get("models") or []) or "?"
+    ran = [x for x in (use.get("by_label") or {}) if x]
+    asked_for = str(task.get("label") or "")
+    mismatch = (ran and asked_for and asked_for not in ran and "orchestrator" not in asked_for.lower()
+                and "alias" not in asked_for)
     cost = f"Model: {model}"
     if use.get("calls"):
         cost += (f" · {use['calls']} model calls{split_text(use.get('by_label') or {})}"
@@ -2047,6 +2186,9 @@ def render(ls: LS, task: dict, state: str, info: dict, full: bool = False) -> Tu
             grp = (group_of(task["label"], groups) or {}).get("name", "")
             cost += f" · weekly «{grp}» limit {before * 100:.1f}% → {after * 100:.1f}% left"
     lines.append(cost)
+    if mismatch:
+        lines.append(f"⚠ Antigravity ran its calls on {', '.join(ran)}, not on the {asked_for} it was started with — "
+                     "it may have fallen back to another model (the costs above are by the model of each call).")
     title = str(s.get("summary") or task.get("title") or "")
     if title or task.get("project_name"):
         lines.append(f"In Antigravity: «{title}»" + (f" · project «{task['project_name']}»" if task.get("project_name") else ""))
@@ -2205,7 +2347,8 @@ def backfill(ls: LS, recs: List[dict], budget: float = 20.0) -> int:
     for r in recs:
         if time.time() > deadline:
             break
-        if r.get("state") != "done" or (r.get("costs") or {}).get("0") or not r.get("started") or r["id"].startswith("q-"):
+        if r.get("state") != "done" or (r.get("costs") or {}).get("0") or not r.get("started") or r["id"].startswith("q-") \
+                or agy_cli.is_cli(r):
             continue
         try:
             use = usage(ls, r["id"], 0, table)
@@ -2335,13 +2478,25 @@ def quota_lines(groups: List[dict], now: float) -> List[str]:
     return out or ["  Antigravity: limits not reported"]
 
 
-def cmd_models(a) -> int:
+CLI_QUOTA = ("  Antigravity CLI: it shows its quotas only to its own status line, not to other programs — the tiers "
+             "below follow the model list alone (open Antigravity Desktop for the limits)")
+
+
+def backend(a) -> Tuple[Optional[LS], List[dict], str, List[dict], Dict[str, dict]]:
+    """For models and budget: (the language server or None for the CLI, models, default, quota groups, speeds)."""
+    fresh_client()
+    if choose_via(getattr(a, "via", None)) == "cli":
+        ms, default = agy_cli.models()
+        return None, ms, default, [], {}
     ls = connect()
     ms, default = models(ls)
-    groups = quota(ls)
+    return ls, ms, default, quota(ls), speeds(ls)
+
+
+def cmd_models(a) -> int:
+    ls, ms, default, groups, sp = backend(a)
     now = time.time()
     table = prices()
-    sp = speeds(ls)
     if a.json:
         tiers = {}
         for t in TIERS:
@@ -2353,7 +2508,7 @@ def cmd_models(a) -> int:
                           "experimental": {m["id"]: note for m, note in experimental(ms)},
                           "states": {g["name"]: state_of(g, now) for g in groups}}, ensure_ascii=False, indent=1))
         return 0
-    lines = ["Quota left:"] + quota_lines(groups, now)
+    lines = [client_line(), "Quota left:"] + (quota_lines(groups, now) if ls else [CLI_QUOTA])
     lines += ["", "Tiers (--model) — what each takes now and why:"] + tier_lines(ms, default, groups, sp, now, True)
     lines += experimental_lines(ms, sp)
     lines += ["", "All models (--model <id>): quota left · price · measured speed"]
@@ -2368,17 +2523,14 @@ def cmd_models(a) -> int:
 
 def cmd_budget(a) -> int:
     """Both sides' limits, what each tier takes now, and how much to hand over."""
-    ls = connect()
-    ms, default = models(ls)
-    groups = quota(ls)
+    ls, ms, default, groups, sp = backend(a)
     now = time.time()
     lim = claude_limits(a, now)
     cstate, ctext = claude_state(lim, now)
-    sp = speeds(ls)
     src = {"given": "", "statusLine": " (from the statusLine)"}.get(lim.get("source") or "", "")
     lines = ["Limits now:", f"  Claude Code, your own plan: {ctext}{src}"
              + {"critical": " → almost used up", "tight": " → getting tight", "ok": " → fine", "unknown": ""}[cstate]]
-    lines += quota_lines(groups, now)
+    lines += quota_lines(groups, now) if ls else [CLI_QUOTA]
     lines += ["", "What each tier takes now (--model):"] + tier_lines(ms, default, groups, sp, now, False, records())
     states = [state_of(g, now) for g in groups]
     exp = experimental(ms)
@@ -2386,6 +2538,10 @@ def cmd_budget(a) -> int:
         lines += ["", "Experimental — in no tier, an exact --model takes them (delegate.py models says when each fits): "
                   + ", ".join(m["id"] for m, _ in exp)]
     lines += ["", "How much to hand over:"] + ["  • " + x for x in advice(cstate, states, groups)]
+    if not ls:
+        lines.append("  • Antigravity's own limits are unknown from the CLI: hand over as if they were fine, and check "
+                     "them in Antigravity Desktop before a big batch.")
+    lines.append(client_line())
     print("\n".join(lines))
     return 0
 
@@ -2441,6 +2597,16 @@ def start_task(ls: LS, p: dict) -> Tuple[dict, List[str], str, bool]:
     folder = p["cwd"]
     if not os.path.isdir(folder):
         raise Failure(f"no such folder: {folder}")
+    fresh_client()
+    if p.get("via") == "cli":  # the Antigravity CLI: no projects, no quotas; one headless agy process per turn
+        ms, default = agy_cli.models()
+        model, notes, why = pick(p["model"], ms, default, [])
+        if model["id"] in ("flash_lite", "flash", "pro"):
+            raise Failure("the Antigravity CLI takes no alias — give a tier or a model id (delegate.py models --via cli).")
+        task = agy_cli.start(p, model, compose(p["brief"], folder, folder, p.get("reference") or ""))
+        return task, notes, why + " (Antigravity CLI: no quota figures)", False
+    if ls is None:
+        raise Failure("this task runs in Antigravity Desktop, which isn't reachable now.")
     ms, default = models(ls)
     groups = quota(ls)
     model, notes, why = pick(p["model"], ms, default, groups)
@@ -2465,7 +2631,7 @@ def start_task(ls: LS, p: dict) -> Tuple[dict, List[str], str, bool]:
             "started": time.time(), "turn": 0, "state": "running", "brief": p["brief"][:400],
             "quota_before": weekly_left(model["label"], groups), "dirty_before": before,
             "claude_session": p.get("claude_session") or "", "heard": 0, "chat": [],
-            "retries_max": int(p.get("retries") or 0)}
+            "retries_max": int(p.get("retries") or 0), "via": "desktop", "owner": p.get("owner") or ""}
     if p.get("series"):
         task.update(series=p["series"], series_reference=p.get("reference") or "",
                     pieces=[{"n": int(p.get("piece") or 1), "turn": 0, "at": time.time(), "brief": p["brief"][:200]}])
@@ -2475,8 +2641,12 @@ def start_task(ls: LS, p: dict) -> Tuple[dict, List[str], str, bool]:
 
 
 def started_lines(task: dict, notes: List[str], why: str, created: bool, recs: Optional[List[dict]] = None) -> List[str]:
-    lines = [f"Started Antigravity task {task['id']} — {task['label']}, project «{task['project_name']}»"
-             + (" (created for this folder)" if created else "") + "."]
+    if agy_cli.is_cli(task):
+        lines = [f"Started Antigravity task {task['id']} — {task['label']}, in the Antigravity CLI (agy, headless, "
+                 f"{' '.join(agy_cli.FLAG_MODE)}) in {task['cwd']}."]
+    else:
+        lines = [f"Started Antigravity task {task['id']} — {task['label']}, project «{task['project_name']}»"
+                 + (" (created for this folder)" if created else "") + "."]
     lines += ["  " + n for n in notes]
     lines.append(f"  Why this model: {why}")
     est = estimate_of({"label": task["label"]}, [], recs if recs is not None else records())
@@ -2522,8 +2692,10 @@ def cmd_run(a) -> int:
     limit = conf["max_parallel"] if a.max_parallel is None else max(0, min(a.max_parallel, 50))
     p = {"brief": brief, "model": a.model, "cwd": folder, "title": a.title, "reference": reference, "series": series,
          "piece": 1, "retries": conf["retries"] if a.retries is None else max(0, min(a.retries, 10)),
-         "max_parallel": limit, "claude_session": os.environ.get("CLAUDE_CODE_SESSION_ID", "")}
-    ls = connect()
+         "max_parallel": limit, "claude_session": os.environ.get("CLAUDE_CODE_SESSION_ID", ""),
+         "owner": owner_of(a), "timeout": a.timeout}
+    p["via"] = choose_via(getattr(a, "via", None))
+    ls = connect() if p["via"] == "desktop" else None
     if a.dry_run:
         return dry_run(ls, p)
     began = time.time()
@@ -2563,14 +2735,15 @@ def cmd_run(a) -> int:
 
 def dry_run(ls: LS, p: dict) -> int:
     """run --dry-run: what would start, why, and what it is likely to cost — nothing is started."""
-    ms, default = models(ls)
-    groups = quota(ls)
+    ms, default = models(ls) if ls else agy_cli.models()
+    groups = quota(ls) if ls else []
     model, notes, why = pick(p["model"], ms, default, groups)
     recs = records()
     est = estimate_of(model, groups, recs)
     prompt = compose(p["brief"], p["cwd"], p["cwd"], p.get("reference") or "")
     firsts = [int(c["first_call"]) for c in first_costs(model["label"], recs) if isinstance(c.get("first_call"), int)]
-    lines = [f"Would start on {model['label']} ({model['id']}) — {why}."] + ["  " + n for n in notes]
+    lines = [f"Would start on {model['label']} ({model['id']}) — {why}"
+             + (" — in the Antigravity CLI (no quota figures there)." if not ls else ".")] + ["  " + n for n in notes]
     lines.append(f"  A task here: {estimate_text(est)}")
     lines.append(f"  Its first message: {len(prompt)} characters (≈{kilo(len(prompt) // 4)} tokens), on top of "
                  "Antigravity's own prompt"
@@ -2600,7 +2773,7 @@ def cmd_wait(a) -> int:
             return 3
         print(f"Started queued task {task['id']} as {started['id']} — {started.get('label') or '?'}.", flush=True)
         task = started
-    return finish(connect(), task, max(a.timeout - (time.time() - began), 1.0))
+    return finish(connect_for(task), task, max(a.timeout - (time.time() - began), 1.0))
 
 
 # ─────────────────────────────── the queue and the supervisor ───────────────────────────────
@@ -2649,6 +2822,10 @@ def active_tasks(ls: Optional[LS], live: Optional[dict] = None) -> List[dict]:
         if (r["id"].startswith("q-") or not r.get("started") or time.time() - float(r["started"]) > 86400
                 or r.get("state") not in ("running", "background", "timeout", "approval", "question")):
             continue  # a question: it holds its slot while it works on, not while it waits for the answer
+        if agy_cli.is_cli(r):
+            if agy_cli.running(r):
+                out.append(r)
+            continue
         status = str((live.get(r["id"]) or {}).get("status") or "")
         if status.endswith(("RUNNING", "BUSY")):
             out.append(r)
@@ -2710,6 +2887,8 @@ def dispatch(ls: LS, live: Optional[dict] = None) -> List[str]:
             limit = int((q.get("params") or {}).get("max_parallel") or 0)
             if limit and busy >= limit:
                 break  # first come, first served: the others wait behind it
+            if ls is None and (q.get("params") or {}).get("via") != "cli":
+                continue  # a Desktop task waits for Antigravity Desktop
             if not transact(q, claim):
                 continue
             try:
@@ -2833,6 +3012,24 @@ def cmd_supervise(a) -> int:
             mine = [r for r in recs if r.get("state") in ("running", "background", "timeout", "question", "approval")
                     and r.get("started") and not r["id"].startswith("q-") and time.time() - float(r["started"]) < 86400]
             busy = bool(queue)
+            cli = [r for r in mine if agy_cli.is_cli(r)]
+            mine = [r for r in mine if not agy_cli.is_cli(r)]
+            for r in cli:  # the CLI's tasks need no language server: errors resumed, messages sent, records kept
+                try:
+                    state, info = agy_cli.state_now(r)
+                    busy = busy or state == "running"
+                    fields = recorded(r, "canceled" if info.get("failed") == "canceled" else state)
+                    if fields:
+                        update(r, **fields)
+                        note(f"{r['id']} is {state} (CLI)")
+                except Exception as e:  # keep supervising
+                    note(f"a look at CLI task {r['id']} failed: {e!r}")
+            if queue and not mine and not discover():
+                try:
+                    for line in dispatch(None):
+                        note(line)
+                except Exception as e:
+                    note(f"dispatch failed: {e!r}")
             if queue or mine:
                 ls = discover()  # never starts Antigravity: a closed one is the user's choice
                 if ls:
@@ -2879,12 +3076,10 @@ def wait_started(q: dict, timeout: float) -> Optional[dict]:
             raise Failure(f"queued task {q['id']} couldn't start: {rec.get('error') or '?'}")
         if time.time() - last >= POLL:
             last = time.time()
-            ls = discover()
-            if ls:
-                try:
-                    dispatch(ls)
-                except SOFT:
-                    pass
+            try:
+                dispatch(discover())
+            except SOFT:
+                pass
         time.sleep(min(POLL, 3.0))
     return None
 
@@ -2918,7 +3113,7 @@ def cmd_result(a) -> int:
         text, code = queue_report(task)
         print(text)
         return code
-    ls = connect()
+    ls = connect_for(task)
     state, info = state_now(ls, task)
     text, code, facts = render(ls, task, state, info, full=a.full)
     fields = recorded(task, "gone" if info.get("gone") else state)
@@ -2947,7 +3142,15 @@ def cmd_reply(a) -> int:
     """Answer the agent's question, or tell it something while it works: delivered at once, no waiting."""
     task = task_for(a.id)
     message = read_message(a, "reply")
-    s, asked = deliver(connect(), task, message)
+    s, asked = deliver(connect_for(task), task, message)
+    if s.get("how") == "queued":
+        print(f"Its turn is still running in the Antigravity CLI, which takes no message mid-turn: your "
+              f"{'answer' if asked else 'message'} goes out as its next turn the moment this one ends "
+              f"(Antigravity task {task['id']}).")
+        print(f"Next: delegate.py wait {task['id'][:8]} in the background (or keep your watch running).")
+        if task.get("retries_max"):
+            ensure_supervisor()
+        return 0
     if task.get("retries_max"):
         ensure_supervisor()
     short = task["id"][:8]
@@ -2969,10 +3172,20 @@ def untold_end(t: dict) -> bool:
     return t.get("state") in ("done", "gone") and f"end:{int(t.get('turn') or 0)}" not in told
 
 
-def watched(ids: List[str]) -> List[dict]:
+def owner_of(a) -> str:
+    """The name of the agent a task or a watch belongs to (--owner, else AGP_DELEGATE_OWNER): with several agents of
+    one Claude Code session handing over work side by side, each names its own and its watch takes only those."""
+    name = (getattr(a, "owner", None) or os.environ.get("AGP_DELEGATE_OWNER") or "").strip()
+    if name and not re.fullmatch(r"[\w.@-]{1,40}", name):
+        raise Failure(f"--owner is up to 40 letters, digits, «_», «.», «@» or «-»: {name!r}")
+    return name
+
+
+def watched(ids: List[str], owner: str = "") -> List[dict]:
     """The tasks `watch` follows: the ids given (a queued one too), or else the ones that this Claude Code session
     started (from this folder, when the session is unknown) in the last day and that aren't over — or are, without
-    anyone having told Claude Code yet."""
+    anyone having told Claude Code yet. With an owner only that owner's tasks; without one, only tasks run without
+    an owner (another agent's named tasks are its own watch's)."""
     if ids:
         return [task_for(i) for i in ids]
     session = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
@@ -2982,10 +3195,66 @@ def watched(ids: List[str]) -> List[dict]:
         when = float(t.get("started") or t.get("queued") or 0)
         if time.time() - when > 86400 or (t.get("state") not in NOT_OVER + ("starting",) and not untold_end(t)):
             continue
+        if str(t.get("owner") or "") != owner:
+            continue
         cwd = str(t.get("cwd") or "")
         if (t.get("claude_session") == session) if session else (cwd and (inside(cwd, here) or inside(here, cwd))):
             out.append(t)
     return out
+
+
+CLARIFIED = "Clarification after the check: "  # a short note the agent added after the plugin's Stop check
+SHORT_NOTE = (3, 500)  # lines, characters: a note, not a report
+
+
+def turn_messages(steps: List[dict], turn: int) -> List[Tuple[str, bool]]:
+    """The agent's messages of a turn after the last message from the user or the bridge in it, each with whether a
+    system message (a hook's return — its own text never goes into the report) came between it and the one before."""
+    lo = turn
+    for i in range(len(steps) - 1, turn - 1, -1):
+        if str(steps[i].get("type") or "") == "CORTEX_STEP_TYPE_USER_INPUT":
+            lo = i + 1
+            break
+    out: List[Tuple[str, bool]] = []
+    between = False
+    for st in steps[lo:]:
+        kind = str(st.get("type") or "")
+        if kind == "CORTEX_STEP_TYPE_SYSTEM_MESSAGE" and out:
+            between = True
+        elif kind == "CORTEX_STEP_TYPE_PLANNER_RESPONSE":
+            pr = st.get("plannerResponse") or {}
+            text = str(pr.get("modifiedResponse") or pr.get("response") or "").strip()
+            if text:
+                out.append((text, between))
+                between = False
+    return out
+
+
+def _bare(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[*_`#>|\[\]()~-]+", " ", text or "")).strip().lower()[:6000]
+
+
+def assemble_report(msgs: List[Tuple[str, bool]]) -> str:
+    """The turn's report from its messages (turn_messages()): the last one — but a later near-repeat of an earlier
+    report replaces it (one copy, the later), and a short note written after a hook sent the report back (the Stop
+    check) goes below the full report as a clarification instead of standing in for it."""
+    best, notes = "", []
+    for text, after_hook in msgs:
+        if not best:
+            best = text
+            continue
+        a, b = _bare(best), _bare(text)
+        sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        if a and b and sm.real_quick_ratio() >= 0.8 and sm.quick_ratio() >= 0.8 and sm.ratio() >= 0.8:
+            best, notes = text, []
+            continue
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        short = len(lines) <= SHORT_NOTE[0] and len(text) <= SHORT_NOTE[1]
+        if after_hook and short and report_head(best)[0] and not report_head(text)[0]:
+            notes.append(re.sub(r"\s+", " ", text).strip())
+            continue
+        best, notes = text, []
+    return best + "".join(f"\n\n{CLARIFIED}{n}" for n in notes)
 
 
 def report_head(text: str) -> Tuple[str, str]:
@@ -3052,6 +3321,8 @@ def talk_events(task: dict) -> List[Event]:
 
 def watch_events(ls: LS, task: dict) -> Tuple[List[Event], bool]:
     """The events of one task for `watch` (each with its key), and whether the task is over."""
+    if agy_cli.is_cli(task):
+        return agy_cli.watch_events(task)
     short = task["id"][:8]
     listen(ls, task)
     out = talk_events(task)
@@ -3134,15 +3405,33 @@ def number(text: str, n: int) -> str:
     return f"{head} #{n} {rest}"
 
 
+def claim_rank(task: dict, w: dict) -> int:
+    """How strong a watch's claim on a task is: 2 — it named the task's id, or it is the watch of the task's owner;
+    1 — a general watch (`watch` with no ids) of a task without an owner; 0 — none (a task another agent owns)."""
+    if task["id"] in (w.get("named") or []) or task.get("queued_as") in (w.get("named") or []):
+        return 2
+    owner = str(task.get("owner") or "")
+    if owner:
+        return 2 if w.get("owner") == owner else 0
+    return 1 if "rank" not in w or w.get("rank") is None else max(int(w.get("rank") or 0), 1)
+
+
 def watching(task: dict, me: dict) -> bool:
-    """One watch per task: True when this watch (`me`) has the task — it takes over from an older watch, or from one
-    that stopped beating; False when a newer, live watch has it (then this one leaves it alone)."""
+    """One watch per task: True when this watch (`me`) has the task — it takes over from an older watch with no
+    stronger claim (claim_rank), or from one that stopped beating; False when a live watch has a stronger claim, or
+    an equal one and is newer (then this one leaves it alone). A general watch never takes a task that another
+    live watch named or whose owner it isn't."""
+    mine = claim_rank(task, me)
+    if mine <= 0:
+        return False
     w = task.get("watcher") or {}
     if w.get("id") == me["id"]:
         if time.time() - float(w.get("beat") or 0) > 30:
             take(task, me)
         return True
-    if float(w.get("since") or 0) > me["since"] and time.time() - float(w.get("beat") or 0) < 90:
+    live = time.time() - float(w.get("beat") or 0) < 90
+    theirs = int(w.get("rank") or 1) if w else 0
+    if live and (theirs > mine or (theirs == mine and float(w.get("since") or 0) > me["since"])):
         return False
     take(task, me)
     return True
@@ -3150,7 +3439,8 @@ def watching(task: dict, me: dict) -> bool:
 
 def take(task: dict, me: dict) -> None:
     def change(rec: dict) -> bool:
-        rec["watcher"] = dict(me, beat=time.time(), pid=os.getpid())
+        rec["watcher"] = dict({k: v for k, v in me.items() if k != "named"}, beat=time.time(), pid=os.getpid(),
+                              rank=claim_rank(rec, me))
         return True
     transact(task, change)
 
@@ -3162,17 +3452,27 @@ def cmd_watch(a) -> int:
     newer watch takes a task over). Ends when every watched task is over — with --follow it also takes the tasks
     this session starts later and keeps going until --timeout (0: no limit)."""
     follow = bool(getattr(a, "follow", False))
-    tasks = watched(a.ids)
+    owner = owner_of(a)
+    tasks = watched(a.ids, owner)
     if not tasks and not follow:
         print("No running Antigravity tasks to watch (delegate.py list shows the recent ones; watch --follow waits "
               "for new ones).")
         return 0
-    ls = connect()
-    me = {"id": uuid.uuid4().hex[:10], "since": time.time()}
+    ls: Optional[LS] = None
+
+    def server() -> Optional[LS]:  # only a Desktop task needs it: a watch of CLI tasks runs without Antigravity
+        nonlocal ls
+        if ls is None:
+            ls = connect()
+        return ls
+    me = {"id": uuid.uuid4().hex[:10], "since": time.time(), "owner": owner,
+          "named": sorted({t["id"] for t in tasks} if a.ids else set())}
     live: Dict[str, dict] = {}
     for t in tasks:
-        take(t, me)
-        live[t["id"]] = t
+        if a.ids or watching(t, me):
+            if a.ids:
+                take(t, me)
+            live[t["id"]] = t
     deadline = time.time() + a.timeout if a.timeout and a.timeout > 0 else None
     printed, scanned, dispatched = 0, time.time(), 0.0
     while True:
@@ -3184,7 +3484,7 @@ def cmd_watch(a) -> int:
             if tid.startswith("q-"):
                 events, task, over = queue_events(t)
             else:
-                (events, over), task = watch_events(ls, t), None
+                (events, over), task = watch_events(None if agy_cli.is_cli(t) else server(), t), None
             if events:
                 keys = list(dict.fromkeys(k for k, _ in events))  # the last look reads the talk twice: once each
                 new, n = claim_events(t, keys, list(dict.fromkeys(k for k, text in events if text)))
@@ -3200,11 +3500,13 @@ def cmd_watch(a) -> int:
             if over:
                 del live[tid]
                 if task and task["id"] not in live:
-                    take(task, me)
-                    live[task["id"]] = task
+                    if tid in me["named"]:
+                        me["named"].append(task["id"])  # a queued task this watch named: the task it became too
+                    if watching(task, me):
+                        live[task["id"]] = task
         if follow and time.time() - scanned >= 10:
             scanned = time.time()
-            for t in watched([]):
+            for t in watched([], owner):
                 if t["id"] not in live and watching(t, me):
                     live[t["id"]] = t
         if not live and not follow:
@@ -3219,7 +3521,7 @@ def cmd_watch(a) -> int:
         if any(i.startswith("q-") for i in live) and time.time() - dispatched >= POLL:
             dispatched = time.time()  # in case no supervisor could run: start what a free slot allows
             try:
-                dispatch(ls)
+                dispatch(ls or discover())
             except SOFT:
                 pass
         time.sleep(WATCH_POLL)
@@ -3253,11 +3555,17 @@ def cmd_talk(a) -> int:
 
 def cmd_diff(a) -> int:
     task = task_for(a.id)
-    files = changed_files(connect(), task)
+    note = ""
+    if agy_cli.is_cli(task):
+        files, note = agy_cli.changed_files(task)
+    else:
+        files = changed_files(connect(), task)
     if a.paths:
         want = [p if os.path.isabs(p) else re.sub(r"^(?:\./)+", "", p.replace("\\", "/")) for p in a.paths]
         files = [f for f in files if any(f["rel"] == w or f["rel"].endswith("/" + w) or
                                          os.path.normcase(f["path"]) == os.path.normcase(w) for w in want)]
+    if note:
+        print(f"(Diff: {note}.)")
     if not files:
         print("No file changes by this task" + (" match those paths." if a.paths else "."))
         return 0
@@ -3266,6 +3574,9 @@ def cmd_diff(a) -> int:
         return 0
     out: List[str] = []
     for f in files:
+        if f.get("no_old"):
+            out.append(f"~ {f['rel']}: changed (its old text wasn't kept: not a git folder)")
+            continue
         old = f["old"].splitlines() if f["kind"] != "A" else []
         new = f["new"].splitlines() if f["kind"] != "D" else []
         out += list(difflib.unified_diff(old, new, "/dev/null" if f["kind"] == "A" else "a/" + f["rel"],
@@ -3274,13 +3585,19 @@ def cmd_diff(a) -> int:
         cut = len(out) - a.max_lines
         out = out[:a.max_lines] + [f"… {cut} more lines — narrow it with paths, or --max-lines {len(out)}"]
     print("\n".join(out))
-    print("(The agent's changes as it left them; later edits to these files aren't shown.)")
+    print("(Changes in the folder since the task started, as they are now.)" if agy_cli.is_cli(task) else
+          "(The agent's changes as it left them; later edits to these files aren't shown.)")
     return 0
 
 
 def follow_up(ls: LS, task: dict, message: str) -> dict:
     """Send more work into a task's conversation once its turn is over (a follow-up or the next piece of a series):
     the report from here on covers only this new turn."""
+    if agy_cli.is_cli(task):
+        s, _ = deliver(ls, task, message, kind="follow-up")
+        if task.get("retries_max"):
+            ensure_supervisor()
+        return s
     before = weekly_left(task["label"], quota(ls)) if task.get("label") else task.get("quota_before")
     s, _ = deliver(ls, task, message, kind="follow-up")
     update(task, turn=int(s.get("stepCount") or 0), sent=time.time(), quota_before=before, state="running")
@@ -3295,6 +3612,22 @@ def cmd_send(a) -> int:
         raise Failure(f"{task['id']} hasn't started yet (it waits in the queue): wait for it first, or cancel it and "
                       "run a new task with the whole brief.")
     message = read_message(a, "follow-up message")
+    if agy_cli.is_cli(task):
+        state, _ = agy_cli.state_now(task)
+        if state in ("running", "question"):
+            s, asked = deliver(None, task, message)
+            print(("Answered its question" if asked and s.get("how") == "sent" else
+                   "Its turn still runs — your message goes out as its next turn when this one ends" if
+                   s.get("how") == "queued" else "Sent your message") + f" (Antigravity CLI task {task['id']}).",
+                  flush=True)
+        else:
+            follow_up(None, task, message)
+            print(f"Sent the follow-up to Antigravity CLI task {task['id']} (a new turn in the same conversation).",
+                  flush=True)
+        if a.no_wait:
+            print(f"Wait for it with: delegate.py wait {task['id'][:8]}  (run that in the background)")
+            return 0
+        return finish(None, task, a.timeout)
     ls = connect()
     s = summary(ls, task["id"])
     if not s:
@@ -3317,6 +3650,8 @@ def cmd_send(a) -> int:
 def last_report(ls: LS, task: dict) -> str:
     """A task's last report (RULES 6, or the older STATUS / CHANGED / CHECKS / NOTES form), for a fresh conversation
     of its series."""
+    if agy_cli.is_cli(task):
+        return agy_cli.last_report(task)
     try:
         steps = rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": task["id"]}, timeout=60).get("steps") or []
     except SOFT:
@@ -3343,7 +3678,7 @@ def cmd_next(a) -> int:
     if len(message) > BRIEF_LIMIT:  # before waiting for the last piece: it would be refused after the wait anyway
         raise Failure(f"the piece has {len(message)} characters, more than the {BRIEF_LIMIT} a brief takes — nothing "
                       "was sent. Put the details in a file in the project and point the piece at it.")
-    ls = connect()
+    ls = connect_for(task)
     began = time.time()
     state, info = state_now(ls, task)
     pieces = task.get("pieces") or [{"n": 1, "turn": 0}]
@@ -3365,14 +3700,15 @@ def cmd_next(a) -> int:
         update(task, state="done", finished=time.time(),
                costs=dict(task.get("costs") or {}, **{str(int(task.get("turn") or 0)): facts}))
     table = prices()
-    use = usage(ls, task["id"], 0, table)
+    use = agy_cli.usage(dict(task, turn=0)) if agy_cli.is_cli(task) else usage(ls, task["id"], 0, table)
     full = use.get("context", 0) > 0.75 * window_of(task.get("label") or "", table)
     if a.fresh or full:
         why = "--fresh" if a.fresh else f"its context is nearly full ({kilo(use['context'])} tokens)"
         brief = FRESH_SERIES.format(name=name, done=n - 1, last=last_report(ls, task)) + message
         p = {"brief": brief, "model": a.model or task.get("model") or "standard", "cwd": task.get("cwd") or os.getcwd(),
              "title": f"{name} #{n}", "reference": task.get("series_reference") or "", "series": name, "piece": n,
-             "retries": int(task.get("retries_max") or 0), "claude_session": os.environ.get("CLAUDE_CODE_SESSION_ID", "")}
+             "retries": int(task.get("retries_max") or 0), "claude_session": os.environ.get("CLAUDE_CODE_SESSION_ID", ""),
+             "via": task.get("via") or "desktop", "owner": task.get("owner") or "", "timeout": a.timeout}
         new, notes, model_why, created = start_task(ls, p)
         print(f"Piece {n} of «{name}» starts a new conversation ({why}).", flush=True)
         print("\n".join(started_lines(new, notes, model_why, created)), flush=True)
@@ -3402,6 +3738,11 @@ def cmd_series(a) -> int:
     lines = [f"Series «{name}» ({len(tasks)} conversation{'s' if len(tasks) != 1 else ''}):"]
     for t in tasks:
         steps: List[dict] = []
+        if agy_cli.is_cli(t):
+            said = verdict_text(agy_cli.report_text(dict(t, turn=0)), 70)
+            lines.append(f"  {t['id'][:8]} — {t.get('label') or t.get('model') or '?'} (CLI) · {t.get('state') or '?'}"
+                         f" · {len(t.get('pieces') or [])} piece(s), the last → {said or '(no report yet)'}")
+            continue
         if ls:
             try:
                 steps = [x for x in rpc(ls, "GetCascadeTrajectorySteps", {"cascadeId": t["id"]}, timeout=60).get("steps")
@@ -3452,6 +3793,11 @@ def cmd_cancel(a) -> int:
             return 0
         print(f"Queued task {task['id']} has started as {str(task['started_as'])[:8]} — stopping that.", flush=True)
         task = task_for(str(task["started_as"]))
+    if agy_cli.is_cli(task):
+        was = agy_cli.cancel(task)
+        print(f"Stopped Antigravity CLI task {task['id']}." if was else f"Antigravity CLI task {task['id']} wasn't running.")
+        update(task, state="canceled", outbox=[])
+        return 0
     ls = connect()
     try:
         rpc(ls, "CancelCascadeInvocation", {"cascadeId": task["id"]})
@@ -3502,7 +3848,15 @@ def cmd_list(a) -> int:
     lines.append("Recent Antigravity tasks (newest first):")
     for t in tasks:
         state = "running" if status[t["id"]].endswith(("RUNNING", "BUSY")) else t.get("state") or "?"
-        if open_questions(t) and state in NOT_OVER + ("done",):
+        if agy_cli.is_cli(t) and state in NOT_OVER:
+            try:
+                state = agy_cli.state_now(t)[0]
+            except Exception:
+                pass
+            fields = recorded(t, state)
+            if fields:
+                update(t, **fields)
+        elif open_questions(t) and state in NOT_OVER + ("done",):
             state = "question"  # it asked Claude Code something and waits for the answer
         elif found.get(t["id"]):
             state = found[t["id"]]  # done, background (something it started still runs) or running (not picked up)
@@ -3515,6 +3869,8 @@ def cmd_list(a) -> int:
         extra = [f"resumed ×{len(t['resumes'])}"] if t.get("resumes") else []
         if t.get("series"):
             extra.append(f"series «{t['series']}» #{(t.get('pieces') or [{'n': 1}])[-1].get('n')}")
+        if agy_cli.is_cli(t):
+            extra.append("CLI")
         lines.append(f"  {t['id'][:8]}  {state:10} {age:12} {t.get('label') or t.get('model') or '?'}  "
                      f"{t.get('title') or ''}  [{t.get('cwd') or ''}]" + (f"  ({', '.join(extra)})" if extra else ""))
     print("\n".join(lines))
@@ -3569,12 +3925,10 @@ def cmd_wake(a) -> int:
 
 def cmd_estimate(a) -> int:
     """What a task costs here, before handing it over: for the model --model picks now and for every tier."""
-    ls = connect()
-    ms, default = models(ls)
-    groups = quota(ls)
+    ls, ms, default, groups, _sp = backend(a)
     now = time.time()
     recs = records()
-    filled = backfill(ls, recs)
+    filled = backfill(ls, recs) if ls else 0
     if filled:
         recs = records()
     m, _notes, why = pick(a.model, ms, default, groups, now)
@@ -3594,7 +3948,7 @@ def cmd_estimate(a) -> int:
             lines.append(f"  {t:9} nothing has quota left now")
             continue
         lines.append(f"  {t:9} {tm['label']}: {estimate_text(estimate_of(tm, groups, recs))}")
-    lines += ["", "Quota left:"] + quota_lines(groups, now)
+    lines += ["", "Quota left:"] + (quota_lines(groups, now) if ls else [CLI_QUOTA])
     if filled:
         lines.append(f"(Read the cost of {filled} earlier task{'s' if filled != 1 else ''} from Antigravity for this.)")
     print("\n".join(lines))
@@ -3614,8 +3968,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--claude-5h", help="Claude Code's own 5-hour use in percent, as get_usage or /usage shows it "
                                        "(optionally @<reset time>)")
     p.add_argument("--claude-week", help="Claude Code's own weekly use in percent (optionally @<reset time>)")
+    p.add_argument("--via", choices=VIAS, help="Antigravity Desktop or the CLI (default: AGP_DELEGATE_VIA, else auto)")
     p = sub.add_parser("models", help="every model: quota left, price, measured speed; the tiers")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--via", choices=VIAS, help="Antigravity Desktop or the CLI (default: AGP_DELEGATE_VIA, else auto)")
     p = sub.add_parser("run", help="start a task (and wait for it)")
     p.add_argument("brief", nargs="?", help="the task; omit it (or '-') to read stdin")
     p.add_argument("--model", "-m", default="standard", help="tier (fast, standard, strong, ultra, claude), model id or label")
@@ -3631,8 +3987,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--retries", type=int, help="resumes after Antigravity stops it with an error (default: settings, 2)")
     p.add_argument("--max-parallel", type=int, help="queue it while this many tasks run (default: settings; 0: no limit)")
     p.add_argument("--dry-run", action="store_true", help="show the model, why, and the expected cost; start nothing")
+    p.add_argument("--via", choices=VIAS, help="where it runs: Antigravity Desktop, the Antigravity CLI (agy, "
+                   "headless), or auto — Desktop when it answers, else the CLI (default: AGP_DELEGATE_VIA, else auto)")
+    p.add_argument("--owner", help="the name of the agent this task belongs to: `watch --owner NAME` takes only its "
+                                   "own (default: AGP_DELEGATE_OWNER)")
     p = sub.add_parser("estimate", help="what a task costs here on each tier, from your past tasks")
     p.add_argument("--model", "-m", default="standard", help="tier, model id or label (default standard)")
+    p.add_argument("--via", choices=VIAS, help="Antigravity Desktop or the CLI (default: AGP_DELEGATE_VIA, else auto)")
     p = sub.add_parser("next", help="the next piece of a series, in the same conversation")
     p.add_argument("name")
     p.add_argument("message", nargs="*", help="the piece's brief ('-' or nothing: read stdin)")
@@ -3663,6 +4024,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                      "approvals, resumes, the end) until the tasks are over")
     p.add_argument("ids", nargs="*", help="task ids (default: the tasks this session started that aren't over)")
     p.add_argument("--follow", action="store_true", help="also the tasks this session starts later; run until --timeout")
+    p.add_argument("--owner", help="only the tasks run with this --owner (default: AGP_DELEGATE_OWNER; without one, "
+                                   "only tasks run without an owner)")
     p.add_argument("--timeout", type=float, default=WATCH_TIMEOUT, help="seconds before it stops (default 1780, just "
                                                                         "under the Monitor tool's limit; 0: no limit)")
     p = sub.add_parser("reply", help="answer the agent's question, or tell it something while it works")
@@ -3683,6 +4046,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--timeout", type=float, default=START_TIMEOUT, help="seconds to wait (default 180)")
     sub.add_parser("statusline", help="as Claude Code's statusLine command: remember its rate_limits for budget")
     sub.add_parser("supervise", help="(starts by itself) start queued tasks, resume tasks stopped by an error")
+    p = sub.add_parser("cli-turn", help=argparse.SUPPRESS)  # (started by itself) one turn of an Antigravity CLI task
+    p.add_argument("id")
+    p.add_argument("n", type=int)
     a, extra = ap.parse_known_args(argv)
     # Before Python 3.12, argparse doesn't give a text that follows an option to the positional before the option
     # (`next NAME --fresh "…"`, `send ID --no-wait "…"`): those words come back unparsed. They are the text.
@@ -3699,7 +4065,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "diff": cmd_diff, "send": cmd_send, "watch": cmd_watch, "reply": cmd_reply, "ask": cmd_talk,
                 "tell": cmd_talk, "cancel": cmd_cancel, "list": cmd_list, "statusline": cmd_statusline,
                 "estimate": cmd_estimate, "next": cmd_next, "series": cmd_series, "settings": cmd_settings,
-                "wake": cmd_wake, "supervise": cmd_supervise}
+                "wake": cmd_wake, "supervise": cmd_supervise,
+                "cli-turn": lambda a: agy_cli.run_turn(a.id, a.n)}
     if a.cmd not in handlers:
         ap.print_help()
         return 1

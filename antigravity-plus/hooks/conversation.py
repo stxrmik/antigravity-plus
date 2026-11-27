@@ -155,7 +155,12 @@ def transcript_path(payload: dict) -> Optional[str]:
         cands.append(p)
     cid = payload.get("conversationId")
     if isinstance(cid, str) and re.fullmatch(r"[\w-]{8,80}", cid):
-        cands.append(os.path.join(BRAIN, cid, ".system_generated", "logs", "transcript_full.jsonl"))
+        brains = [os.path.join(d, "brain") for d in compat.data_dirs()]
+        if BRAIN not in brains:
+            brains.append(BRAIN)
+        for brain in brains:  # the CLI may write only transcript.jsonl
+            for name in ("transcript_full.jsonl", "transcript.jsonl"):
+                cands.append(os.path.join(brain, cid, ".system_generated", "logs", name))
     return next((c for c in cands if os.path.isfile(c)), None)
 
 
@@ -221,6 +226,8 @@ def load(payload: dict, save: bool = True) -> Optional[dict]:
         try:
             d = json.loads(raw)
         except ValueError:
+            continue
+        if not isinstance(d, dict):
             continue
         step = d.get("step_index", st["last_step"])
         if d.get("type") == "USER_INPUT":
@@ -309,7 +316,7 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
     d = json.loads(raw)
     tcs = [c for c in d.get("tool_calls") or [] if isinstance(c, dict)]
     step = d.get("step_index", st["last_step"])
-    names = [str(c.get("name") or "") for c in tcs]
+    names = [compat.tool(c.get("name")) for c in tcs]
     pending: List[dict] = []
     working = any(it.get("st") == "run" and it.get("k") in ("agent", "cmd", "swarm") for it in bg.values())
     polling = bool(tcs) and working
@@ -360,8 +367,9 @@ def track_background(st: dict, kind: bytes, raw: bytes) -> None:
             if not 0 < secs < POLL_TIMER:
                 polling = False
         elif name == "read_file":
-            path = str(a.get("Path") or "").replace("\\", "/")
-            if not ("/antigravity/brain/" in path and "transcript" in path.rsplit("/", 1)[-1]):
+            path = str(a.get("Path") or a.get("AbsolutePath") or "").replace("\\", "/")
+            if not (any(f"/{d}/brain/" in path for d in (compat.DESKTOP_DATA, compat.CLI_DATA))
+                    and "transcript" in path.rsplit("/", 1)[-1]):
                 polling = False  # reading a subagent's transcript to see how it's doing is polling
         elif not (name == "run_command" and WAIT_CMD.search(str(a.get("CommandLine") or ""))):
             polling = False
@@ -551,11 +559,11 @@ def track_steps(st: dict, kind: bytes, raw: bytes, ws: str = "") -> None:
         pending = []
         for c in d.get("tool_calls") or []:
             a = c.get("args") if isinstance(c, dict) and isinstance(c.get("args"), dict) else {}
-            entry = {"n": str(c.get("name") or "") if isinstance(c, dict) else ""}
+            entry = {"n": compat.tool(c.get("name")) if isinstance(c, dict) else ""}
             if entry["n"] == "run_command":
                 entry.update(cmd=str(a.get("CommandLine") or "")[:400], bp=bool(a.get("BypassSandbox")))
             elif entry["n"] == "read_file":
-                entry.update(path=str(a.get("Path") or ""), rng=bool(a.get("StartLine") or a.get("EndLine")))
+                entry.update(path=str(a.get("Path") or a.get("AbsolutePath") or ""), rng=bool(a.get("StartLine") or a.get("EndLine")))
             elif entry["n"] in ("write_file", "edit_file"):
                 entry.update(path=str(a.get("Path") or a.get("TargetFile") or "")[:400])
             pending.append(entry)
@@ -883,7 +891,14 @@ def bypass_mode(payload: dict, st: Optional[dict], users: Optional[List[dict]] =
     if st is not None and st.get("users") and not delegated(st, payload):
         events = bypass_events(users if users is not None else with_current(st, payload))
         last = events[-1] if events else None
-        if last and last["n"] > int(st.get("bypass_applied") or 0):
+        if last and last["n"] > int(st.get("bypass_applied") or 0) and compat.runtime(payload) == "cli" \
+                and getattr(compat, "agy_headless", lambda: None)() is not False:
+            # `agy -p "…"` / `agy acp`: a program's prompt, not the user typing (like agentapi); and when it can't be
+            # told, no switch either — never applied, later either
+            st["bypass_applied"] = last["n"]
+            if isinstance(payload.get("conversationId"), str):
+                store(payload["conversationId"], st)
+        elif last and last["n"] > int(st.get("bypass_applied") or 0):
             at = _epoch(last["ts"]) if last["ts"] else time.time()
             _save_bypass({"on": last["on"], "at": at, "since": time.strftime("%Y-%m-%d %H:%M", time.localtime(at)),
                           "conversation": str(payload.get("conversationId") or ""), "n": last["n"]})
@@ -907,14 +922,24 @@ def _parent(cid) -> str:
         return ""
     try:
         import sqlite3
-        db = os.path.expanduser("~/.gemini/antigravity/conversation_summaries.db")
-        con = sqlite3.connect(f"file:{db}?immutable=1", uri=True, timeout=1)
-        row = con.execute("SELECT parent_conversation_id FROM conversation_summaries WHERE conversation_id = ?",
-                          (cid,)).fetchone()
-        con.close()
-        return (row[0] or "") if row else ""
-    except Exception:
+    except ImportError:
         return ""
+    for d in compat.data_dirs():
+        db = os.path.join(d, "conversation_summaries.db")
+        if not os.path.isfile(db):
+            continue
+        try:
+            con = sqlite3.connect(f"file:{db}?immutable=1", uri=True, timeout=1)
+            try:
+                row = con.execute("SELECT parent_conversation_id FROM conversation_summaries WHERE conversation_id = ?",
+                                  (cid,)).fetchone()
+            finally:
+                con.close()
+            if row and row[0]:
+                return row[0]
+        except Exception:
+            continue
+    return ""
 
 
 def is_constraint(text: str) -> bool:

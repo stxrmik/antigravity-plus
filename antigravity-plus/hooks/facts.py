@@ -182,7 +182,7 @@ FILEISH = re.compile(r"\.[A-Za-z0-9]{1,8}$|^(?:\.{1,2}[\\/]|~[\\/]|/|[A-Za-z]:[\
 # — or another ref git knows here (`fork/v1.2.0`, asked of git only for a name without a file extension like `.py`).
 GIT_REF = re.compile(r"^(?:(?:origin|upstream)/|refs/)[\w.@/+-]+$|^HEAD(?:[~^]\d*|@\{[^{}\s]*\})+$")
 LETTER_EXT = re.compile(r"\.(?!x$)[A-Za-z][A-Za-z0-9]{0,7}$")  # `.py`, `.c` — not `2.0.x` (a version branch)
-TLD = r"(?:com|ru|org|net|io|dev|co|me|info|xyz|site|online|tech|cloud|pro|uk|de|eu|us|su|by|kz|ua|рф)"
+TLD = r"(?:com|ru|org|net|io|dev|co|me|ai|google|info|xyz|site|online|tech|cloud|pro|uk|de|eu|us|su|by|kz|ua|рф)"
 NOT_A_PATH = re.compile(r"^[\w-]+(?:\.[\w-]+)*\." + TLD + r"(?:[:/]|$)|[\\/][\w-]+(?:\.[\w-]+)*\." + TLD + r"$|^(?:\.\w+[\\/])+\.\w+$", re.I)
 IPV4_OR_DATE = re.compile(r"^v?(?:\d{1,3}(?:\.\d{1,3}){3}|\d{1,2}\.\d{1,2}\.\d{4})$")  # 1.2.3.4, 06.11.2026 (not 25.10.15)
 URL = re.compile(r"https?://[^\s<>()\[\]`'\"«»]+", re.I)
@@ -247,7 +247,7 @@ def scan(tp: str) -> dict:
     """The conversation as evidence: {"cmds": [{"s", "cmd", "code"}], "edits": [{"s", "path"}], "browser": [step],
     "seen": the text of everything except the agent's own words (user messages, tool results, system messages),
     lowercased, "users": the user's messages}. A background command gets its exit code when it reports back."""
-    ev: dict = {"cmds": [], "edits": [], "browser": [], "users": []}
+    ev: dict = {"cmds": [], "edits": [], "browser": [], "users": [], "authored": []}
     seen: List[str] = []
     size = 0
     bg: Dict[str, dict] = {}
@@ -280,8 +280,10 @@ def scan(tp: str) -> dict:
                     if name == "run_command":
                         item["cmd"] = str(a.get("CommandLine") or "")
                         seen.append(item["cmd"][:2000].lower())
+                        _author(ev, item["cmd"])
                     elif name in ("write_file", "edit_file"):
                         ev["edits"].append({"s": step, "path": str(a.get("Path") or a.get("TargetFile") or "")})
+                        _author(ev, a)
                     elif "browser" in name:
                         ev["browser"].append(step)
                     pending.append(item)
@@ -305,12 +307,50 @@ def scan(tp: str) -> dict:
                 if m.group(1) in bg and bg[m.group(1)]["code"] is None:
                     tail = content[m.end():m.end() + 60_000].split("Log output:", 1)[-1][-4000:]
                     bg[m.group(1)].update(code=inferred_code(tail), out=tail, inferred=True)
+            if kind == "SYSTEM_MESSAGE" and STOP_NOTE in content[:600]:
+                continue  # this hook's own words («`x.py` — no such file») back nothing in the next report
             if size < SEEN_LIMIT:
                 piece = content[:400_000].lower()
                 seen.append(piece)
                 size += len(piece)
     ev["seen"] = "\n".join(seen)
     return ev
+
+
+STOP_NOTE = "Stop hook blocked termination"  # how Antigravity puts a Stop hook's reason into the conversation
+AUTHORED_LIMIT = 4_000_000  # chars of the agent's own commands and written file contents kept
+
+
+def _author(ev: dict, value: object) -> None:
+    """The text of what the agent itself wrote: a command line, or every string in a write/edit call's arguments."""
+    if isinstance(value, dict):
+        for v in value.values():
+            _author(ev, v)
+    elif isinstance(value, list):
+        for v in value:
+            _author(ev, v)
+    elif isinstance(value, str) and value and sum(len(t) for t in ev["authored"]) < AUTHORED_LIMIT:
+        ev["authored"].append(value[:400_000].lower())
+
+
+def authored(path: str, ev: dict) -> bool:
+    """The agent itself wrote this path into a command or a file in this conversation: a file its script creates
+    while it runs (`.agents/hooks.json` of a probe), not one it made up — seen live: a report sent back for it, and
+    rewritten whole. Written as is, or as the quoted parts of a join (`os.path.join(ws, ".agents", "hooks.json")`).
+    A path that came from what it read here (tool output, a message) isn't made up either."""
+    rel = re.sub(r"^(?:\./)+", "", path.replace("\\", "/")).rstrip("/").lower()
+    if not rel:
+        return False
+    parts = [x for x in rel.split("/") if x and x not in (".", "..", "~")]
+    whole = re.compile(r"(?<![\w.-])(?:" + re.escape(rel) + "|" + re.escape(rel.replace("/", "\\")) + r")(?![\w-])")
+    if whole.search(ev.get("seen") or ""):
+        return True  # it came from the conversation: a page or file it read (docs of a tool not installed here), a message
+    for text in ev.get("authored") or []:
+        if whole.search(text):
+            return True
+        if len(parts) > 1 and all(f'"{x}"' in text or f"'{x}'" in text for x in parts):
+            return True
+    return False
 
 
 # ─────────────────────────────── checking the report ───────────────────────────────
@@ -322,6 +362,10 @@ def _plain(answer: str) -> str:
 
 def sentences(text: str) -> List[str]:
     return [s for s in re.split(r"(?<=[.!?…])\s+|\n+", text) if s.strip()]
+
+
+OWN_FAILURE = re.compile(r"\bFAIL(?:ED|S)?\b|\b[1-9]\d*\s+(?:failed|failing|errors?)\b|❌|⛔|\bупал\w*|\bне\s+прош\w*"
+                         r"|\b[1-9]\d*\s+(?:упал\w*|не\s+прош\w*)")
 
 
 def claims(answer: str) -> List[Tuple[str, str]]:
@@ -337,6 +381,8 @@ def claims(answer: str) -> List[Tuple[str, str]]:
             before = s[:m.start()]
             if HEDGE_BEFORE.search(before[-60:]) or before.count("«") > before.count("»") or before.count('"') % 2:
                 continue  # «чтобы тесты прошли», «если сборка проходит», a quote
+            if kind in ("tests", "build", "lint", "ci") and OWN_FAILURE.search(s):
+                continue  # «FAIL (41 passed, 1 failed)»: the report says it failed — no claim of success (seen live)
             out.append((kind, s.strip()))
     return out
 
@@ -885,7 +931,7 @@ def references(answer: str, ev: dict, ws: str, art: str = "", roots: Optional[Li
                 alts = [os.path.join(r, unquote(bare)) for r in roots if r != ws] + ([os.path.join(art, bare)] if art else [])
                 path = next((a for a in alts if os.path.exists(a)), path)
             if not os.path.exists(path):
-                if name and name not in gone:
+                if name and name not in gone and not authored(unquote(bare), ev):
                     lost += [(len(found), unquote(bare), shown, line_no)] if relative else []
                     found.append(f"`{shown}` — no such file or folder.")
                 continue
@@ -979,15 +1025,20 @@ def stop_message(payload: dict, st: dict, answer: str, verify: "re.Pattern", cod
     mark = len(st.get("users") or []) or -1  # main agent: per user message; a subagent: per conversation
     seen = st.setdefault("facts", {})
     if seen.get("asked") != mark:
-        seen.update(asked=mark, sigs=[])
+        seen.update(asked=mark, sigs=[], told=[])
     sig = hashlib.sha1("\n".join(sorted(found)).encode()).hexdigest()[:12]
     if sig in seen["sigs"]:
         return None  # it already decided to stop with exactly these
+    told = seen.get("told") or []
+    found = [p for p in found if hashlib.sha1(p.encode()).hexdigest()[:12] not in told]
+    if not found:
+        return None  # it was told about each of these already and chose to stop: say no more (no loop of rewrites)
     seen["sigs"] = (seen["sigs"] + [sig])[-20:]
+    seen["told"] = (told + [hashlib.sha1(p.encode()).hexdigest()[:12] for p in found])[-60:]
     shown = "\n".join(f"- {p}" for p in found[:SHOWN]) + (f"\n- … and {len(found) - SHOWN} more" if len(found) > SHOWN else "")
     return ("Antigravity Plus — facts: parts of your report aren't backed by anything in this conversation:\n" + shown +
-            "\nFix the report before you finish: check what you can now (run it, open it, search for it), correct or "
-            "remove the rest, and say plainly what you couldn't confirm. Then end your turn again.")
+            "\nCheck what you can now (run it, open it, search for it). Then correct only what was wrong and say "
+            "plainly what you couldn't confirm.")
 
 
 # ─────────────────────────────── before the next model call ───────────────────────────────

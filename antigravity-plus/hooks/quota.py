@@ -82,6 +82,21 @@ def discover() -> Optional[Endpoint]:
     return (found.addr, found.token) if found else None
 
 
+def ls_possible(payload: Optional[dict] = None) -> bool:
+    """False in an Antigravity CLI session (compat.runtime()) that sees no language server to ask — no
+    ANTIGRAVITY_LS_ADDRESS and no live daemon file —: there the hint does nothing at once, without looking for one.
+    Reads files only."""
+    runtime = getattr(compat, "runtime", None)
+    try:
+        if not runtime or runtime(payload) != "cli":
+            return True
+        if os.environ.get("ANTIGRAVITY_LS_ADDRESS") and os.environ.get("ANTIGRAVITY_CSRF_TOKEN"):
+            return True
+        return any(compat._alive(ls.pid) for ls in compat.daemon_servers())
+    except Exception:
+        return True
+
+
 def parse(data: dict) -> List[dict]:
     """RetrieveUserQuotaSummary → [{name, models (lower-case families), buckets {window: {left, reset, disabled}}}]."""
     groups = []
@@ -210,13 +225,45 @@ def family(label: str) -> str:
     return re.sub(r"\s*\([^)]*\)\s*$", "", label).strip().lower()
 
 
+def _client_model(model: str) -> dict:
+    """The client's own entry for `model` (hooks/client.py's snapshot: label, family, provider); {} when unknown."""
+    try:
+        import client
+        return client.model(model) or {}
+    except Exception:
+        return {}
+
+
+def cheaper_model() -> str:
+    """The label of the model the hint suggests switching to: the client's live Gemini 4 Hydrogen (Medium) — or its
+    successor family's —, the literal name without a client snapshot."""
+    try:
+        import client
+        entry = client.model(client.resolve("gemini-4-hydrogen", "medium")) or {}
+        return str(entry.get("label") or "") or ("" if client.models() else "Gemini 4 Hydrogen (Medium)")
+    except Exception:
+        return "Gemini 4 Hydrogen (Medium)"
+
+
 def group_for(model: str, groups: List[dict]) -> Optional[dict]:
     """The quota group `model` draws on: by its family («gemini 4 carbon») or whole label («orchestrator (carbon)»),
-    as delegate.group_of() matches them, else by the maker's name in a model id («claude-sonnet-5-5-high»)."""
+    as delegate.group_of() matches them — also by the label and family the client lists for an id
+    («gemini-4-carbon-high» → «Gemini 4 Carbon (High)») —, else by the model's maker (the client's provider, or the
+    maker's name in a model id: «claude-sonnet-5-5-high»)."""
     fam, whole = family(model), (model or "").strip().lower()
-    g = next((g for g in groups if (whole and whole in g["models"]) or (fam and fam in g["models"])), None)
+    entry = _client_model(model)
+    names = {n for n in (whole, fam, str(entry.get("label") or "").lower(), family(str(entry.get("label") or "")),
+                         str(entry.get("family_label") or "").lower()) if n}
+    g = next((g for g in groups if names & set(g["models"])), None)
     if g or not whole:
         return g
+    provider = str(entry.get("provider") or "")
+    if provider:  # the client says who makes it: Google's models draw on the Gemini group, the others on theirs
+        words = FAMILIES[1] if provider == "google" else FAMILIES[0]
+        found = next((g for g in groups if any(w in (g["name"] + " " + " ".join(g["models"])).lower() for w in words)),
+                     None)
+        if found:
+            return found
     for words in FAMILIES:
         if any(w in whole for w in words):
             return next((g for g in groups
@@ -269,8 +316,10 @@ def render(model: str, group: dict, st: dict, others: List[Tuple[dict, dict]]) -
         # Antigravity books each call at its API price: per token Hydrogen counts 1, Neon 2, Carbon ~4 (2026-11-19). In
         # a benchmark on 2.33.0 (2026-11-20) Gemini 4 Hydrogen (Medium) got every task right on a third to a sixth of
         # the quota Neon (High), the Orchestrators and Carbon (High) used per task, and 2–5× faster.
-        cheaper = ("a cheaper model: Gemini 4 Hydrogen (Medium) — it did every task of a benchmark right on a third to "
-                   "a sixth of the quota Neon (High), Orchestrator or Carbon used, 2–5× faster" + (f"; {switch}" if switch else ""))
+        light = cheaper_model()
+        cheaper = ((f"a cheaper model: {light} — it did every task of a benchmark right on a third to a sixth of the "
+                    "quota Neon (High), Orchestrator or Carbon used, 2–5× faster" if light
+                    else "a cheaper model of this group") + (f"; {switch}" if switch else ""))
     else:
         cheaper = switch or "a cheaper model of this group"
     head = (f"Plan limits of «{group['name']}», which this conversation's model ({model}) draws on: {st['text']}.")
@@ -324,7 +373,7 @@ def _evaluate(payload: dict, st: Optional[dict], with_ui: bool) -> Optional[Tupl
     if os.environ.get("AGP_QUOTA_CHECK", "").lower() == "off" or not setting():
         return None
     model = str(payload.get("modelName") or "").strip()
-    if not model:
+    if not model or not ls_possible(payload):
         return None
     q = st.setdefault("quota", {})
     users = len(conv.with_current(st, payload))

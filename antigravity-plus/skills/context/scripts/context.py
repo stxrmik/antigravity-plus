@@ -432,7 +432,7 @@ def analyze(steps: List[dict], conv_id: str, model: str, model_guessed: bool, pr
                      "share": round(tok / now, 4) if now else 0.0, "items": len(its)})
 
     top = sorted((i for i in live if i.cat not in FIXED), key=lambda i: -i.tokens)[:10]
-    last_model = model or pricing.cfg.get("default_model", "")
+    last_model = model or usage.default_model(pricing)
     window = window or pricing.context_window(last_model)
     compaction = pricing.compaction_threshold(last_model, window)
     ck = c["checkpoint"]
@@ -602,7 +602,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--json", action="store_true", help="print the result as JSON")
     a = ap.parse_args(argv)
 
-    roots = a.root or usage.PRODUCT_ROOTS
+    roots = a.root or usage.default_roots()
     pricing = usage.Pricing(a.pricing)
     if a.transcript:
         p = os.path.expanduser(a.transcript)

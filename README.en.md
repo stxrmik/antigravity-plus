@@ -44,7 +44,7 @@ on Antigravity's plugin page it is turned on and off as a whole. Python standard
 
 ## Install
 
-You need **Google Antigravity 2.x** (verified on 2.35.1), **Python 3.8+** and **git**. `/ui-check` also needs Chrome, Chromium, Edge or
+You need **Google Antigravity** — the 2.x app and/or the Antigravity CLI `agy` (verified on Desktop 2.35.2 and CLI 1.5.18), **Python 3.8+** and **git**. `/ui-check` also needs Chrome, Chromium, Edge or
 Brave. `/mobile` needs Xcode (the iOS simulator, macOS only) and/or the Android SDK (the emulator); `/ci` uses `gh`
 (GitHub) or `glab` (GitLab) — nothing else.
 
@@ -72,10 +72,14 @@ When Claude Code is on the computer (a `~/.claude` folder), the installer also a
 
 ### Modules
 
-On the first install in a terminal the installer shows a menu: every module with a detailed description, how much of
-the agent's context it takes and what this computer lacks for it. Numbers toggle modules, Enter installs. What you
-don't choose isn't installed: its commands, subagents, rules and side panel never reach Antigravity or its context,
-and the hook features of that module stay silent. The choice is saved, and updates ask nothing.
+On the first install in a terminal the installer (`install.py` + `installer_ui.py`) opens an interactive screen with
+color, borders, an **Environment** block (whether Antigravity Desktop and its version, Antigravity CLI and its version,
+and Claude Code were found), a module selection menu navigated with arrow keys and Space with a description pane (what
+the module gives, how much of the agent's context it takes and what this computer lacks for it), and a summary box. If the interactive UI fails, it falls back to line-by-line mode automatically; in an agent's terminal
+(`TERM=dumb`, CI, etc.) it always runs line-by-line without a menu. Language is picked in order: `--lang` → saved
+choice → OS UI language (macOS, Windows) → environment locale → English (Russian → Russian, everything else → English).
+What you don't choose isn't installed: its commands, subagents, rules and side panel never reach Antigravity or its
+context, and the hook features of that module stay silent. The choice is saved, and updates ask nothing.
 
 | Module | What it gives | Context | Needs |
 |---|---|---|---|
@@ -98,6 +102,9 @@ always-on rules). Full descriptions: `./install.sh --list`.
 
 ```bash
 ./install.sh --choose                  # pick the modules again (menu)
+./install.sh --plain                   # line-by-line output without color, borders or menu
+./install.sh --demo                    # run the full flow on synthetic data without changing the system
+./install.sh --lang en                 # set installer language (ru|en)
 ./install.sh --without mobile,deploy   # the current choice minus these
 ./install.sh --modules core,git,memory # exactly these modules (core is always in)
 ./install.sh --all                     # every module
@@ -110,8 +117,8 @@ they install the saved choice.
 - **Update:** `/update` in an Antigravity chat, or `./install.sh --update` in the clone's folder (Windows:
   `.\install.cmd --update`). Once a day the plugin checks for a new release itself, and the agent mentions one once
   at the start of a conversation. More in «🔄 Updates» below.
-- **Uninstall:** `./install.sh --uninstall` (Windows: `.\install.cmd --uninstall`). Memory and settings stay;
-  `--uninstall --purge` removes them too. Claude Code's memory in `~/.claude` is never touched.
+- **Uninstall:** `./install.sh --uninstall` (Windows: `.\install.cmd --uninstall`, asks for confirmation). Memory and
+  settings stay; `--uninstall --purge` removes them too. Claude Code's memory in `~/.claude` is never touched.
 
 ## Features
 
@@ -206,11 +213,12 @@ they install the saved choice.
   counts 1, Neon 2, Carbon ~4); its Claude group costs ~2.5% of its week per dollar, ~60× the Gemini quota per task.
 - So Carbon keeps its own tier after `strong`, `ultra`, for complex and specific tasks. Paid Google AI Pro gets Neon
   and Orchestrator (Neon) since 2.34 according to the changelog; it doesn't mention Carbon for AI Pro. Every model in no
-  tier (`Neon (XHigh)`, `Carbon (Low)`, `Claude Opus 5.5 (Low)`, `Argon`, `Orchestrator (Argon)`, `Gemini 3.8 Flash`,
+  tier (now `Neon (XHigh)`, `Carbon (Low)`, `Claude Opus 5.5 (Low)`, `Argon`, `Orchestrator (Argon)`, `Gemini 3.8 Flash`,
   `GPT-OSS 120B`) is listed by `delegate.py models` as «Experimental» with a word on when each fits, and taken by exact
   id (`--model orchestrator` is Orchestrator (Carbon), `--model "orchestrator neon"` Orchestrator (Neon); reports split
-  planner vs executor calls). Antigravity itself tags Argon and Gemini 3.8 Flash «Leaving on Nov 30» and says GPT-OSS
-  will be removed on 2026-11-30; it says nothing like that about Orchestrator (Argon). API prices: Neon $3 / $15 per
+  planner vs executor calls). The list comes from Antigravity itself, with its own tags («New», «Leaving …»): a model
+  it removes or adds leaves or joins the list by itself. Tiers are «family + effort» rules in measured order: the bridge finds a
+  renamed model by itself, and an unknown `--model` is an error with the nearest matches (Antigravity used to take flash silently). API prices: Neon $3 / $15 per
   1M tokens, Hydrogen $1.5 / $7.5, Carbon $2 / $10 until 2026-11-30 and $4 / $20 from 2026-12-01. `delegate.py models`
   shows each model's speed in your recent conversations.
 - The Antigravity agent works in the same folder, its conversation shows up in Antigravity ("Claude Code: …"), and
@@ -240,7 +248,8 @@ they install the saved choice.
   holds a slot while its conversation or its background work runs.
 - **One watch, no duplicates.** `delegate.py watch --follow` in Monitor follows every task of the session, later ones
   included. Events are numbered (#1, #2 … per task), and none arrives twice, even with several watches running: a
-  newer one takes a task over from an older one. Before Monitor's 30-minute limit the watch ends with exit code 0 and
+  newer one takes a task over from an older one. Several Claude Code agents side by side each give their own
+  `--owner <name>` (`run` and `watch`), and a shared `watch` leaves the others' tasks alone. Before Monitor's 30-minute limit the watch ends with exit code 0 and
   a hint to start it again.
 - **The price before the start.** `delegate.py estimate --model <tier>` shows what a task costs on each tier, from
   your own past tasks: the share of the weekly quota (median and 9 in 10), API dollars, minutes, and how many such
@@ -326,6 +335,9 @@ they install the saved choice.
   a server or a container goes in a file piped to stdin, not into `python3 -c` with nested quotes.
 
 ### ✅ Quality
+- **No repeats after a check.** When the Stop hook sends the agent back (unverified code, a doubtful fact in its
+  report), the agent first does what the check asks, then writes 1–3 lines of what changed — it doesn't repeat the
+  answer you already see. Over 417 real conversations, returns went from 251 to 213.
 - Every edit is checked right away: Python, JS, Swift, shell, JSON, YAML, Ruby, plist and XML syntax, plus the
   project's linters (ruff, eslint, swiftlint, shellcheck). The agent sees the error before its next step.
 - The Stop hook won't let it end a turn with a syntax error, with open `task.md` items, without checking changed
@@ -413,6 +425,40 @@ they install the saved choice.
   1. **Session** & **Summary**: cost, context fill, Orchestrator planner vs executor split, Antigravity's 5-hour and weekly limits, 7-day charts.
   2. **Activity**: active workspace agents & edited files (`coord`), Claude Code ↔ Antigravity tasks, running LSP servers with RAM usage and a Stop button.
   3. **Control**: update checks, read-only Bypass Mode badge (with copyable `/bypass` / `/bypass off`), safe coaching toggles, and recent `guard.log` entries.
+
+### 💻 Antigravity CLI
+- **Same plugin, full load.** Antigravity CLI (`agy`) reads the same plugin folder `~/.gemini/config/plugins/antigravity-plus`
+  and loads the entire plugin: skills, subagents, rules, the MCP server, and hooks. Sign-in is shared with Desktop.
+- **What doesn't work in CLI:** Control Center (the sidecar panel) and automations (`/schedule-task` refuses with an
+  explanation on a machine without Desktop).
+- **Sessions and usage:** CLI conversations are found by id just like Desktop conversations; `/usage` finds and prices
+  CLI conversations and labels the environment. Quotas are not visible from a headless `agy -p` run (terminal sandbox).
+- **Bypass and headless mode:** `/bypass` from a headless run (`agy -p`, `agy acp`) does not enable Bypass Mode. In
+  headless mode, "ask" means deny, so the agent is told why.
+- **Guard in CLI:** stops (even in Bypass Mode) `agy --dangerously-skip-permissions`, `--mode auto|accept-edits`,
+  `--sandbox=false`, installing or removing plugins and MCP servers via `agy`, `agy update`, remote control and
+  microphone access, and launching `agy -p` with Bypass enabled.
+- **`/doctor`:** includes an "Antigravity CLI" section (version, whether `agy plugin list` sees the plugin, and what
+  isn't available in CLI); a CLI-only machine is not treated as an error.
+- **Claude Code → Antigravity through the CLI.** `delegate.py run --via auto|desktop|cli` (or `AGP_DELEGATE_VIA`):
+  `auto` takes Desktop when it runs, else `agy` when it's installed. Each turn is a background `agy -p`, the next one
+  goes on in the same conversation; `wait`, `watch`, `result`, `diff`, `send`, `reply`, `next`, `cancel`, the queue and
+  resumes after errors work the same. The bridge never turns the agent's permission prompts off. Actions the guard
+  denied (in headless an «ask» is a denial) show in the report with exit code 2, so such a run never passes for a clean
+  success. Without Desktop there are no quotas: `budget` and `models` say so. The reverse bridge (`/claude`) works from
+  the CLI too.
+
+### 📡 Data comes from Antigravity itself
+- The list of models, their names and effort levels, "New" / "Leaving …" tags, the default model, each model's context
+  window (known even before the first call), which model executes an Orchestrator plan, and the Antigravity version —
+  the plugin asks the app itself (or `agy models` if only CLI is installed) and keeps a snapshot in
+  `~/.gemini/antigravity-plus/client.json`, refreshing it every 6 hours and when the Antigravity version changes;
+  offline, a built-in snapshot is used.
+- So when Antigravity renames or adds a model, hints, `/usage`, and the panel pick it up on their own without a plugin
+  update. Only prices (`pricing.json`), the model order in tiers (from benchmarks), and hint thresholds remain manual.
+- `/usage` calculates cost per call using each call's model (accounting for mid-turn model switches); an unknown model
+  shows as "price unknown". The panel shows the client version and data freshness.
+- Command: `python3 antigravity-plus/hooks/client.py show|refresh|export`.
 
 ## Commands
 
@@ -863,11 +909,14 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 
 ## Platforms and compatibility
 
-- **macOS, Linux, Windows.** Antigravity runs hooks with `sh -c` or `cmd /c`; the installer picks the Python command
-  for your system (`py -3 -X utf8` on Windows). The guard understands sh/bash/zsh, PowerShell and cmd.
+- **macOS, Linux, Windows.** Verified live on **Antigravity Desktop 2.35.2** and **Antigravity CLI (`agy`) 1.5.18** on
+  macOS (Windows and Linux via offline tests). Desktop 2.35.2 compatibility includes mid-turn model switches,
+  conversation deletion via the Conversation Management API (the guard asks for confirmation), and new control RPCs.
+  Antigravity runs hooks with `sh -c` or `cmd /c`; the installer picks the Python command for your system
+  (`py -3 -X utf8` on Windows). The guard understands sh/bash/zsh, PowerShell and cmd.
 - **Claude Code:** `CLAUDE.md` with `@imports`, `.claude/rules`, `~/.claude/CLAUDE.md`, `.claude/commands`,
   `.claude/skills` and `.claude/agents` are picked up; project memory is shared. The other way round, the skill
-  `antigravity` lets Claude Code hand tasks to Antigravity agents (checked with Claude Code 2.1 and Antigravity 2.29–2.35.1).
+  `antigravity` lets Claude Code hand tasks to Antigravity agents (checked with Claude Code 2.1 and Antigravity 2.29–2.35.2).
 - `/mobile`: the iOS simulator on macOS with Xcode, the Android emulator on all three systems.
 - `/lsp`: language servers are installed separately and work on all three systems (sourcekit-lsp needs Xcode or Swift).
 - The agent answers in the language you write in. Some of the plugin's own messages (guard confirmations, `/doctor`)
@@ -881,6 +930,8 @@ Tell the agent in your own words or use `/settings`. Everything is on by default
 python3 tests/run_tests.py                                # offline tests: hooks, guard, installer
 python3 tests/replay.py --limit 25                        # read-only hook replay across real transcripts
 python3 tests/live_smoke.py --only lsp_refs               # scripted live smoke test via agentapi on a cheap model
+python3 tests/live_cli.py                                 # live probe of Antigravity CLI (agy)
+python3 tests/live_cli_bridge.py                          # live probe of the Claude Code -> Antigravity CLI bridge
 python3 tests/live_mobile.py --ios                      # live check of /mobile: boots a simulator (or --android: an emulator)
 python3 antigravity-plus/hooks/guard.py --test "rm -rf ~"
 python3 antigravity-plus/hooks/checks.py path/to/file.py  # the same check an agent's edit gets

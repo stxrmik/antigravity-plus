@@ -111,12 +111,27 @@ def ctx_limits(model: str, window: Optional[int] = None) -> Tuple[int, int, str]
     return warn, high, note
 
 
+def cli_session(payload: dict) -> bool:
+    """True in an Antigravity CLI session: `agy` is its own language server (random ports, no hub file), so the one
+    compat.language_server() finds is Desktop's, which doesn't know this conversation — never ask it about it."""
+    runtime = getattr(compat, "runtime", None)
+    try:
+        if runtime:
+            return runtime(payload) == "cli"
+    except Exception:
+        pass
+    tp = str((payload or {}).get("transcriptPath") or "").replace("\\", "/")
+    return "/antigravity-cli/" in tp
+
+
 def real_window(payload: dict, calls: dict, sp: dict, model: str) -> Optional[int]:
-    """The window Antigravity reported for `model` (hooks/context_window.py), None when there is none: the newest
-    recorded reading, read again from this conversation's latest call when it is missing or older than STALE and that
+    """The window Antigravity gives `model`, None when unknown: the newest recorded reading of a real call
+    (hooks/context_window.py) made within its FRESH day, read again from this conversation's latest call when it is missing or older than STALE and that
     call is recent — once per model, and again only ASK_AGAIN calls after a reading that found nothing. Not while this
     conversation's calls weren't all counted (it began under an older version: the count can't pick the latest call).
-    An Orchestrator session takes its executor's call as its own reading. Never raises."""
+    An Orchestrator session takes its executor's call as its own reading. Without a fresh reading, the window the
+    client lists for the model (hooks/client.py's snapshot — known before the model's first call), then an older
+    reading. In an Antigravity CLI session (cli_session()) no language server is asked. Never raises."""
     try:
         import context_window as cw
         found = cw.lookup(model)
@@ -128,14 +143,16 @@ def real_window(payload: dict, calls: dict, sp: dict, model: str) -> Optional[in
         at = cw.epoch(str(calls.get("ctx_at") or ""))
         n = int(calls.get("n_calls") or 0)
         asked = sp.get("win_ask") if isinstance(sp.get("win_ask"), dict) else {}
-        if (k and n > 0 and not calls.get("n_partial") and at is not None and now - at <= cw.FRESH
+        if (k and n > 0 and not calls.get("n_partial") and not cli_session(payload) and at is not None and now - at <= cw.FRESH
                 and (asked.get("k") != k or n - int(asked.get("n") or 0) >= ASK_AGAIN)):
             sp["win_ask"] = {"k": k, "n": n}
             got = cw.refresh(str(payload.get("conversationId") or ""), n, at, now)
             if got and k.startswith("orchestrator") and any(EXECUTOR_RE.search(name) for name in got[0]):
                 own = sp["win_conv"] = got[1]
             found = cw.lookup(model) or found
-        return found[0] if found else own
+        if found and now - found[1] <= cw.FRESH:
+            return found[0]
+        return own or cw.client_window(model) or (found[0] if found else None)
     except Exception:  # a missing module, an odd state, an unreadable file: the numbers known at release apply
         return None
 

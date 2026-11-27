@@ -614,6 +614,19 @@ def list_tasks() -> List[Dict[str, Any]]:
     return tasks
 
 
+def cli_only() -> str:
+    """Why an automation can't be scheduled here, "" when it can. Automations are sidecars, which only the
+    Antigravity App loads (docs: sidecars — «Available on: Antigravity App»): on a computer with the CLI but no App
+    data folder, a sidecar.json would sit there and never run."""
+    desktop = getattr(compat, "desktop_data_dir", lambda: os.path.join(os.path.expanduser("~"), ".gemini", "antigravity"))
+    has_cli = getattr(compat, "agy", lambda: "")
+    if os.path.isdir(desktop()) or not has_cli():
+        return ""
+    return ("Scheduled automations run only in the Antigravity App, which isn't set up on this computer "
+            "(the Antigravity CLI has no automations). Install and open the App once, then schedule the task again; "
+            "or run it from your own scheduler (cron, Task Scheduler) as `agy -p \"<prompt>\"`.")
+
+
 def create_task(
     slug: str,
     schedule: str,
@@ -630,6 +643,9 @@ def create_task(
     sid, err = sidecar_id(slug)
     if err or sid is None:
         return EXIT_ERROR, None, err or "Invalid slug."
+    no_app = cli_only()
+    if no_app:
+        return EXIT_REFUSED, None, no_app
     cron, cron_err = validate_schedule(schedule, local_zone())
     if cron_err or cron is None:
         return EXIT_ERROR, None, cron_err or "Invalid cron schedule."

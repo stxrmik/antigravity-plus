@@ -262,7 +262,9 @@ def setting(key: str) -> bool:
 
 def task_items(payload: dict, st: dict) -> List[Tuple[str, str]]:
     """Open items of the current task.md checklist, if it belongs to what the user asked now."""
-    art = payload.get("artifactDirectoryPath") or os.path.join(conv.BRAIN, payload["conversationId"])
+    tp = str(payload.get("transcriptPath") or "")
+    base = compat.data_dir(tp) if tp or compat.runtime(payload) != "cli" else compat.cli_data_dir()
+    art = payload.get("artifactDirectoryPath") or os.path.join(base, "brain", payload["conversationId"])
     task = os.path.join(conv.to_path(art), "task.md")
     try:
         with open(task, encoding="utf-8", errors="replace") as f:
@@ -749,7 +751,24 @@ def git_unfinished(payload: dict) -> Optional[dict]:
     return None
 
 
+# The end of every message that sends the agent back. Seen live: sent back over one line of its report, an agent
+# wrote the whole report again almost word for word — the user saw it twice. Steps, with the work first: a model told
+# to «answer briefly» first writes the answer and ends its turn without doing anything.
+AFTER = ("Next, in this order:\n1. Do what this asks (tool calls) before you write anything.\n"
+         "2. Reply in 1–3 lines with only what you changed or found. The user already sees your last message: don't "
+         "repeat or rewrite it; a full report again only if it changed in substance.")
+
+
+def with_after(reason: Optional[str]) -> Optional[str]:
+    """Every Stop return, whatever sent the agent back, ends the same way (one place to change)."""
+    return f"{reason.rstrip()}\n\n{AFTER}" if reason and reason.strip() else None
+
+
 def decide(payload: dict) -> Optional[str]:
+    return with_after(_decide(payload))
+
+
+def _decide(payload: dict) -> Optional[str]:
     if payload.get("terminationReason") != "NO_TOOL_CALL":
         return None
     if int(payload.get("executionNum") or 0) >= MAX_PER_TURN:

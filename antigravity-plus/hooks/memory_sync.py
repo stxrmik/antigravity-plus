@@ -22,7 +22,7 @@ def main() -> None:
         args = call.get("args") or {}
         if isinstance(args, str):
             args = json.loads(args)
-        path = args.get("Path") or args.get("TargetFile") or args.get("path") or ""
+        path = args.get("Path") or args.get("TargetFile") or args.get("AbsolutePath") or args.get("path") or ""  # App/CLI names, then the docs' older ones (write_to_file, view_file)
         if isinstance(path, str) and len(path) >= 2 and path[0] == path[-1] == '"':
             path = json.loads(path)  # args can arrive JSON-encoded twice
         if not payload.get("error") and isinstance(path, str) and os.path.basename(path) != "MEMORY.md":

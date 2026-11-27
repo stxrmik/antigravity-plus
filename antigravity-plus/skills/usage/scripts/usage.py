@@ -34,6 +34,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PRICING = os.path.join(os.path.dirname(HERE), "pricing.json")
 HOOKS_DIR = os.path.abspath(os.path.join(HERE, "..", "..", "..", "hooks"))  # compat, context_window
 PRODUCT_ROOTS = ["~/.gemini/antigravity", "~/.gemini/antigravity-cli", "~/.gemini/antigravity-ide"]
+CLI_ROOT_NAME = "antigravity-cli"  # the Antigravity CLI's data folder (~/.gemini/antigravity-cli; per its docs, not seen live)
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 MODEL_CHANGE_RE = re.compile(r"Model Selection`\s+from\s+(.*?)\s+to\s+(.*?)\.(?:\s|$)")
 USER_REQ_RE = re.compile(r"<USER_REQUEST>\s*(.*?)\s*</USER_REQUEST>", re.S)
@@ -65,7 +66,8 @@ QUOTED_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
 SUBAGENT_RESULT_RE = re.compile(  # an invoke_subagent result: its two timestamp lines, then the header
     r"\A(?:[ \t]*(?:Created|Completed) At:[^\n]*\n)*\s*Created the following subagents?:")
 CONV_ID_RE = re.compile(r'"conversationId"\s*:\s*"([0-9a-f-]{36})"')
-EXECUTOR = "Gemini 4 Hydrogen (Orchestrator)"  # the executor's calls, named as in Antigravity's metadata
+EXECUTOR = "Gemini 4 Hydrogen (Orchestrator)"  # last resort for the executor: metadata, then client.executor() come first
+DEFAULT_WINDOW = 512000  # only when pricing.json has no `default_context_window` (= delegate.py's fallback)
 
 
 # ─────────────────────────────── data model ────────────────────────────────
@@ -115,6 +117,7 @@ class Session:
     title: str = ""
     guessed_calls: int = 0  # calls priced with default_model because the transcript never named the model
     window: Optional[int] = None  # the window Antigravity gave the latest call (live_window()); 0 = asked, unknown
+    runtime: str = "desktop"  # «cli»: a conversation of the Antigravity CLI (runtime_of())
 
 
 @dataclass
@@ -157,9 +160,12 @@ class Pricing:
         self.service_tier = service_tier
         self.models = self.cfg.get("models", [])
         self.by_id = {m["id"]: m for m in self.models}
+        self._memo: Dict[str, Optional[dict]] = {}
 
-    def lookup(self, model_name: str) -> Optional[dict]:
-        name = normalize_model(self.override or model_name or self.cfg.get("default_model", ""))
+    def _match(self, name: str) -> Optional[dict]:
+        name = normalize_model(name)
+        if not name:
+            return None
         if name in self.by_id:
             return self.by_id[name]
         for m in self.models:
@@ -167,17 +173,46 @@ class Pricing:
                 return m
         return None
 
+    def lookup(self, model_name: str) -> Optional[dict]:
+        """The pricing.json entry for a model: by id or `match` rule on its name, else by the family the client puts
+        it in (a model released after this file, e.g. «Gemini 4 Hydrogen Sonar» → the Hydrogen rule). None = its
+        price is unknown: such calls cost 0 and are listed as «цена неизвестна», never priced as the default model."""
+        name = self.override or model_name or default_model(self)
+        if name in self._memo:
+            return self._memo[name]
+        found = self._match(name)
+        if found is None:
+            e = client_entry(name)
+            for alt in (e.get("id"), e.get("label"), e.get("family"), e.get("family_label")):
+                found = self._match(str(alt or ""))
+                if found is not None:
+                    break
+        self._memo[name] = found
+        return found
+
+    def price_unknown(self, model_name: str) -> bool:
+        """True when neither pricing.json nor the client's family of the model tells its price."""
+        return self.lookup(model_name) is None
+
     def is_priced(self, model_name: str) -> bool:
         m = self.lookup(model_name)
         return bool(m and not m.get("unpriced"))
 
     def alias(self, subagent_model_arg: str) -> Optional[str]:
-        return self.cfg.get("subagent_model_aliases", {}).get(subagent_model_arg)
+        """A subagent's model alias (flash, pro, flash_lite) → its model: the client's, else pricing.json's."""
+        live = _client_call("aliases", default={}) or {}
+        got = live.get(subagent_model_arg) if isinstance(live, dict) else None
+        return str(got) if got else self.cfg.get("subagent_model_aliases", {}).get(subagent_model_arg)
 
     def listed_window(self, model_name: str) -> int:
-        """The model's window as pricing.json lists it (the number known at release)."""
+        """The model's window as pricing.json lists it (the number known at release), else its one default."""
         m = self.lookup(model_name)
-        return (m or {}).get("context_window") or self.cfg.get("default_context_window", 200000)
+        return (m or {}).get("context_window") or self.cfg.get("default_context_window", DEFAULT_WINDOW)
+
+    def client_window(self, model_name: str) -> Optional[int]:
+        """The model's window as the client's snapshot gives it (hooks/client.py `window()`), or None."""
+        got = _client_call("window", self.override or model_name or default_model(self), default=None)
+        return int(got) if isinstance(got, (int, float)) and not isinstance(got, bool) and got > 0 else None
 
     def recorded_window(self, model_name: str) -> Optional[int]:
         """The newest window Antigravity reported for the model (hooks/context_window.py), or None."""
@@ -188,8 +223,8 @@ class Pricing:
             return None
 
     def context_window(self, model_name: str) -> int:
-        """The model's window: the newest one Antigravity reported for it, else pricing.json's `context_window`."""
-        return self.recorded_window(model_name) or self.listed_window(model_name)
+        """The model's window: the newest one Antigravity reported for it, else the client's, else pricing.json's."""
+        return self.recorded_window(model_name) or self.client_window(model_name) or self.listed_window(model_name)
 
     def compaction_threshold(self, model_name: str, window: Optional[int] = None) -> Optional[int]:
         win = window or self.context_window(model_name)
@@ -387,6 +422,139 @@ def hook_module(name: str):
         return None
 
 
+_CLIENT_UNSET = object()
+_CLIENT: object = _CLIENT_UNSET
+
+
+def client_snapshot() -> dict:
+    """What the Antigravity client says about its models (hooks/client.py `snapshot()`: the cached reading, else the
+    bundled one), read once per process. It only reads a file — never the network — so the panel, which loads this
+    script on every request, stays fast. {} without hooks/client.py or when nothing is readable."""
+    global _CLIENT
+    if _CLIENT is _CLIENT_UNSET:
+        snap: dict = {}
+        cl = hook_module("client")
+        try:
+            got = cl.snapshot() if cl else {}
+            snap = got if isinstance(got, dict) else {}
+        except Exception:
+            snap = {}
+        _CLIENT = snap
+    return _CLIENT if isinstance(_CLIENT, dict) else {}
+
+
+def _client_call(fn: str, *args, default=None):
+    """hooks/client.py `fn(*args)` when the snapshot has models, else `default` (never raises)."""
+    if not client_snapshot().get("models"):
+        return default
+    cl = hook_module("client")
+    f = getattr(cl, fn, None) if cl else None
+    try:
+        got = f(*args) if f else None
+    except Exception:
+        return default
+    return got if got else default
+
+
+def client_entry(model_name: str) -> dict:
+    """The client's entry for a model (by id, label or a loose key: hooks/client.py `model()`), or {}."""
+    got = _client_call("model", model_name, default=None) if model_name else None
+    return got if isinstance(got, dict) else {}
+
+
+def client_info() -> dict:
+    """For reports and the panel: the Antigravity version the model facts were read from and how fresh they are.
+    source «desktop»/«cli» = read from the running client, «bundled» = the snapshot shipped with the plugin, «pricing» =
+    no snapshot at all (pricing.json only)."""
+    snap = client_snapshot()
+    if not snap.get("models"):
+        return {"version": "", "source": "pricing", "at": None, "stale": True, "default": ""}
+    stale = True
+    cl = hook_module("client")
+    try:
+        stale = bool(cl.stale(snap)) if cl and hasattr(cl, "stale") else True
+    except Exception:
+        stale = True
+    at = snap.get("at")
+    return {"version": str(snap.get("client") or ""), "source": str(snap.get("source") or "bundled"),
+            "at": dt.datetime.fromtimestamp(at, dt.timezone.utc).isoformat() if isinstance(at, (int, float)) and at > 0 else None,
+            "stale": stale, "default": str(snap.get("default") or "")}
+
+
+def client_sig() -> str:
+    """What of the client's snapshot changes prices and windows: the recent list is computed again when it changes."""
+    snap = client_snapshot()
+    if not snap.get("models"):
+        return ""
+    return hashlib.sha1(json.dumps([snap.get("client"), snap.get("default"), snap.get("aliases"), snap.get("executor"),
+                                    {k_: [(v or {}).get("window"), (v or {}).get("family"), (v or {}).get("label")]
+                                     for k_, v in sorted((snap.get("models") or {}).items())}],
+                                   sort_keys=True, default=str).encode()).hexdigest()
+
+
+def default_model(pricing: "Pricing") -> str:
+    """The model a call is priced at when nothing names its own: the client's default agent model, else pricing.json's
+    `default_model` (the last resort, kept equal to the client's default at release)."""
+    return _client_call("default_model", default="") or pricing.cfg.get("default_model", "")
+
+
+def default_model_source(pricing: "Pricing") -> str:
+    return "client" if _client_call("default_model", default="") else "pricing"
+
+
+def executor_label() -> str:
+    """Orchestrator's executor as the client names it (`plan-execute-config`), else Hydrogen (Orchestrator)."""
+    ex = _client_call("executor", default={})
+    return str((ex or {}).get("label") or (ex or {}).get("id") or "") or EXECUTOR
+
+
+def runtime_of(path: str) -> str:
+    """«cli» for a conversation kept by the Antigravity CLI (~/.gemini/antigravity-cli/…), else «desktop»."""
+    compat = hook_module("compat")
+    fn = getattr(compat, "runtime", None) if compat else None
+    if fn:
+        try:
+            got = fn({"transcriptPath": path or ""})
+            if got in ("cli", "desktop"):
+                return got
+        except Exception:
+            pass
+    parts = re.split(r"[\\/]+", path or "")
+    return "cli" if CLI_ROOT_NAME in parts else "desktop"
+
+
+RUNTIME_LABEL = {"desktop": "Desktop", "cli": "CLI"}
+
+
+def models_note() -> str:
+    """One line on where the model facts (default model, windows, executor) come from."""
+    ci = client_info()
+    if ci["source"] == "pricing":
+        return "Данные о моделях: только pricing.json (снимка клиента нет)."
+    ver = f"Antigravity {ci['version']}" if ci["version"] else "Antigravity"
+    if ci["source"] == "bundled":
+        return f"Данные о моделях: встроенный снимок плагина ({ver})" + (", обновятся у запущенного клиента." if ci["stale"] else ".")
+    when = f" от {ci['at'][:10]}" if ci.get("at") else ""
+    return f"Данные о моделях: {ver}{when}" + (" (устарели, обновятся)." if ci["stale"] else ".")
+
+
+def default_roots() -> List[str]:
+    """Where conversations live: compat.data_dirs() (Desktop, then the CLI) plus any of PRODUCT_ROOTS it left out."""
+    out: List[str] = []
+    compat = hook_module("compat")
+    fn = getattr(compat, "data_dirs", None) if compat else None
+    if fn:
+        try:
+            out = [str(d) for d in (fn() or []) if d]
+        except Exception:
+            out = []
+    seen = {os.path.normcase(os.path.abspath(os.path.expanduser(d))) for d in out}
+    for r in PRODUCT_ROOTS:
+        if os.path.normcase(os.path.abspath(os.path.expanduser(r))) not in seen:
+            out.append(r)
+    return out
+
+
 def live_window(s: Session) -> Optional[int]:
     """The window Antigravity gave the conversation's latest model call (its generator metadata, asked once per
     process), or None when the language server can't be asked. A recent call's reading is recorded for the other
@@ -395,13 +563,14 @@ def live_window(s: Session) -> Optional[int]:
         return s.window or None
     s.window = 0
     cw = hook_module("context_window")
-    if not cw or not s.calls:
+    if not cw or not s.calls or s.runtime == "cli":  # a CLI run's own server is gone; Desktop's doesn't know it
         return None
     addr, token = _discover_ls()
     if not addr or not token:
         return None
     try:
-        g = cw.latest(s.conv_id, len(s.calls), (addr, token))
+        known = _META.get(s.conv_id)  # the whole metadata, already asked for the calls' models: its last call
+        g = known[-1] if known else cw.latest(s.conv_id, len(s.calls), (addr, token))
         when = {c.step: c.ts.timestamp() for c in s.calls if c.ts}
         found = cw.readings([g], when.get) if g else []
         if found:
@@ -424,17 +593,30 @@ def recorded_sig() -> str:
 def window_of(s: Session, pricing: "Pricing", live: bool = True) -> Tuple[int, str]:
     """(window, where it comes from) for the conversation's latest call: «antigravity» — what Antigravity gave that very
     call (live_window(); only when `live`), «recorded» — the newest window Antigravity reported for its model,
-    «pricing» — pricing.json's number."""
-    model = s.calls[-1].model if s.calls else pricing.cfg.get("default_model", "")
+    «client» — the client's snapshot of its models (before the model's first call), «pricing» — pricing.json's number."""
+    model = s.calls[-1].model if s.calls else default_model(pricing)
     win = live_window(s) if live and s.calls and not pricing.override else None  # --model: that model's window
     if win:
         return win, "antigravity"
     win = pricing.recorded_window(model)
-    return (win, "recorded") if win else (pricing.listed_window(model), "pricing")
+    if win:
+        return win, "recorded"
+    win = pricing.client_window(model)
+    return (win, "client") if win else (pricing.listed_window(model), "pricing")
+
+
+_META: Dict[str, List[dict]] = {}  # conversation → its generatorMetadata, asked once per process
 
 
 def _ls_metadata(conv_id: str) -> List[dict]:
     """A conversation's model calls as Antigravity's language server records them (generatorMetadata). [] if unreachable."""
+    if conv_id in _META:
+        return _META[conv_id]
+    _META[conv_id] = found = _ls_metadata_fetch(conv_id)
+    return found
+
+
+def _ls_metadata_fetch(conv_id: str) -> List[dict]:
     addr, token = _discover_ls()
     if not addr or not token or not UUID_RE.fullmatch(conv_id or ""):
         return []
@@ -477,6 +659,18 @@ def _ls_step_models(conv_id: str) -> Dict[int, str]:
     return out
 
 
+def step_model_name(st: dict) -> str:
+    """The model a PLANNER_RESPONSE step names itself (`"model": "gemini-4-hydrogen-medium"`, written by Desktop 2.35.2+
+    and the Antigravity CLI), shown by the client's label («Gemini 4 Hydrogen (Medium)») so it groups with the
+    conversations that name it by label; "" when the step names none."""
+    raw = st.get("model") or st.get("modelName")
+    if not isinstance(raw, str) or not raw.strip() or len(raw) > 120:
+        return ""
+    raw = raw.strip()
+    label = str(client_entry(raw).get("label") or "")
+    return label if label and normalize_model(str(client_entry(raw).get("id") or "")) == normalize_model(raw) else raw
+
+
 def orchestrated(model: str) -> bool:
     """Orchestrator (Carbon / Argon / Neon): a planner that hands routine steps to an executor."""
     return "orchestrator" in normalize_model(model)
@@ -492,8 +686,8 @@ def system_body(content: str) -> str:
 
 
 def handover_executor(content: str) -> Optional[str]:
-    """«Plan mode is off: this turn runs on <role>» opening a system message → the executor's model name (EXECUTOR
-    for «the execution model» or a role that isn't a model name); None when the message is not a hand-over."""
+    """«Plan mode is off: this turn runs on <role>» opening a system message → the executor's model name (the client's
+    executor, else EXECUTOR, for «the execution model» or a role that isn't a model name); None when not a hand-over."""
     body = system_body(content)
     if not HANDOVER_RE.match(body):
         return None
@@ -501,8 +695,8 @@ def handover_executor(content: str) -> Optional[str]:
     role = m.group("role").strip() if m else ""
     m_role = re.match(r"^the execution model\s*\((.+)\)$", role, re.I)
     if not role or role.lower() == "the execution model":
-        return EXECUTOR
-    return (m_role.group(1).strip() if m_role else role) or EXECUTOR
+        return executor_label()
+    return (m_role.group(1).strip() if m_role else role) or executor_label()
 
 
 def is_plan_review(content: str) -> bool:
@@ -553,7 +747,7 @@ def _transcript_has_plan_execute(steps: List[dict]) -> bool:
     return False
 
 
-def started_on(conv_id: str, pricing: Pricing) -> str:
+def started_on(conv_id: str, pricing: Pricing, ask_ls: bool = True) -> str:
     """The model of a conversation whose transcript names none (started through agentapi): the bridge's task record
     («Gemini 4 Carbon (High)»; an alias like flash_lite → its model), else Antigravity's metadata, cached."""
     rec = delegated_task(conv_id)
@@ -565,7 +759,7 @@ def started_on(conv_id: str, pricing: Pricing) -> str:
     known = _model_cache().get(conv_id)
     if known:
         return known
-    found = _ls_model(conv_id) if UUID_RE.fullmatch(conv_id or "") else ""
+    found = _ls_model(conv_id) if ask_ls and UUID_RE.fullmatch(conv_id or "") else ""
     if found:
         _remember_model(conv_id, found)
     return found
@@ -586,12 +780,12 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
                   seen: Optional[set] = None) -> Session:
     seen = seen if seen is not None else set()
     seen.add(conv_id)
-    s = Session(conv_id=conv_id, path=logs_dir)
+    s = Session(conv_id=conv_id, path=logs_dir, runtime=runtime_of(logs_dir))
     model = inherited_model or ""
     asked_antigravity = False  # the model of an agentapi-started conversation is looked up once, at its first call
     executing = False  # Orchestrator / plan-execute: executor carries out the planner's plan
-    executor_model = EXECUTOR
-    step_models: Optional[Dict[int, str]] = None  # Orchestrator: each call's model from Antigravity, asked once
+    executor_model = executor_label()
+    step_models: Optional[Dict[int, str]] = None  # each call's own model from Antigravity's metadata, asked once
     turn: Optional[Turn] = None
     pending_subagents: List[Tuple[int, dict]] = []  # (position of its invoke_subagent among the call's tool calls, args)
     call_queue: List[Tuple[int, dict]] = []  # the call's tool calls: their results come back as GENERIC steps in that order
@@ -628,7 +822,7 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
             if executing:
                 handback_model = executor_model
             executing = False
-            executor_model = EXECUTOR
+            executor_model = executor_label()
             continue
 
         if typ == "SYSTEM_MESSAGE" and st.get("source") != "SYSTEM_SDK":
@@ -665,20 +859,35 @@ def parse_session(conv_id: str, logs_dir: str, pricing: Pricing, roots: List[str
                 if turn is None:
                     turn = Turn(idx=1, text="(начало)", ts=ts)
                     s.turns.append(turn)
-                if not model and not asked_antigravity:
+                # Each call is priced at its own model (it can be switched mid-turn; Orchestrator's planner and
+                # executor alternate): the step's own `model` (Desktop 2.35.2+ and the CLI write it), else Antigravity's
+                # metadata; the transcript's markers, the bridge's record and the default model only fill the gaps.
+                own_model = step_model_name(st)
+                unknown_own = ""
+                if own_model and pricing.price_unknown(own_model) and not client_entry(own_model):
+                    # an id nothing recognises (a MODEL_PLACEHOLDER_* enum, a new internal id): the old chain decides,
+                    # and the id stands (as «цена неизвестна») only when that chain knows no model either
+                    unknown_own, own_model = own_model, ""
+                if not own_model and not model and not asked_antigravity:
                     asked_antigravity = True
-                    model = started_on(conv_id, pricing)
-                call_model = model
-                if plan_exec or (model and orchestrated(model)):
+                    model = started_on(conv_id, pricing, ask_ls=s.runtime != "cli")
+                meta_model = own_model
+                # older transcripts name no model per step: only Orchestrator's calls are then worth asking the
+                # whole metadata for (hooks and the panel never read a long conversation from its start otherwise)
+                if not meta_model and (plan_exec or (model and orchestrated(model))) and s.runtime != "cli":
                     if step_models is None:
                         step_models = _ls_step_models(conv_id)
-                    call_model = step_models.get(st.get("step_index", -1)) or (executor_model if executing else model)
+                    meta_model = step_models.get(st.get("step_index", -1), "")
+                call_model = meta_model or model
+                if not meta_model and (plan_exec or (model and orchestrated(model))):
+                    call_model = executor_model if executing else model
                     if not executing and handback_model and tools == ["enter_plan_mode"]:
-                        call_model = step_models.get(st.get("step_index", -1)) or handback_model  # the executor handing back
+                        call_model = handback_model  # the executor handing back
                 handback_model = ""
+                call_model = call_model or unknown_own
                 if not call_model:
                     s.guessed_calls += 1
-                c = Call(step=st.get("step_index", -1), ts=ts, model=call_model or pricing.cfg.get("default_model", "?"),
+                c = Call(step=st.get("step_index", -1), ts=ts, model=call_model or default_model(pricing) or "?",
                          input=int(st.get("input_tokens") or 0), cache_read=int(st.get("cache_read_tokens") or 0),
                          output=int(st.get("output_tokens") or 0), tools=tools, turn=turn.idx, guessed=not call_model)
                 pricing.price_call(c)
@@ -847,7 +1056,7 @@ def render_markdown(s: Session, pricing: Pricing, max_turns: int = 10) -> str:
     models = ", ".join(s.models) or "?"
     out.append("### 📊 Использование токенов — эта сессия")
     out.append("")
-    out.append(f"**Модель:** {models} · **Ходов:** {len(s.turns)} · **Вызовов модели:** {own.calls}"
+    out.append(f"**Модель:** {models} · **Среда:** {RUNTIME_LABEL.get(s.runtime, s.runtime)} · **Ходов:** {len(s.turns)} · **Вызовов модели:** {own.calls}"
                + (f" (+{subs.calls} у субагентов)" if subs.calls else "")
                + f" · **Длительность:** {duration(s.first_ts, s.last_ts)}")
     out.append("")
@@ -934,18 +1143,23 @@ def render_markdown(s: Session, pricing: Pricing, max_turns: int = 10) -> str:
             out.append("<sub>⚠️ Транскрипты субагентов недоступны из песочницы — перезапустите скрипт с BypassSandbox, чтобы включить их в итог.</sub>")
             out.append("")
 
-    unknown = sorted({c.model for c in s.calls if not pricing.is_priced(c.model)})
-    notes = [f"Цены из `pricing.json` (обновлён {pricing.cfg.get('_updated', '?')}); это эквивалент стоимости через API, а не ваш реальный счёт."]
+    unknown = sorted({c.model for c in s.calls if pricing.price_unknown(c.model)})
+    unpriced = sorted({c.model for c in s.calls if not pricing.is_priced(c.model) and not pricing.price_unknown(c.model)})
+    notes = [f"Цены из `pricing.json` (обновлён {pricing.cfg.get('_updated', '?')}); это эквивалент стоимости через API, а не ваш реальный счёт.",
+             models_note()]
     if any((pricing.lookup(c.model) or {}).get("uncached_input_as_cache_write") for c in s.calls):
         notes.append("Для Claude некэшированный ввод считается как запись в кэш (×1.25).")
     if pricing.service_tier not in (None, "standard"):
         notes.append(f"Тариф {pricing.service_tier.capitalize()} — для моделей, у которых он есть в pricing.json, остальные по Standard.")
     if unknown:
-        notes.append(f"Нет цены для: {', '.join(unknown)} — добавьте в pricing.json.")
+        notes.append(f"Цена неизвестна: {', '.join(unknown)} — этой модели и её семейства нет в pricing.json, "
+                     f"её токены в сумму не входят; добавьте цену в pricing.json.")
+    if unpriced:
+        notes.append(f"Без цены в pricing.json: {', '.join(unpriced)} — в сумму не входят.")
     if s.guessed_calls:
         notes.append(f"Модель не записана в транскрипт (так бывает у разговоров, запущенных через agentapi) — "
                      f"{ru_plural(s.guessed_calls, 'вызов оценён', 'вызова оценены', 'вызовов оценены')} "
-                     f"по цене {pricing.cfg.get('default_model', '?')}.")
+                     f"по цене {default_model(pricing) or '?'}.")
     out.append("<sub>" + " ".join(notes) + "</sub>")
     return "\n".join(out)
 
@@ -1058,7 +1272,7 @@ def render_all(roots: List[str], pricing: Pricing, days: Optional[int], limit: i
                 continue
             if cutoff and s.last_ts and s.last_ts < cutoff:
                 continue
-            rows.append((s, totals_of(s.calls), os.path.basename(os.path.expanduser(r))))
+            rows.append((s, totals_of(s.calls), s.runtime))
     if not rows:
         msg = "Нет данных."
         if errors:
@@ -1079,6 +1293,13 @@ def render_all(roots: List[str], pricing: Pricing, days: Optional[int], limit: i
     out.append("")
     out.append(f"**Сессий:** {len(rows)} · **Вызовов модели:** {grand.calls} · **Токенов:** {n(grand.total)} · "
                f"**≈ API-цена:** {usd(grand.cost)} · **Кэш:** {grand.hit_rate:.0%}")
+    by_rt: Dict[str, Totals] = {}
+    for s, t, rt in rows:
+        by_rt.setdefault(rt, Totals()).merge(t)
+    if set(by_rt) - {"desktop"}:  # the CLI's conversations too: say how the total splits
+        out.append("")
+        out.append("**По среде:** " + " · ".join(f"{RUNTIME_LABEL.get(rt, rt)} — {len([1 for r_ in rows if r_[2] == rt])} "
+                                               f"сесс., {usd(t.cost)}" for rt, t in sorted(by_rt.items())))
     out.append("")
     out.append("#### По дням")
     out.append("")
@@ -1094,16 +1315,19 @@ def render_all(roots: List[str], pricing: Pricing, days: Optional[int], limit: i
     out.append("| Модель | Вызовов | Токены | $ |")
     out.append("|:--|--:|--:|--:|")
     for m, t in sorted(by_model.items(), key=lambda x: -x[1].cost):
-        out.append(f"| {m} | {t.calls} | {k(t.total)} | {usd(t.cost)} |")
+        price = usd(t.cost) if pricing.is_priced(m) else ("цена неизвестна" if pricing.price_unknown(m) else "без цены")
+        out.append(f"| {m} | {t.calls} | {k(t.total)} | {price} |")
     out.append("")
     out.append(f"#### Сессии (последние {min(limit, len(rows))})")
     out.append("")
-    out.append("| Когда | Сессия | Вызовов | Токены | $ |")
-    out.append("|:--|:--|--:|--:|--:|")
-    for s, t, _ in rows[:limit]:
+    out.append("| Когда | Сессия | Среда | Вызовов | Токены | $ |")
+    out.append("|:--|:--|:--|--:|--:|--:|")
+    for s, t, rt in rows[:limit]:
         when = s.last_ts.astimezone().strftime("%m-%d %H:%M") if s.last_ts else "?"
         out.append(f"| {when} | [{short(s.title or s.conv_id, 50).replace('|', '∣')}](conversation://{s.conv_id}) | "
-                   f"{t.calls} | {k(t.total)} | {usd(t.cost)} |")
+                   f"{RUNTIME_LABEL.get(rt, rt)} | {t.calls} | {k(t.total)} | {usd(t.cost)} |")
+    out.append("")
+    out.append("<sub>" + models_note() + "</sub>")
     if errors:
         out.append("")
         out.append(f"<sub>Нет доступа к: {', '.join(errors)}</sub>")
@@ -1113,7 +1337,7 @@ def render_all(roots: List[str], pricing: Pricing, days: Optional[int], limit: i
 # ─────────────────────────────── JSON (side panel) ─────────────────────────
 
 CACHE_PATH = os.path.expanduser("~/.gemini/antigravity-plus/usage-cache.json")
-CACHE_VERSION = 9  # 5: Orchestrator; 6: configurable Orchestrator & CLI override; 7: Subagents array + role parens; 8: body-anchored hand-over markers, subagent results by position; 9: windows Antigravity reported (window_source)
+CACHE_VERSION = 10  # 5: Orchestrator; 6: configurable Orchestrator & CLI override; 7: Subagents array + role parens; 8: body-anchored hand-over markers, subagent results by position; 9: windows Antigravity reported (window_source); 10: client snapshot (window_source «client», per-call metadata models, runtime, unknown_price_models)
 
 
 def _iso(ts: Optional[dt.datetime]) -> Optional[str]:
@@ -1149,8 +1373,13 @@ def _context(s: Session, pricing: Pricing, live: bool = False) -> Optional[dict]
     last = s.calls[-1]
     win, source = window_of(s, pricing, live)
     comp = pricing.compaction_threshold(last.model, win)
+    e = client_entry(last.model)
+    fam = (client_snapshot().get("families") or {}).get(str(e.get("family") or "")) or {}
     res = {"current": last.prompt, "peak": max(c.prompt for c in s.calls), "window": win, "window_source": source,
-           "model": last.model, "fraction": round(last.prompt / win, 4) if win else None}
+           "model": last.model, "fraction": round(last.prompt / win, 4) if win else None,
+           # the panel marks the quota group of this model by these (the client's own words for its family)
+           "provider": str(e.get("provider") or fam.get("provider") or ""),
+           "family_label": str(e.get("family_label") or fam.get("label") or "")}
     if comp:
         res["compaction"] = comp
     return res
@@ -1185,8 +1414,12 @@ def session_json(s: Session, pricing: Pricing) -> dict:
         "tools": dict(sorted(tools.items(), key=lambda x: -x[1])),
         "subagents": sub_rows,
         "unpriced_models": sorted({c.model for c in _all_calls(s) if not pricing.is_priced(c.model)}),
+        "unknown_price_models": sorted({c.model for c in _all_calls(s) if pricing.price_unknown(c.model)}),
         "model_guessed_calls": s.guessed_calls,
-        "default_model": pricing.cfg.get("default_model", ""),
+        "default_model": default_model(pricing),
+        "default_model_source": default_model_source(pricing),
+        "runtime": s.runtime,
+        "client": client_info(),
         "pricing_updated": pricing.cfg.get("_updated", ""),
     }
 
@@ -1206,7 +1439,9 @@ def _summary(s: Session, pricing: Pricing) -> dict:
     return {"id": s.conv_id, "title": s.title, "first_ts": _iso(s.first_ts), "last_ts": _iso(s.last_ts),
             "cost": round(grand.cost, 6), "tokens": grand.total, "calls": grand.calls, "turns": len(s.turns),
             "models": s.models, "context": _context(s, pricing), "model_guessed": s.guessed_calls > 0,
-            "unpriced_models": sorted({c.model for c in calls if not pricing.is_priced(c.model)}), "buckets": buckets}
+            "runtime": s.runtime,
+            "unpriced_models": sorted({c.model for c in calls if not pricing.is_priced(c.model)}),
+            "unknown_price_models": sorted({c.model for c in calls if pricing.price_unknown(c.model)}), "buckets": buckets}
 
 
 def _signature(logs: str, roots: List[str]) -> str:
@@ -1235,7 +1470,7 @@ def recent_json(roots: List[str], pricing: Pricing, limit: int = 15, days: int =
         with open(pricing.path, "rb") as f:
             compact_ovr = os.environ.get("AGY_CLI_AUTO_COMPACT_OVERRIDE") or ""
             pricing_sig = hashlib.sha1(
-                f.read() + f"{pricing.override or ''}|{pricing.service_tier or ''}|{compact_ovr}|{recorded_sig()}".encode()
+                f.read() + f"{pricing.override or ''}|{pricing.service_tier or ''}|{compact_ovr}|{recorded_sig()}|{client_sig()}".encode()
             ).hexdigest()
     except OSError:
         pricing_sig = ""
@@ -1302,12 +1537,14 @@ def recent_json(roots: List[str], pricing: Pricing, limit: int = 15, days: int =
     day_keys = [(now - dt.timedelta(days=i)).strftime("%Y-%m-%d") for i in range(days - 1, -1, -1)]
     by_day = {d: [0.0, 0, 0] for d in day_keys}
     by_model: Dict[str, List[float]] = {}
+    by_runtime: Dict[str, List[float]] = {}
     for summ in summaries:
+        rt = summ.get("runtime") or "desktop"
         for key, (cost, tokens, calls) in (summ.get("buckets") or {}).items():
             day, model = key.split("|", 1)
             if day not in by_day:
                 continue
-            for b in (by_day[day], by_model.setdefault(model, [0.0, 0, 0])):
+            for b in (by_day[day], by_model.setdefault(model, [0.0, 0, 0]), by_runtime.setdefault(rt, [0.0, 0, 0])):
                 b[0] += cost
                 b[1] += tokens
                 b[2] += calls
@@ -1323,10 +1560,15 @@ def recent_json(roots: List[str], pricing: Pricing, limit: int = 15, days: int =
         "by_day": [{"day": d, **agg(by_day[d])} for d in day_keys],
         # a leading "?" marks calls whose model the transcript never named (priced as default_model)
         "by_model": [{"model": m.lstrip("?"), "guessed": m.startswith("?"), "priced": pricing.is_priced(m.lstrip("?")),
+                      "unknown": pricing.price_unknown(m.lstrip("?")),
                       **agg(b)} for m, b in sorted(by_model.items(), key=lambda x: -x[1][0])],
+        "by_runtime": {rt: agg(b) for rt, b in sorted(by_runtime.items())},
         "conversations": [{k_: v for k_, v in summ.items() if k_ != "buckets"} for summ in summaries[:limit]],
         "errors": errors,
         "pricing_updated": pricing.cfg.get("_updated", ""),
+        "default_model": default_model(pricing),
+        "default_model_source": default_model_source(pricing),
+        "client": client_info(),
         "update": update_info(),
     }
 
@@ -1358,13 +1600,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--tier", choices=["standard", "batch", "flex", "priority", "contributor"],
                     help="Gemini API service tier; models without it in pricing.json keep standard prices")
     ap.add_argument("--pricing", default=DEFAULT_PRICING, help="path to pricing.json")
-    ap.add_argument("--root", action="append", help="product data root(s), default: ~/.gemini/antigravity{,-cli,-ide}")
+    ap.add_argument("--root", action="append", help="product data root(s), default: Antigravity's data folders "
+                                                    "(compat.data_dirs()) and ~/.gemini/antigravity{,-cli,-ide}")
     ap.add_argument("--html", help="also write a compact HTML dashboard to this path")
     ap.add_argument("--json", action="store_true", help="print the session as JSON (used by the side panel)")
     ap.add_argument("--recent", type=int, metavar="N", help="JSON: N recent conversations + today / --days totals")
     a = ap.parse_args(argv)
 
-    roots = a.root or PRODUCT_ROOTS
+    roots = a.root or default_roots()
     pricing = Pricing(a.pricing, a.model, a.tier)
 
     if a.recent:

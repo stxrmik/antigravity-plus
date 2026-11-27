@@ -3,7 +3,7 @@ name: schedule-task
 description: >-
   Manages quota-aware scheduled Antigravity automations (Antigravity's own `"builtin": "schedule"` sidecars in
   `~/.gemini/config/sidecars/agp-<slug>/sidecar.json`) with a `RetrieveUserQuotaSummary` quota gate (`list`, `gate`,
-  `create`, `remove`). `list` and `gate` are read-only; `create` and `remove` run ONLY when the user explicitly asks
+  `create`, `remove`); Antigravity Desktop only — the Antigravity CLI has no automations. `list` and `gate` are read-only; `create` and `remove` run ONLY when the user explicitly asks
   (an automation starts recurring background agent runs that spend plan quota).
 ---
 
@@ -12,6 +12,8 @@ description: >-
 > **Read-only vs. mutating commands:**
 > - `list` and `gate` are **read-only** and safe to run whenever inspecting scheduled tasks or checking quota thresholds.
 > - `create` and `remove` run **only when the user explicitly asks**. Antigravity Plus's guard asks the user to confirm every `schedule_task.py create|remove` and any write under `~/.gemini/config/sidecars`, so creating or deleting an automation is always the user's decision.
+
+Automations are Antigravity App sidecars: the Antigravity CLI (`agy`) has none, and on a computer with only the CLI `create` refuses with an explanation instead of writing a file nothing loads.
 
 Helper: `python3 "<skill_dir>/scripts/schedule_task.py"` (below: `schedule_task.py`).
 Because it reads/writes `~/.gemini/config/sidecars/` (outside the workspace) and queries Antigravity's local Language Server, run commands with `BypassSandbox: true` when sandbox blocks home/localhost access.

@@ -408,6 +408,57 @@ answer("Постеры: `.../12345/a1b2c3d4.jpeg`, `…/67890/e5f6a7b8.jpeg` и 
 reason = stop(roots=[REPO])[0]
 check("a path elided with «...» or «…» isn't named missing — an invented one still is", "12345" not in reason
       and "67890" not in reason and "a/b.png" not in reason and "nosuch/app.py" in reason, reason)
+# A path the agent's own script creates while it runs (a probe's temporary `.agents/hooks.json`) was named «no such
+# file or folder», and the agent wrote its whole report a second time (seen live). Written into a file it wrote, or
+# into a command — as is, or as the quoted parts of a join — it isn't made up.
+start("authored-path")
+add("PLANNER_RESPONSE", calls=[("write_file", {"Path": os.path.join(WS, "probe.py"), "Content":
+    'HOOKS = os.path.join(ws, ".agents", "hooks.json")\nOUT = "tmp/dump/env.json"\n'})])
+add("GENERIC", content="Created file")
+cmd("mkdir -p build/out && python3 probe.py > build/out/probe.log")
+answer("Добавил `probe.py`: пишет временный `.agents/hooks.json`, дамп в `tmp/dump/env.json`, лог — `build/out/probe.log`; "
+       "конфиг в `conf/invented.json`.")
+reason = "\n".join(direct())
+check("a path the agent wrote into a file or a command isn't named missing", ".agents/hooks.json" not in reason
+      and "tmp/dump/env.json" not in reason and "build/out/probe.log" not in reason, reason)
+check("…one it wrote nowhere still is", "conf/invented.json" in reason, reason)
+start("authored-word")
+add("PLANNER_RESPONSE", calls=[("run_command", {"CommandLine": "cat myconf/app.json.bak"})])
+answer("Настройки — в `conf/app.json`.")
+check("…a longer name that merely contains it doesn't count", "conf/app.json" in "\n".join(direct()))
+# A path the agent read here (the docs of a tool not installed on this machine) and a host written as a path.
+start("read-path")
+cmd("cat docs/cli.md", output="The CLI keeps its settings in ~/.toolcli/settings.json and caches in cache/toolcli/staging.")
+answer("По документации настройки в `~/.toolcli/settings.json`, кэш — `cache/toolcli/staging/`; установщик — "
+       "`claude.ai/install.sh` и `antigravity.google/cli/install.sh`.")
+check("…a path from what it read, or a host written as a path, isn't named missing", not direct(), direct())
+# A report that says the run failed claims no success: «FAIL (41 passed, 1 failed)» was sent back (seen live).
+start("own-failure")
+edit(os.path.join(WS, "app", "sort.py"))
+cmd("python3 -m pytest -q", code=1, output="41 passed, 1 failed in 0.4s")
+answer("- `pytest -q` → FAIL (41 passed, 1 failed): один тест ещё падает.")
+check("a report of a failed run isn't a claim that tests pass", not direct(), direct())
+start("own-failure-still")
+edit(os.path.join(WS, "app", "sort.py"))
+answer("Готово: 41 passed.")
+check("…«41 passed» with no run still is", direct())
+# Plain text glued to a code span («state/`guard.log`») is no path to look for (the code span alone is checked).
+start("glued-span")
+answer("Проверка per-conversation state/`guard.log` и `stats/`; файл — `app/sort.py`.")
+check("«word/`code`» isn't read as one path", not any("guard.log" in p for p in direct()), direct())
+# This hook's own message names the missing path: it isn't evidence for the next report.
+start("own-note")
+add("SYSTEM_MESSAGE", content="<SYSTEM_MESSAGE>\nStop hook blocked termination: Antigravity Plus — facts: parts of your "
+                              "report aren't backed by anything in this conversation:\n- 99.1.7 — versions or prices"
+                              "\n</SYSTEM_MESSAGE>")
+check("the Stop hook's own words don't make it into the evidence", "99.1.7" not in facts.scan(tp)["seen"])
+# Sent back once over a missing path, the agent fixed one line and kept the other: what it was told already isn't
+# told again (no loop of rewritten reports).
+start("told-once")
+answer("См. `nosuch/a.py` и `nosuch/b.py`.")
+first = stop()[0]
+answer("См. `nosuch/a.py`.")
+check("a problem already named in this turn isn't named again", "nosuch/a.py" in first and not stop(execution=1)[0], first)
 
 # ── links and recalled facts ──
 start("url", "Какая последняя версия fastcache?")

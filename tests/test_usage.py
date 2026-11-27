@@ -32,8 +32,8 @@ expected = [
     ("Gemini 3.8 Flash (High)", "gemini-3.8-flash", 0.75, 3.75, 0.075, 256_000, None),
     ("gemini-3.8-flash-tiered", "gemini-3.8-flash", 0.75, 3.75, 0.075, 256_000, None),
     ("Gemini 3.6 Flash (Low)", "gemini-3.6-flash", 0.75, 3.75, 0.075, 256_000, None),
-    ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite", 0.30, 2.50, 0.03, 512_000, None),
-    ("Gemini 3.5 Flash Lite", "gemini-3.5-flash-lite", 0.30, 2.50, 0.03, 512_000, None),
+    ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite", 0.30, 2.50, 0.03, 128_000, None),  # the client's window (2.35.2)
+    ("Gemini 3.5 Flash Lite", "gemini-3.5-flash-lite", 0.30, 2.50, 0.03, 128_000, None),
     ("gemini-3.1-flash-lite", "gemini-3.1-flash-lite", 0.25, 1.50, 0.025, 128_000, None),
     ("Gemini 3.1 Pro (High)", "gemini-3-pro", 2.0, 12.0, 0.20, 256_000, None),
     ("gemini-3-flash-preview", "gemini-3-flash", 0.50, 3.0, 0.05, 256_000, None),
@@ -64,8 +64,8 @@ for raw_name, want_id, want_in, want_out, want_cr, want_win, want_comp in expect
 # 2. Subagent model aliases match Antigravity 2.x tiers
 check("subagent aliases: flash_lite / flash / pro",
       p.alias("flash_lite") == "gemini-3.5-flash-lite"
-      and p.alias("flash") == "gemini-4-hydrogen"  # since 2026-11: subagents with Model: flash run Hydrogen (High)
-      and p.alias("pro") == "gemini-4-hydrogen",   # verified 2026-11-24: Model: pro runs Hydrogen (XHigh)
+      and p.alias("flash") == "gemini-4-hydrogen-tiered-high"  # the client's tieredModelIds (2.35.2): Hydrogen (High)
+      and p.alias("pro") == "gemini-4-hydrogen-tiered-xhigh",  # … and Hydrogen (XHigh)
       p.cfg.get("subagent_model_aliases"))
 
 # 2b. GPT-OSS 120B keeps its 80k window while remaining unpriced, and AGY_CLI_AUTO_COMPACT_OVERRIDE works
@@ -510,5 +510,373 @@ for doc_path in (os.path.join(PLUGIN, "skills", "usage", "SKILL.md"), PRICING):
     check(f"{os.path.basename(doc_path)}: the override is described as an Antigravity CLI setting",
           at >= 0 and "CLI" in doc_text[max(0, at - 90):at + 110], doc_text[max(0, at - 90):at + 110])
 
+# ─── 15. Client snapshot, per-call models, unknown prices, and Antigravity CLI ───
+check("CACHE_VERSION is 10", usage.CACHE_VERSION == 10, usage.CACHE_VERSION)
+
+# 15.1 Default model: bundled snapshot vs pricing.json fallback + guessed calls
+check("default_model uses bundled snapshot (gemini-4-neon-high, source=client)",
+      usage.default_model(p) == "gemini-4-neon-high" and usage.default_model_source(p) == "client",
+      (usage.default_model(p), usage.default_model_source(p)))
+try:
+    usage._CLIENT = {}
+    check("default_model falls back to pricing.json when _CLIENT={} (source=pricing)",
+          usage.default_model(p) == p.cfg.get("default_model") and usage.default_model_source(p) == "pricing",
+          (usage.default_model(p), usage.default_model_source(p)))
+finally:
+    usage._CLIENT = usage._CLIENT_UNSET
+
+gcid = "aaaaaaaa-0000-1111-2222-000000000001"
+glogs = os.path.join(SP, "brain", gcid, ".system_generated", "logs")
+os.makedirs(glogs, exist_ok=True)
+gsteps = [
+    {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-27T10:00:00Z",
+     "content": "<USER_REQUEST>Hi</USER_REQUEST>"},
+    {"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-11-27T10:00:01Z",
+     "input_tokens": 1_000_000, "cache_read_tokens": 0, "output_tokens": 100_000},
+]
+with open(os.path.join(glogs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s_, ensure_ascii=False) for s_ in gsteps) + "\n")
+saved_no_ls = os.environ.get("AGP_USAGE_NO_LS")
+os.environ["AGP_USAGE_NO_LS"] = "1"
+try:
+    usage._META.clear()
+    gsess = usage.parse_session(gcid, glogs, p, [SP])
+finally:
+    if saved_no_ls is None:
+        os.environ.pop("AGP_USAGE_NO_LS", None)
+    else:
+        os.environ["AGP_USAGE_NO_LS"] = saved_no_ls
+want_neon_cost = 1.0 * 3.0 + 0.1 * 15.0  # Neon: $3/M in, $15/M out
+check("unnamed model transcript guesses default_model and prices as Neon",
+      len(gsess.calls) == 1 and gsess.calls[0].guessed and gsess.guessed_calls == 1
+      and gsess.calls[0].model == "gemini-4-neon-high" and abs(gsess.calls[0].cost - want_neon_cost) < 1e-6,
+      (gsess.calls, gsess.guessed_calls))
+
+# 15.2 Aliases: bundled snapshot vs pricing.json fallback
+snap_aliases = usage.client_snapshot().get("aliases") or {}
+check("aliases match bundled snapshot",
+      p.alias("flash") == snap_aliases.get("flash") and p.alias("pro") == snap_aliases.get("pro"),
+      (p.alias("flash"), p.alias("pro"), snap_aliases))
+try:
+    usage._CLIENT = {}
+    cfg_aliases = p.cfg.get("subagent_model_aliases") or {}
+    check("aliases fall back to pricing.json when _CLIENT={}",
+          p.alias("flash") == cfg_aliases.get("flash") and p.alias("pro") == cfg_aliases.get("pro"),
+          (p.alias("flash"), p.alias("pro"), cfg_aliases))
+finally:
+    usage._CLIENT = usage._CLIENT_UNSET
+
+# 15.3 Unknown price + family fallback
+ucid = "aaaaaaaa-0000-1111-2222-000000000002"
+ulogs = os.path.join(SP, "brain", ucid, ".system_generated", "logs")
+os.makedirs(ulogs, exist_ok=True)
+usteps = [
+    {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-27T10:00:00Z",
+     "content": "<USER_REQUEST>Test unknown</USER_REQUEST>"},
+    {"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-11-27T10:00:01Z",
+     "model": "gemini-9-xenon-high", "input_tokens": 10000, "cache_read_tokens": 0, "output_tokens": 500},
+]
+with open(os.path.join(ulogs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s_, ensure_ascii=False) for s_ in usteps) + "\n")
+usess = usage.parse_session(ucid, ulogs, p, [SP])
+ujson = usage.session_json(usess, p)
+umd = usage.render_markdown(usess, p)
+check("unknown model has price_unknown=True, cost=0, and appears in JSON & markdown",
+      p.price_unknown("gemini-9-xenon-high") and usess.calls[0].cost == 0.0
+      and "gemini-9-xenon-high" in ujson.get("unknown_price_models", [])
+      and "Цена неизвестна" in umd,
+      (p.price_unknown("gemini-9-xenon-high"), ujson.get("unknown_price_models")))
+
+known_models = [
+    "claude-opus-5-5-max",
+    "gemini-4-hydrogen-sonar",
+    "gemini-4-hydrogen-tiered-xhigh",
+    "gemini-3.8-flash-tiered",
+    "gemini-flash-worker-agy",
+]
+check("known variants and tiered/worker models are priced (not unknown)",
+      all(p.is_priced(m_) and not p.price_unknown(m_) for m_ in known_models),
+      [(m_, p.is_priced(m_), p.price_unknown(m_)) for m_ in known_models])
+
+with open(os.path.join(PLUGIN, "hooks", "client-snapshot.json"), encoding="utf-8") as f:
+    fam_snap = json.load(f)
+fam_snap["v"] = 1
+fam_snap["models"]["gemini-7-foo-high"] = {
+    "id": "gemini-7-foo-high",
+    "label": "Gemini 7 Foo (High)",
+    "family": "gemini-4-hydrogen",
+    "family_label": "Gemini 4 Hydrogen",
+}
+fam_snap_path = os.path.join(SP, "family-snap.json")
+with open(fam_snap_path, "w", encoding="utf-8") as f:
+    json.dump(fam_snap, f)
+fcid = "aaaaaaaa-0000-1111-2222-000000000003"
+flogs = os.path.join(SP, "brain", fcid, ".system_generated", "logs")
+os.makedirs(flogs, exist_ok=True)
+fsteps = [
+    {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-27T10:00:00Z",
+     "content": "<USER_REQUEST>Family fallback</USER_REQUEST>"},
+    {"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-11-27T10:00:01Z",
+     "model": "gemini-7-foo-high", "input_tokens": 1_000_000, "cache_read_tokens": 0, "output_tokens": 100_000},
+]
+with open(os.path.join(flogs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s_, ensure_ascii=False) for s_ in fsteps) + "\n")
+fam_env = dict(os.environ, AGP_CLIENT_CACHE=fam_snap_path, AGP_USAGE_NO_LS="1")
+fam_res = subprocess.run([sys.executable, os.path.join(USAGE_DIR, "usage.py"), "--transcript",
+                          os.path.join(flogs, "transcript_full.jsonl"), "--json"],
+                         capture_output=True, text=True, encoding="utf-8", env=fam_env)
+fam_data = json.loads(fam_res.stdout) if fam_res.returncode == 0 and fam_res.stdout.strip() else {}
+want_hyd_cost = 1.0 * 1.50 + 0.1 * 7.50  # Hydrogen: $1.50/M in, $7.50/M out
+check("family fallback prices gemini-7-foo-high as gemini-4-hydrogen",
+      fam_res.returncode == 0 and fam_data.get("unknown_price_models") == []
+      and abs((fam_data.get("totals") or {}).get("cost", 0) - want_hyd_cost) < 1e-6,
+      (fam_res.returncode, fam_data.get("totals"), fam_data.get("unknown_price_models")))
+
+# 15.4 Per-call model: step model field, mid-turn switch, and metadata path
+mcid = "aaaaaaaa-0000-1111-2222-000000000004"
+mlogs = os.path.join(SP, "brain", mcid, ".system_generated", "logs")
+os.makedirs(mlogs, exist_ok=True)
+msteps = [
+    {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-27T10:00:00Z",
+     "content": "<USER_REQUEST>Switch mid-turn</USER_REQUEST>"},
+    {"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-11-27T10:00:01Z",
+     "model": "gemini-4-hydrogen-low", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100},
+    {"step_index": 2, "type": "PLANNER_RESPONSE", "created_at": "2026-11-27T10:00:02Z",
+     "model": "claude-sonnet-5-5-medium", "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100},
+]
+with open(os.path.join(mlogs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s_, ensure_ascii=False) for s_ in msteps) + "\n")
+msess = usage.parse_session(mcid, mlogs, p, [SP])
+want_m1 = 1000 * 1.5 / 1e6 + 100 * 7.5 / 1e6
+want_m2 = 1000 * 2.5 / 1e6 + 100 * 10.0 / 1e6
+check("per-call model field maps to client label and prices mid-turn switch separately",
+      len(msess.turns) == 1
+      and [(c.step, c.model) for c in msess.calls] == [
+          (1, "Gemini 4 Hydrogen (Low)"),
+          (2, "Claude Sonnet 5.5 (Medium)"),
+      ]
+      and abs(msess.calls[0].cost - want_m1) < 1e-9
+      and abs(msess.calls[1].cost - want_m2) < 1e-9,
+      [(c.step, c.model, c.cost) for c in msess.calls])
+
+tcid = "aaaaaaaa-0000-1111-2222-000000000005"
+tlogs = os.path.join(SP, "brain", tcid, ".system_generated", "logs")
+os.makedirs(tlogs, exist_ok=True)
+tsteps = [
+    {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-27T10:00:00Z",
+     "content": "<USER_REQUEST>Meta models</USER_REQUEST>\nModel Selection` from None to Orchestrator (Neon)."},
+    call_step(1, ["read_file"]),
+    {"step_index": 2, "type": "GENERIC", "created_at": "2026-11-27T10:00:02Z", "content": "ok"},
+    call_step(3, ["edit_file"]),
+]
+with open(os.path.join(tlogs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s_, ensure_ascii=False) for s_ in tsteps) + "\n")
+real_meta_fetch = usage._ls_metadata_fetch
+try:
+    usage._META.clear()
+    usage._ls_metadata_fetch = lambda cid_: [
+        {"chatModel": {"modelDisplayName": "Gemini 4 Neon (Low)"}, "stepIndices": [1]},
+        {"chatModel": {"modelDisplayName": "Claude Sonnet 5.5 (Medium)"}, "stepIndices": [3]},
+    ]
+    tsess = usage.parse_session(tcid, tlogs, p, [SP])
+finally:
+    usage._ls_metadata_fetch = real_meta_fetch
+    usage._META.clear()
+check("metadata path overrides Model Selection per step",
+      [(c.step, c.model) for c in tsess.calls] == [
+          (1, "Gemini 4 Neon (Low)"),
+          (3, "Claude Sonnet 5.5 (Medium)"),
+      ],
+      [(c.step, c.model) for c in tsess.calls])
+
+# the same transcript, not Orchestrator, naming no model per step: the whole metadata is never asked for (hooks and the
+# panel don't read a long conversation from its start); and a CLI conversation never asks Desktop's server at all
+asked_meta = []
+try:
+    usage._META.clear()
+    usage._ls_metadata_fetch = lambda cid_: asked_meta.append(cid_) or []
+    with open(os.path.join(tlogs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+        f.write("\n".join(json.dumps(dict(s_, content=s_["content"].replace("Orchestrator (Neon)", "Gemini 4 Hydrogen (High)"))
+                                     if s_["step_index"] == 0 else s_, ensure_ascii=False) for s_ in tsteps) + "\n")
+    psess = usage.parse_session(tcid, tlogs, p, [SP])
+    ccid = "aaaaaaaa-0000-1111-2222-000000000006"
+    clogs = os.path.join(SP, "antigravity-cli", "brain", ccid, ".system_generated", "logs")
+    os.makedirs(clogs, exist_ok=True)
+    with open(os.path.join(clogs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+        f.write("\n".join(json.dumps(s_, ensure_ascii=False) for s_ in tsteps[1:]) + "\n")  # no model named anywhere
+    csess = usage.parse_session(ccid, clogs, p, [os.path.join(SP, "antigravity-cli")])
+    cwin = usage.live_window(csess)
+finally:
+    usage._ls_metadata_fetch = real_meta_fetch
+    usage._META.clear()
+check("plain conversation without per-step models: no full metadata read; CLI: Desktop's server never asked",
+      asked_meta == [] and [c.model for c in psess.calls] == ["Gemini 4 Hydrogen (High)"] * 2
+      and csess.runtime == "cli" and cwin is None and all(c.guessed for c in csess.calls),
+      (asked_meta, [c.model for c in psess.calls], csess.runtime, cwin))
+
+# 15.5 Orchestrator executor from client snapshot
+xcid = "aaaaaaaa-0000-1111-2222-000000000006"
+xlogs = os.path.join(SP, "brain", xcid, ".system_generated", "logs")
+os.makedirs(xlogs, exist_ok=True)
+with open(os.path.join(cann, f"{xcid}.pbtxt"), "w", encoding="utf-8") as f:
+    f.write('title:"ExecSnap" plan_execute:true')
+xsteps = [
+    {"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-27T10:00:00Z",
+     "content": "<USER_REQUEST>Plan it</USER_REQUEST>\nModel Selection` from None to Claude Opus 5.5 (High)."},
+    call_step(1, ["exit_plan_mode"]),
+    {"step_index": 2, "type": "SYSTEM_MESSAGE", "source": "SYSTEM", "created_at": "2026-11-27T10:00:02Z",
+     "content": WRAP % "Plan mode is off: this turn runs on the execution model."},
+    call_step(3, ["edit_file"], out=1000),
+]
+with open(os.path.join(xlogs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s_, ensure_ascii=False) for s_ in xsteps) + "\n")
+os.environ["AGP_USAGE_NO_LS"] = "1"
+try:
+    usage._META.clear()
+    xsess = usage.parse_session(xcid, xlogs, p, [SP])
+finally:
+    if saved_no_ls is None:
+        os.environ.pop("AGP_USAGE_NO_LS", None)
+    else:
+        os.environ["AGP_USAGE_NO_LS"] = saved_no_ls
+check("plan_execute executor defaults to executor_label()",
+      usage.executor_label() == "Gemini 4 Hydrogen (Orchestrator)"
+      and [(c.step, c.model) for c in xsess.calls] == [
+          (1, "Claude Opus 5.5 (High)"),
+          (3, "Gemini 4 Hydrogen (Orchestrator)"),
+      ],
+      (usage.executor_label(), [(c.step, c.model) for c in xsess.calls]))
+
+with open(os.path.join(PLUGIN, "hooks", "client-snapshot.json"), encoding="utf-8") as f:
+    ex_snap = json.load(f)
+ex_snap["v"] = 1
+ex_snap["executor"] = {"id": "claude-sonnet-5-5-medium", "label": "Claude Sonnet 5.5 (Medium)"}
+ex_snap_path = os.path.join(SP, "exec-snap.json")
+with open(ex_snap_path, "w", encoding="utf-8") as f:
+    json.dump(ex_snap, f)
+ex_env = dict(os.environ, AGP_CLIENT_CACHE=ex_snap_path, AGP_USAGE_NO_LS="1")
+ex_res = subprocess.run([sys.executable, os.path.join(USAGE_DIR, "usage.py"), "--transcript",
+                         os.path.join(xlogs, "transcript_full.jsonl"), "--root", SP, "--json"],
+                        capture_output=True, text=True, encoding="utf-8", env=ex_env)
+ex_data = json.loads(ex_res.stdout) if ex_res.returncode == 0 and ex_res.stdout.strip() else {}
+# Step 1: Opus 5.5 (1000*5/1e6 + 100*20/1e6 = 0.007); Step 3: Sonnet 5.5 (1000*2.5/1e6 + 1000*10/1e6 = 0.0125)
+want_ex_total = 0.007 + 0.0125
+check("custom snapshot executor prices execution calls as Sonnet",
+      ex_res.returncode == 0
+      and ex_data.get("models") == ["Claude Opus 5.5 (High)", "Claude Sonnet 5.5 (Medium)"]
+      and abs((ex_data.get("totals") or {}).get("cost", 0) - want_ex_total) < 1e-9,
+      (ex_res.returncode, ex_data.get("models"), ex_data.get("totals")))
+
+# 15.6 Antigravity CLI conversations (--recent, --all, runtime_of, empty CLI root)
+rt_base = os.path.join(SP, "rt_roots")
+desk_root = os.path.join(rt_base, "antigravity")
+cli_root = os.path.join(rt_base, "antigravity-cli")
+now_iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+cli_cid = "cccccccc-0000-1111-2222-000000000001"
+cli_logs = os.path.join(cli_root, "brain", cli_cid, ".system_generated", "logs")
+os.makedirs(cli_logs, exist_ok=True)
+cli_steps = [
+    {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE",
+     "created_at": now_iso, "content": "<USER_REQUEST>\nhello\n</USER_REQUEST>"},
+    {"step_index": 1, "source": "SYSTEM_SDK", "type": "SYSTEM_MESSAGE", "status": "DONE",
+     "created_at": now_iso, "content": "<SYSTEM_MESSAGE>\ncontext\n</SYSTEM_MESSAGE>"},
+    {"step_index": 2, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+     "created_at": now_iso, "model": "gemini-4-hydrogen-low", "input_tokens": 29930,
+     "cache_read_tokens": 0, "output_tokens": 409},
+    {"step_index": 3, "source": "SYSTEM_SDK", "type": "GENERIC", "status": "DONE",
+     "created_at": now_iso, "content": "tool output"},
+    {"step_index": 4, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+     "created_at": now_iso, "model": "gemini-4-hydrogen-low", "input_tokens": 10000,
+     "cache_read_tokens": 20000, "output_tokens": 200},
+]
+with open(os.path.join(cli_logs, "transcript.jsonl"), "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s_, ensure_ascii=False) for s_ in cli_steps) + "\n")
+
+desk_cid = "dddddddd-0000-1111-2222-000000000001"
+desk_logs = os.path.join(desk_root, "brain", desk_cid, ".system_generated", "logs")
+os.makedirs(desk_logs, exist_ok=True)
+desk_steps = [
+    {"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE",
+     "created_at": now_iso, "content": "<USER_REQUEST>desktop task</USER_REQUEST>"},
+    {"step_index": 1, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE",
+     "created_at": now_iso, "model": "gemini-4-neon-high", "input_tokens": 5000,
+     "cache_read_tokens": 0, "output_tokens": 300},
+]
+with open(os.path.join(desk_logs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s_, ensure_ascii=False) for s_ in desk_steps) + "\n")
+
+rec_res = subprocess.run([sys.executable, os.path.join(USAGE_DIR, "usage.py"),
+                          "--recent", "5", "--root", desk_root, "--root", cli_root],
+                         capture_output=True, text=True, encoding="utf-8")
+rec_data = json.loads(rec_res.stdout) if rec_res.returncode == 0 and rec_res.stdout.strip() else {}
+convs_by_id = {c_["id"]: c_ for c_ in rec_data.get("conversations", [])}
+by_rt = rec_data.get("by_runtime") or {}
+check("--recent lists CLI (transcript.jsonl only) and desktop with by_runtime and cost > 0",
+      rec_res.returncode == 0
+      and convs_by_id.get(cli_cid, {}).get("runtime") == "cli"
+      and convs_by_id.get(cli_cid, {}).get("cost", 0) > 0
+      and convs_by_id.get(desk_cid, {}).get("runtime") == "desktop"
+      and "cli" in by_rt and "desktop" in by_rt
+      and by_rt["cli"].get("cost", 0) > 0,
+      (rec_res.returncode, convs_by_id, by_rt))
+
+all_res = subprocess.run([sys.executable, os.path.join(USAGE_DIR, "usage.py"),
+                          "--all", "--root", desk_root, "--root", cli_root],
+                         capture_output=True, text=True, encoding="utf-8")
+check("--all markdown has Среда column with CLI and По среде summary line",
+      all_res.returncode == 0 and "| Среда |" in all_res.stdout
+      and "| CLI |" in all_res.stdout and "**По среде:**" in all_res.stdout,
+      all_res.stdout[:500])
+
+win_cli_path = r"C:\Users\x\.gemini\antigravity-cli\brain\11111111-2222-3333-4444-555555555555\.system_generated\logs"
+check("runtime_of() detects cli on Windows-style paths",
+      usage.runtime_of(win_cli_path) == "cli" and usage.runtime_of(desk_logs) == "desktop",
+      (usage.runtime_of(win_cli_path), usage.runtime_of(desk_logs)))
+
+empty_cli = os.path.join(rt_base, "missing-cli")
+empty_res = subprocess.run([sys.executable, os.path.join(USAGE_DIR, "usage.py"),
+                            "--all", "--root", empty_cli],
+                           capture_output=True, text=True, encoding="utf-8")
+desk_only_res = subprocess.run([sys.executable, os.path.join(USAGE_DIR, "usage.py"),
+                                "--all", "--root", desk_root, "--root", empty_cli],
+                               capture_output=True, text=True, encoding="utf-8")
+check("empty/missing CLI root does not crash",
+      empty_res.returncode == 0 and "Нет данных." in empty_res.stdout
+      and desk_only_res.returncode == 0 and "| Desktop |" in desk_only_res.stdout
+      and "**По среде:**" not in desk_only_res.stdout,
+      (empty_res.returncode, empty_res.stdout, desk_only_res.returncode))
+
+# 15.7 client_info() and models_note()
+ci_bundled = usage.client_info()
+check("client_info() reports bundled 2.35.2 snapshot",
+      ci_bundled.get("source") == "bundled" and ci_bundled.get("version") == "2.35.2",
+      ci_bundled)
+try:
+    usage._CLIENT = {}
+    ci_pricing = usage.client_info()
+    note_pricing = usage.models_note()
+    check("client_info() and models_note() fall back to pricing.json when _CLIENT={}",
+          ci_pricing.get("source") == "pricing" and "pricing.json" in note_pricing,
+          (ci_pricing, note_pricing))
+finally:
+    usage._CLIENT = usage._CLIENT_UNSET
+
 print("ALL OK" if ok else "FAILURES")
+
+# a step's own `model` nothing recognises (an enum placeholder): the call keeps the conversation's tracked model
+ucid = "aaaaaaaa-0000-1111-2222-000000000007"
+ulogs = os.path.join(SP, "brain", ucid, ".system_generated", "logs")
+os.makedirs(ulogs, exist_ok=True)
+usteps = [{"step_index": 0, "type": "USER_INPUT", "source": "USER_EXPLICIT", "created_at": "2026-11-27T10:00:00Z",
+           "content": "<USER_REQUEST>x</USER_REQUEST>\nModel Selection` from None to Gemini 4 Neon (Low)."},
+          {"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-11-27T10:00:01Z", "model": "MODEL_PLACEHOLDER_M999",
+           "input_tokens": 1000, "cache_read_tokens": 0, "output_tokens": 100}]
+with open(os.path.join(ulogs, "transcript_full.jsonl"), "w", encoding="utf-8") as f:
+    f.write("\n".join(json.dumps(s_) for s_ in usteps) + "\n")
+usess = usage.parse_session(ucid, ulogs, p, [SP])
+check("unrecognised per-step model → priced at the conversation's model, not «цена неизвестна»",
+      [c.model for c in usess.calls] == ["Gemini 4 Neon (Low)"] and usess.calls[0].cost > 0
+      and not p.price_unknown(usess.calls[0].model), [(c.model, c.cost) for c in usess.calls])
+
 sys.exit(0 if ok else 1)

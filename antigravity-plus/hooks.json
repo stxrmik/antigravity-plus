@@ -20,7 +20,7 @@
   "antigravity-plus-guard": {
     "PreToolUse": [
       {
-        "matcher": "run_command",
+        "matcher": "run_command|run_terminal_command",
         "hooks": [
           {
             "type": "command",
@@ -30,7 +30,7 @@
         ]
       },
       {
-        "matcher": "write_file",
+        "matcher": "write_file|write_to_file|create_file",
         "hooks": [
           {
             "type": "command",
@@ -40,7 +40,7 @@
         ]
       },
       {
-        "matcher": "edit_file",
+        "matcher": "edit_file|replace_file_content|multi_replace_file_content|multi_edit_file",
         "hooks": [
           {
             "type": "command",
@@ -50,7 +50,7 @@
         ]
       },
       {
-        "matcher": "read_file",
+        "matcher": "read_file|view_file",
         "hooks": [
           {
             "type": "command",
@@ -83,7 +83,7 @@
   "antigravity-plus-check-edits": {
     "PostToolUse": [
       {
-        "matcher": "read_file|write_file|edit_file",
+        "matcher": "read_file|view_file|write_file|write_to_file|create_file|edit_file|replace_file_content|multi_replace_file_content|multi_edit_file",
         "hooks": [
           {
             "type": "command",
@@ -97,7 +97,7 @@
   "antigravity-plus-memory": {
     "PostToolUse": [
       {
-        "matcher": "write_file|edit_file",
+        "matcher": "write_file|write_to_file|create_file|edit_file|replace_file_content|multi_replace_file_content|multi_edit_file",
         "hooks": [
           {
             "type": "command",

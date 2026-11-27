@@ -63,6 +63,10 @@ r = subprocess.run([sys.executable, os.path.join(SKILL, "scripts", "delegate.py"
                    encoding="utf-8", errors="replace", timeout=60)
 check("the installed script runs (compat.py next to it)", r.returncode == 0 and "No delegated tasks yet." in r.stdout,
       r.stdout + r.stderr)
+shared = [n for n in ("compat.py", "client.py", "client-snapshot.json") if os.path.isfile(os.path.join(PLUGIN, "hooks", n))]
+check(f"the hooks' shared files sit next to delegate.py ({', '.join(shared)})", "compat.py" in shared and all(
+      open(os.path.join(SKILL, "scripts", n), "rb").read() == open(os.path.join(PLUGIN, "hooks", n), "rb").read()
+      for n in shared), shared)
 stale = os.path.join(SKILL, "scripts", "old.py"); open(stale, "w").write("x")
 r = install()
 check("an update keeps compat.py and drops stale files", r.returncode == 0 and not os.path.exists(stale)
@@ -81,6 +85,8 @@ check("--modules core,git: their skills only, no subagents, no side panel", r.re
       and listing("skills") == sorted(BY_ID["core"]["skills"] + BY_ID["git"]["skills"]) and listing("agents") == []
       and not os.path.isdir(os.path.join(DEST, "sidecars", "usage")) and listing("rules") == ["AGENTS.md", "GIT.md"],
       r.stdout[-400:] + str(listing("skills")))
+check("the hooks' shared files are installed with any choice of modules", all(
+      os.path.isfile(os.path.join(DEST, "hooks", n)) for n in shared), shared)
 check("without the memory module its settings store stays (the hooks read it), but no /memory skill",
       os.path.isfile(os.path.join(DEST, "skills", "memory", "scripts", "memory.py"))
       and not os.path.exists(os.path.join(DEST, "skills", "memory", "SKILL.md")))
@@ -117,6 +123,9 @@ check("the menu, then «q»: nothing changes", "Nothing installed" in r.stdout a
 r = install("--choose", "--lang", "en", stdin="1\nall\n\n")
 check("the core can't be switched off; «all» picks every module", "The core is required" in r.stdout
       and set(choice()["installed"]) == set(IDS), r.stdout[-300:])
+r = install("--modules", "core", "--plain", "--lang", "en")
+check("--plain: the same line-by-line output, no escape codes", r.returncode == 0 and "Installed Antigravity Plus" in r.stdout
+      and "\x1b" not in r.stdout + r.stderr, r.stdout[-300:])
 r = install("--list", "--lang", "ru")
 check("--list describes every module (in Russian)", r.returncode == 0 and all(m["title"]["ru"] in r.stdout for m in MODULES)
       and "токенов контекста в каждом запросе" in r.stdout, r.stdout[:300])
@@ -141,8 +150,12 @@ check("a fresh install without a terminal: no menu, the modules whose tools are 
       and "claude" in c["unavailable"] and "core" in c["installed"] and "git" in c["installed"], c)
 os.rename(os.path.join(HOME, ".claude-away"), os.path.join(HOME, ".claude"))
 r = install("--lang", "en")
+c_before_demo = choice()
 check("Claude Code appears → the next update adds the bridge by itself", "claude" in choice()["installed"]
       and "Modules added" in r.stdout and "claude :" in r.stdout, r.stdout[-500:])
+r = install("--demo", "--lang", "en")
+check("--demo without a terminal: plain, exit 0, nothing installed or changed", r.returncode == 0 and "\x1b" not in r.stdout
+      and "Demo: nothing is installed" in r.stdout and choice() == c_before_demo, r.stdout[-300:] + r.stderr[-300:])
 r = install("--uninstall", "--purge")
 check("uninstall removes it", r.returncode == 0 and not os.path.exists(DEST), r.stdout)
 check("…but never another skill of that name", os.path.isfile(os.path.join(SKILL, "SKILL.md")))

@@ -229,12 +229,13 @@ def read_json(path: str):
 def transcripts() -> List[Tuple[str, str]]:
     out, seen = [], set()
     for root in PRODUCT_ROOTS:
-        for p in glob.glob(os.path.join(os.path.expanduser(root), "brain", "*", ".system_generated", "logs",
-                                        "transcript_full.jsonl")):
-            cid = os.path.normpath(p).split(os.sep)[-4]
-            if cid not in seen:
-                seen.add(cid)
-                out.append((cid, p))
+        # the desktop app writes transcript_full.jsonl; the Antigravity CLI (per its docs) only transcript.jsonl
+        for name in ("transcript_full.jsonl", "transcript.jsonl"):
+            for p in glob.glob(os.path.join(os.path.expanduser(root), "brain", "*", ".system_generated", "logs", name)):
+                cid = os.path.normpath(p).split(os.sep)[-4]
+                if cid not in seen:
+                    seen.add(cid)
+                    out.append((cid, p))
     return out
 
 
@@ -376,6 +377,9 @@ def scan(cid: str, path: str) -> Conv:
                 model = new.strip()
             c.events.append((i, "user", None))
             queue = []
+        own = st.get("model") if typ == "PLANNER_RESPONSE" else None
+        if isinstance(own, str) and own.strip():  # Desktop 2.35.2+ and the CLI name each call's model
+            model = own.strip()
         if model:
             c.step_model[i] = model
             c.last_model = model
@@ -434,9 +438,22 @@ def scan(cid: str, path: str) -> Conv:
 
 
 def aliases() -> Dict[str, str]:
+    """Subagent model aliases (flash, pro, flash_lite): pricing.json's, overridden by the client's own
+    (hooks/client.py: its cached reading or bundled snapshot; a file read, never the network)."""
     d = read_json(PRICING)
     a = d.get("subagent_model_aliases") if isinstance(d, dict) else None
-    return {k: str(v) for k, v in a.items()} if isinstance(a, dict) else {}
+    out = {k: str(v) for k, v in a.items()} if isinstance(a, dict) else {}
+    hooks = os.path.abspath(os.path.join(HERE, "..", "..", "..", "hooks"))
+    if os.path.isfile(os.path.join(hooks, "client.py")):
+        if hooks not in sys.path:
+            sys.path.insert(0, hooks)
+        try:
+            import client  # noqa: E402
+            live = client.aliases() if client.snapshot().get("models") else {}
+            out.update({k: str(v) for k, v in (live or {}).items() if v})
+        except Exception:
+            pass
+    return out
 
 
 def own_model(cid: str) -> str:

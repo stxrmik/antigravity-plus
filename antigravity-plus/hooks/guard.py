@@ -13,8 +13,10 @@ Stops and asks the user (decision "force_ask", which ignores cached "always allo
   * write_file / edit_file: writes into .git/ internals, shell startup files, SSH keys, LaunchAgents, /etc and other
     system folders, and into what decides what the agent may do: Antigravity's settings and projects, MCP servers,
     installed plugins (this guard among them), Antigravity Plus's own settings — by file tools or by commands; also
-    connecting an MCP server (/settings), turning secret protection off, and starting a conversation (agentapi) with
-    a message that would switch Bypass Mode or full access on — the agent changes these only on the user's explicit
+    connecting an MCP server (/settings), turning secret protection off, and starting a conversation (agentapi,
+    `agy -p|-c|-r`) with a message that would switch Bypass Mode or full access on; in the Antigravity CLI also
+    `agy --dangerously-skip-permissions|--mode auto|accept-edits` and `agy plugin|mcp install|remove|enable|disable`
+    — the agent changes these only on the user's explicit
     request, and the user confirms;
   * git and gh commands that would wait at the keyboard in Antigravity's terminal (`git add -p`, `gh pr create`
     without a title and body, `gh auth login`…) or fail on its GIT_EDITOR=false (`git rebase --continue`) — refused
@@ -205,12 +207,20 @@ SIDECAR_API_REASON = "команда обращается к управляющ�
 # free. Method names are case-sensitive on the wire, so the verb is matched as written (`Set` + a capital: not `Setup`).
 LS_CONTROL_API = re.compile(
     r"LanguageServerService/+(?-i:(?:(?:Set|Update|Install|Uninstall|Toggle|Revoke|Grant|Disconnect|Reset)(?:[A-Z]\w*)?"
-    r"|HandleCascadeUserInteraction|CreateCustomizationFile|Delete(?!CascadeTrajectory\b)(?:[A-Z]\w*)?)\b)",
+    r"|HandleCascadeUserInteraction|CreateCustomizationFile|Delete(?!CascadeTrajectory\b)(?:[A-Z]\w*)?"
+    # 2.35.2's other methods that change what the agent may do, by name (a verb like Send*/Create*/Start* would take
+    # telemetry and workspace calls too): an agent command's spec, typing into a terminal past run_command, triggers
+    # that start agents, a plugin's or MCP server's sign-in, the licence, a conversation's saved summary
+    r"|SaveAgentScriptCommandSpec|SendTerminalInput|CreateTrigger|RunTrigger|Sign(?:In|Out)PluginAuthProvider"
+    r"|StartPluginAuthSignIn|StartMcpOAuthSignIn|CompleteMcpOAuth|SelectLicense|SelfAssignLicense|JetboxDeleteSummary)\b)",
     I,
 )
 LS_CONTROL_REASON = ("команда меняет настройки Antigravity через API языкового сервера: разрешения, плагины, MCP-серверы, "
                      "флаги, ответ на запрос разрешения — или удаляет его данные.")
 CONVERSATION_DELETE_API = re.compile(r"(?:ConversationService/+DeleteConversation|LanguageServerService/+DeleteCascadeTrajectory)\b", I)
+# The same removal by the Conversation Management API's REST route (2.35: `DELETE /v1/conversations/{id}`)
+CONVERSATION_DELETE_REST = re.compile(r"/v1/+conversations/+[\w-]")
+HTTP_DELETE = re.compile(r"\bdelete\b", I)  # -X DELETE, -X delete, method: "delete", requests.delete(…)
 CONVERSATION_DELETE_REASON = ("команда безвозвратно удаляет разговор Antigravity и всю его историю "
                               "(`DeleteConversation` / `DeleteCascadeTrajectory`).")
 API_GLOB_REASON = ("в адресе столько шаблонов {a,b} и [a-z], что guard не может проверить, к какому методу API "
@@ -228,13 +238,177 @@ def schedule_change(seg: str) -> bool:
     return False
 
 
+# ── Antigravity CLI (`agy`): the same stops as for the App, on the CLI's own flags and subcommands ──
+# Checked live on agy 1.5.18 (2026-11): the flags and subcommands (`agy --help`, `agy plugin|mcp --help`), the hooks'
+# tool names and payload, and that a guard «ask» in a headless run (`agy -p`) is a denial. Not checked live: what
+# `--sandbox=false` does against a sandbox turned on in settings, and `--remote-control` / `mic-serve` themselves
+# (by their help text). Keep every CLI name here, so one edit follows a change.
+AGY_PROGRAMS = {"agy", "agy.exe", "agy.cmd"}
+AGY_VALUE_FLAGS = {"--add-dir", "--agent", "--conversation", "-r", "--resume", "--effort", "--input-format",
+                   "--json-schema", "--log-file", "--mode", "--model", "--output-format", "--print-timeout",
+                   "--project", "--settings", "-p", "--print", "--prompt", "-i", "--prompt-interactive"}
+# A run that sends a message to a conversation: a new headless one (-p), an interactive one with a first prompt (-i),
+# the latest (-c) or a given one (-r): like `agentapi new-conversation|send-message`.
+AGY_RUN_FLAGS = {"-p", "--print", "--prompt", "-i", "--prompt-interactive", "-c", "--continue", "--conversation",
+                 "-r", "--resume"}
+AGY_SKIP_FLAG = "--dangerously-skip-permissions"   # `always-proceed`: every tool call approved
+AGY_ASKING_MODES = {"", "default", "plan", "request-review"}  # any other --mode lets edits or commands go unasked
+# settings.json keys a `--settings '{…}'` session override may use to approve or run things unasked
+AGY_GUARDED_SETTINGS = {"agentMode", "toolPermission", "permissions", "hooks", "statusLine", "trustedWorkspaces",
+                        "enableTerminalSandbox", "mcpServers", "plugins"}
+AGY_TOOL_SUBS = {"plugin": {"install", "uninstall", "remove", "enable", "disable", "import"},
+                 "plugins": {"install", "uninstall", "remove", "enable", "disable", "import"},
+                 "mcp": {"add", "remove", "uninstall", "install", "enable", "disable"},
+                 "install": {""}, "update": {""}}  # `agy install`: PATH and the shell profile; `update`: the CLI itself
+# Reaching this computer from another one: a remote connection to the session, this machine's microphone
+AGY_REMOTE_SUBS = {"remote-control": {"start"}, "mic-serve": {""}}
+AGY_REMOTE_FLAG = "--remote-control"
+AGY_WRAPPERS = {"xargs": {"-I", "-i", "-n", "-P", "-L", "-l", "-s", "-d", "-E", "-e", "-a", "--max-args",
+                          "--max-procs", "--delimiter", "--arg-file", "--replace"},
+                "nice": {"-n"}, "timeout": {"-s", "-k", "--signal", "--kill-after"}, "stdbuf": {"-i", "-o", "-e"},
+                "caffeinate": {"-t", "-w"}, "nohup": set(), "time": set()}
+AGY_PROTECTION_REASON = ("запуск Antigravity CLI без вопросов о разрешениях (`--dangerously-skip-permissions`, "
+                         "`--mode auto|accept-edits`): так снимает вопросы только сам пользователь.")
+AGY_SETTINGS_REASON = ("запуск Antigravity CLI с `--settings`: настройки на сессию в обход settings.json (разрешения, "
+                       "режим, хуки, MCP) решают, что агенту разрешено — их меняет только пользователь.")
+# In a CLI run with no one at the keyboard (`agy -p`) an ask is a denial: the agent reads this, not a person
+HEADLESS_NOTE = (" В Antigravity CLI без человека у терминала это отказ: не обходите его другой командой — "
+                 "сделайте остальное и в отчёте скажите пользователю, что именно и зачем нужно подтвердить.")
+AGY_TOOLS_REASON = ("команда меняет установку Antigravity CLI: ставит, удаляет, включает или выключает плагины и "
+                    "MCP-серверы (`agy plugin …`, `agy mcp …`), правит PATH и профиль оболочки (`agy install`) или "
+                    "обновляет сам CLI (`agy update`): от этого зависят инструменты агента и сама защита guard.")
+AGY_REMOTE_REASON = ("команда открывает этот компьютер другому: удалённое управление сессией Antigravity CLI "
+                     "(`--remote-control`, `agy remote-control start`) или микрофон этой машины для CLI на другом хосте "
+                     "(`agy mic-serve`) — это включает только сам пользователь.")
+_GO_TRUE = {"", "1", "t", "true"}
+
+
+def _agy_args(tokens: List[str]) -> Optional[List[str]]:
+    """The words after `agy` when the command runs it — through env, command, exec, NAME=value, xargs, nice, timeout
+    (strip_prefixes and the wrappers above) — else None. `./agy_notes.txt`, `magy`, `grep agy` are no `agy`."""
+    tokens = strip_prefixes(tokens)
+    for _ in range(4):
+        if not tokens:
+            return None
+        name = os.path.basename(tokens[0].replace("\\", "/")).lower()
+        if name in AGY_PROGRAMS:
+            return tokens[1:]
+        opts = AGY_WRAPPERS.get(name)
+        if opts is None:
+            return None
+        i = 1
+        while i < len(tokens) and tokens[i].startswith("-"):
+            if tokens[i] == "--":
+                i += 1
+                break
+            i += 2 if tokens[i] in opts and "=" not in tokens[i] else 1
+        if name == "timeout" and i < len(tokens):
+            i += 1  # its duration
+        tokens = strip_prefixes(tokens[i:])
+    return None
+
+
+def agy_verdict(args: List[str]) -> Optional[str]:
+    """What an `agy …` call does that the guard stops: "protection-off" (no permission prompts), "agent-tools"
+    (plugins, MCP servers), "run" (a message to a conversation), or None. Go's flag rules: `-flag` = `--flag`,
+    `--flag=value`, bool flags take `=false`; words after `--` are text (a prompt), not flags."""
+    positional: List[str] = []
+    run, i = False, 0
+    while i < len(args):
+        t = args[i]
+        if t == "--":
+            positional += args[i + 1:]
+            break
+        if not t.startswith("-") or t == "-":
+            positional.append(t)
+            i += 1
+            continue
+        name, eq, value = t.partition("=")
+        if not name.startswith("--") and len(name) > 2:
+            name = "-" + name  # Go: -mode = --mode
+        if name in AGY_VALUE_FLAGS and not eq:
+            value = args[i + 1] if i + 1 < len(args) else ""
+            i += 1 if name in ("-p", "--print", "--prompt", "-i", "--prompt-interactive") and value.startswith("-") else 2
+        else:
+            i += 1
+        if name == AGY_SKIP_FLAG and value.lower() in _GO_TRUE:
+            return "protection-off"
+        if name == "--sandbox" and eq and value.lower() not in _GO_TRUE:
+            return "protection-off"  # `--sandbox=false`: the terminal sandbox off for this session
+        if name == AGY_REMOTE_FLAG and value.lower() in _GO_TRUE:
+            return "remote"
+        if name == "--mode" and value.strip().lower() not in AGY_ASKING_MODES:
+            return "protection-off"
+        if name == "--settings" and _agy_settings_guarded(value):
+            return "settings"  # the session's own settings.json: as an edit of the agent's settings
+        if name in AGY_RUN_FLAGS and value.lower() not in ("false", "0", "f"):
+            run = True
+    head = positional[0].lower() if positional else ""
+    for table, what in ((AGY_TOOL_SUBS, "agent-tools"), (AGY_REMOTE_SUBS, "remote")):
+        if head in table:
+            if "-h" in args or "--help" in args or "help" in positional[1:2]:
+                return None
+            sub = positional[1].lower() if len(positional) > 1 else ""
+            return what if sub in table[head] or "" in table[head] else None
+    return "run" if run else None
+
+
+def _agy_settings_guarded(value: str) -> bool:
+    """`--settings` with keys that approve or run things (or a file guard can't see): asked."""
+    v = value.strip()
+    if not v.startswith("{"):
+        return bool(v)  # a file path: what it holds is unknown here
+    try:
+        data = json.loads(v)
+    except ValueError:  # the shell's reading of it (quotes gone): the key names still show
+        return any(re.search(r"\b%s\b" % k, v) for k in AGY_GUARDED_SETTINGS)
+    return not isinstance(data, dict) or bool(AGY_GUARDED_SETTINGS & set(data))
+
+
+def _maybe_agy(text: str) -> bool:
+    """A cheap look before the full read: the word, or a form the shell could turn into it ($'\\x61gy', a[g]y, $A)."""
+    t = text.replace("'", "").replace('"', "").replace("\\", "")
+    return "agy" in t.lower() or any(c in t for c in "$[{%")
+
+
+def agy_stop(text: str, keep, avars: Tuple[Tuple[str, str], ...] = ()) -> Optional[Tuple[str, str]]:
+    """The first stop for `agy` in this segment, read in every form the shell can spell it (_api_variants)."""
+    if not (keep("protection-off") or keep("agent-tools") or keep("agent-settings")) or not _maybe_agy(text):
+        return None
+    for v in _api_variants(text, avars)[0]:
+        args = _agy_args(tokenize(v))
+        if args is None:
+            continue
+        what = agy_verdict(args)
+        if what == "protection-off" and keep("protection-off"):
+            return "protection-off", AGY_PROTECTION_REASON
+        if what == "settings" and keep("agent-settings"):
+            return "agent-settings", AGY_SETTINGS_REASON
+        if what == "remote" and keep("agent-tools"):
+            return "agent-tools", AGY_REMOTE_REASON
+        if what == "agent-tools" and keep("agent-tools"):
+            return "agent-tools", AGY_TOOLS_REASON
+        if what == "run" and keep("agent-settings") and SWITCH_WORDS.search(" ".join(args)):
+            return "agent-settings", SELF_SWITCH_REASON
+    return None
+
+
+def agy_runs(seg: str) -> bool:
+    """`agy -p|-c|-r …`: the segment sends a message to a conversation (read from its stdin, when piped or a heredoc)."""
+    if not _maybe_agy(seg):
+        return False
+    args = _agy_args(tokenize(seg))
+    return args is not None and agy_verdict(args) == "run"
+
+
 # ── the commands that reach Antigravity's own API, read as the shell and curl would read them ──
 # A message that switches Bypass Mode / full access on (only the user's own message may): sent to a conversation by
 # `agentapi new-conversation|send-message` or by the language server's CreateConversation / SendUserCascadeMessage /
 # StartCascade. Words after the call (its body), or — for the API routes — before it (`curl -d '…' <url>`).
 SWITCH_WORDS = re.compile(r"/bypass\b|\bbypass\b|байпас|полн\w*\s+доступ|full[\s-]*access", I)
 SWITCH_AGENTAPI = re.compile(r"\bagentapi\b[^\n]{0,4000}?\b(?:new-conversation|send-message)\b", I)
-SWITCH_API = re.compile(r"(?:ConversationService/+CreateConversation|LanguageServerService/+(?:SendUserCascadeMessage|StartCascade))\b", I)
+SWITCH_API = re.compile(r"(?:ConversationService/+CreateConversation|LanguageServerService/+(?:SendUserCascadeMessage|StartCascade"
+                        r"|SendAgentMessage|SendAllQueuedMessages|SendActionToChatPanel))\b", I)
 
 
 def switch_head(text: str) -> bool:
@@ -403,7 +577,8 @@ def _api_stop(text: str, keep, avars: Tuple[Tuple[str, str], ...] = (),
                 return "agent-settings", reason
         if switch and any(switch_hit(v) for v in variants):
             return "agent-settings", SELF_SWITCH_REASON
-    if keep("conversation-delete") and any(CONVERSATION_DELETE_API.search(v) for v in variants):
+    if keep("conversation-delete") and any(CONVERSATION_DELETE_API.search(v) or CONVERSATION_DELETE_REST.search(v)
+                                           and HTTP_DELETE.search(v) for v in variants):
         return "conversation-delete", CONVERSATION_DELETE_REASON
     return None
 
@@ -532,7 +707,7 @@ PROTECTED_FILE = re.compile(
 # What decides what the agent may do: Antigravity's settings and projects (permission grants), MCP servers,
 # installed plugins (this guard among them), Antigravity Plus's settings (full access, Bypass Mode, secret protection)
 # and the script whose «ask|tell» the guard approves for Claude Code's delegated agents.
-AGENT_CONTROL = re.compile(r"/\.gemini/config/(config\.json|mcp_config\.json|projects/|plugins/)"
+AGENT_CONTROL = re.compile(r"/\.gemini/config/(config\.json|mcp_config\.json|hooks\.json$|projects/|plugins/)"
                            r"|/\.gemini/(?:antigravity(?:-cli|-ide)?|config)/settings\.json$"
                            r"|/\.gemini/antigravity(?:-cli|-ide)?/mcp_config\.json$"
                            r"|/\.gemini/antigravity-plus/(?:settings|lsp)\.json$"
@@ -1566,6 +1741,9 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
                 hit = _api_stop(stages[k] + " | " + stages[k + 1], keep, avars)
                 if hit:
                     return hit
+            # `echo "/bypass …" | agy -p`: the prompt comes on stdin
+            if keep("agent-settings") and agy_runs(stages[k + 1]) and SWITCH_WORDS.search(stages[k]):
+                return "agent-settings", SELF_SWITCH_REASON
     sockets = "/dev/tcp/" in cmd or "/dev/udp/" in cmd
     deeper = depth < 2  # what a segment runs inside — $(…), a quoted command string — is analysed on its own
     for seg in split_unquoted(cmd):
@@ -1605,6 +1783,11 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
             if keep(rid) and (rx.search(here if rid in LOCAL_RULES else target)
                               or (rid in OWN_SETTINGS_RULES and not there and rx.search(own))):
                 return rid, reason
+        # `agy --dangerously-skip-permissions`, `agy plugin disable …`, `agy -p "/bypass …"`: only what runs here (the
+        # words of `ssh h agy …` run there and are analysed as remote below)
+        hit = agy_stop(api_view(there[0] if there else seg), keep, avars)
+        if hit:
+            return hit
         # the panel's routes, the language server's control plane, a message that switches Bypass Mode on, and the
         # removal of a conversation — in all the words (`ssh -R 9999:localhost:…` brings a server's request here);
         # git's own words are text unless it runs one (git_is_text_only), and so are a gh pull request's title and body
@@ -1648,6 +1831,10 @@ def analyze_command(cmd: str, depth: int = 0, system_only: bool = False,
             line = before + rest
             if switch_head(line) and keep("agent-settings") and any(switch_hit(v) for v in _api_variants(line + "\n" + body, avars)[0]):
                 return "agent-settings", SELF_SWITCH_REASON  # `agentapi send-message <<EOF`, `curl -d @- <url> <<EOF`
+        # `agy -p <<EOF`, `cat <<EOF | agy -p`: the heredoc is the prompt
+        if keep("agent-settings") and SWITCH_WORDS.search(body) and (
+                agy_runs(owner) or any(agy_runs(s) for s, _ in _split(rest)[1:])):
+            return "agent-settings", SELF_SWITCH_REASON
         # `cat <<EOF | python3 -`: what the heredoc is piped into runs it
         stages = _split(rest)
         for k in range(len(stages) - 1):
@@ -2661,9 +2848,32 @@ def limits(payload: dict, cmd: str) -> Optional[dict]:
     return None
 
 
+# The tools' older names (the CLI docs' table: view_file, write_to_file, replace_file_content) — when compat.tool()
+# (hooks/compat.py) is missing, so a synonym is never a tool the guard does not look at.
+TOOL_FALLBACK = {"view_file": "read_file", "write_to_file": "write_file", "create_file": "write_file",
+                 "replace_file_content": "edit_file", "multi_replace_file_content": "edit_file",
+                 "multi_edit_file": "edit_file", "run_terminal_command": "run_command"}
+
+
+def _runtime(payload: dict) -> str:
+    fn = getattr(compat, "runtime", None)
+    try:
+        return fn(payload) if fn else ""
+    except Exception:
+        return ""
+
+
+def canonical_tool(name) -> str:
+    fn = getattr(compat, "tool", None)
+    try:
+        return fn(name) if fn else TOOL_FALLBACK.get(str(name).strip(), str(name).strip())
+    except Exception:
+        return name if isinstance(name, str) else ""
+
+
 def decide(payload: dict) -> dict:
     call = payload.get("toolCall") or {}
-    tool = call.get("name") or ""
+    tool = canonical_tool(call.get("name") or "")
     args = call.get("args") or {}
     if isinstance(args, str):
         try:
@@ -2687,7 +2897,7 @@ def decide(payload: dict) -> dict:
             return {"decision": decision, "reason": f"🛡️ Antigravity Plus: {reason}"}
         return PASS
     if tool == "read_file":
-        subject = unwrap(args.get("Path") or args.get("path") or "")
+        subject = unwrap(args.get("Path") or args.get("AbsolutePath") or args.get("path") or "")
         if protect_secrets() and SECRET_FILE.search(compat.slashes(subject)) and not subject.endswith(".pub"):
             log(payload, tool, "secret-read", subject)
             return {"decision": "deny", "reason": f"🛡️ Antigravity Plus: в {os.path.basename(subject)} секреты. "
@@ -2721,7 +2931,8 @@ def decide(payload: dict) -> dict:
     elif tool in ("write_file", "edit_file"):
         subject = unwrap(args.get("Path") or args.get("TargetFile") or args.get("path") or "")
         if memstore and memstore.memory_dir_of(subject):
-            body = unwrap(args.get("Content") if tool == "write_file" else args.get("Replacement"))
+            body = unwrap((args.get("Content") or args.get("CodeContent")) if tool == "write_file"
+                          else (args.get("Replacement") or args.get("ReplacementContent")))
             found = checks.find_secrets(body) if body and protect_secrets() else []
             if found:  # memory goes into every later conversation: refuse, the agent rewrites it without the value
                 log(payload, tool, "memory-secret", subject)
@@ -2773,6 +2984,8 @@ def decide(payload: dict) -> dict:
     shown = subject if len(subject) <= 160 else subject[:159] + "…"
     if not rid.startswith("user-said"):
         reason += " Подтвердите, если это действительно нужно."
+        if _runtime(payload) == "cli":
+            reason += HEADLESS_NOTE
     if bypass:
         reason += (" (Bypass Mode включён, но о системных действиях guard спрашивает всегда.)" if rid in SYSTEM_RULES
                    else " (Bypass Mode включён, но это ваш запрет из разговора.)")

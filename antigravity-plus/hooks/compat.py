@@ -399,8 +399,14 @@ def daemon_servers() -> List[LanguageServer]:
     return [ls for _, ls in sorted(found, key=lambda x: x[0], reverse=True)]
 
 
-def language_server(probe: float = 1.5) -> Optional[LanguageServer]:
-    """Antigravity's running language server, or None:
+def language_server(probe: float = 1.5, conversation: bool = False, payload=None) -> Optional[LanguageServer]:
+    """Antigravity's running language server, or None.
+    `conversation`: the caller asks about a conversation by its id (GetCascade*, generator metadata…). The Antigravity
+    CLI is its own language server (random ports per run, no hub file): a hook of a CLI session (runtime(payload) ==
+    "cli", no LS address in its env) would otherwise find the App's server, which doesn't know that conversation —
+    so it gets None. An agent command of either keeps the server from its env. Account-wide calls (quotas, models)
+    leave `conversation` off and may use the App's server.
+    Where it looks:
       1. ANTIGRAVITY_LS_ADDRESS + ANTIGRAVITY_CSRF_TOKEN — agent terminals and sidecars get them (hooks and the
          plugin's MCP server don't);
       2. daemon_servers() whose process is alive and whose /healthz answers — the only way from outside since
@@ -410,6 +416,8 @@ def language_server(probe: float = 1.5) -> Optional[LanguageServer]:
     addr, token = os.environ.get("ANTIGRAVITY_LS_ADDRESS"), os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
     if addr and token:
         return LanguageServer(addr, token, "env", 0, os.environ.get("ANTIGRAVITY_LS_VERSION", ""))
+    if conversation and runtime(payload) == "cli":
+        return None
     for ls in daemon_servers():
         if _alive(ls.pid) and ls_healthy(ls.addr, probe):
             return ls
@@ -434,6 +442,173 @@ def ls_executable(pid: int) -> str:
             m = re.match(r"\s*\"?(.*?language_server[\w.-]*)", line)
             return m.group(1) if m else ""
     return ""
+
+
+# ---- Antigravity App (Desktop) vs Antigravity CLI (`agy`) ----
+# Everything the plugin knows about the CLI lives here as named constants, so that one live probe
+# (tests/live_cli.py) can correct it in one edit. Source: Google's public docs and a live probe of agy 1.5.18 (macOS).
+DESKTOP_DATA = "antigravity"        # ~/.gemini/antigravity: brain/, conversations/, daemon/, annotations/ …
+CLI_DATA = "antigravity-cli"        # ~/.gemini/antigravity-cli (docs: hooks.md «<app_data_dir> … for Antigravity CLI»)
+AGY_NAME = "agy"                    # the CLI's executable, ~/.local/bin/agy (Windows: %LOCALAPPDATA%\agy\bin)
+AGY_ENV = ()                        # env variables only the CLI sets for hooks: none (live, agy 1.5.18)
+AGY_LS_VERSION_PREFIX = "cli-"      # agent commands get ANTIGRAVITY_LS_VERSION=cli-1.5.18 (live, agy 1.5.18)
+# Tool names: the docs' table (and the CLI's stream-json init.tools[]) still list the older names; hooks, steps and
+# transcripts say run_command, read_file, write_file, edit_file (live in the CLI 1.5.18 and the App). One canonical
+# name for each, so hooks and the transcript parser see one tool whichever spelling comes.
+TOOL_ALIASES = {
+    "view_file": "read_file",
+    "write_to_file": "write_file",
+    "create_file": "write_file",
+    "replace_file_content": "edit_file",
+    "multi_replace_file_content": "edit_file",
+    "multi_edit_file": "edit_file",
+    "run_terminal_command": "run_command",
+}
+
+
+def _gemini_dir() -> str:
+    return os.path.join(os.path.expanduser("~"), ".gemini")
+
+
+def cli_data_dir() -> str:
+    """~/.gemini/antigravity-cli, whether it exists or not."""
+    return os.path.join(_gemini_dir(), CLI_DATA)
+
+
+def desktop_data_dir() -> str:
+    """~/.gemini/antigravity, whether it exists or not (the plugin's long-standing default)."""
+    return os.path.join(_gemini_dir(), DESKTOP_DATA)
+
+
+def data_dirs() -> List[str]:
+    """The Antigravity data folders that exist here: the App's first, then the CLI's."""
+    return [d for d in (desktop_data_dir(), cli_data_dir()) if os.path.isdir(d)]
+
+
+def data_dir(transcript_path: str = "") -> str:
+    """The data folder a transcript belongs to (…/<data>/brain/<cid>/.system_generated/logs/transcript.jsonl);
+    without one — or when the path isn't under a brain/ folder — the App's, as before."""
+    if isinstance(transcript_path, str) and transcript_path.strip():
+        path = os.path.expanduser(transcript_path.strip()).replace("\\", "/")
+        i = path.rfind("/brain/")
+        if i > 0:
+            root = path[:i]
+            return os.path.normpath(root) if WINDOWS else root
+    return desktop_data_dir()
+
+
+def runtime(payload=None) -> str:
+    """"cli" when a hook runs inside an Antigravity CLI session, else "desktop": by the payload's transcriptPath,
+    else AGP_RUNTIME (tests), the CLI's own env variables, or where the payload's conversation lives."""
+    p = payload if isinstance(payload, dict) else {}
+    tp = p.get("transcriptPath")
+    if isinstance(tp, str) and tp.strip():
+        parts = os.path.expanduser(tp).replace("\\", "/").split("/")
+        return "cli" if CLI_DATA in parts else "desktop"
+    forced = os.environ.get("AGP_RUNTIME", "").strip().lower()
+    if forced in ("cli", "desktop"):
+        return forced
+    if any(os.environ.get(k) for k in AGY_ENV) or \
+            os.environ.get("ANTIGRAVITY_LS_VERSION", "").startswith(AGY_LS_VERSION_PREFIX):
+        return "cli"
+    cid = p.get("conversationId") or os.environ.get("ANTIGRAVITY_CONVERSATION_ID") or ""
+    if isinstance(cid, str) and re.match(r"^[\w-]{8,}$", cid):
+        in_cli = os.path.isdir(os.path.join(cli_data_dir(), "brain", cid))
+        if in_cli and not os.path.isdir(os.path.join(desktop_data_dir(), "brain", cid)):
+            return "cli"
+    return "desktop"
+
+
+def agy() -> str:
+    """The Antigravity CLI executable: PATH, then its installer's folder; "" when not installed."""
+    found = shutil.which(AGY_NAME)
+    if found:
+        return found
+    home = os.path.expanduser("~")
+    places = [os.path.join(home, ".local", "bin", AGY_NAME)]
+    if WINDOWS:
+        local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        places = [os.path.join(local, AGY_NAME, "bin", AGY_NAME + ext) for ext in (".exe", ".cmd")] + places
+    for place in places:
+        if os.path.isfile(place) and (WINDOWS or os.access(place, os.X_OK)):
+            return place
+    return ""
+
+
+_AGY_VERSION: Optional[str] = None
+
+
+def agy_version() -> str:
+    """The CLI's version («1.5.16»), "" when unknown. Runs `agy --version` (≤ 2 s) once per process —
+    keep it off the hooks' hot path."""
+    global _AGY_VERSION
+    if _AGY_VERSION is None:
+        _AGY_VERSION = ""
+        exe = agy()
+        if exe:
+            try:
+                out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=2,
+                                     encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
+                m = re.search(r"\d+\.\d+(?:\.\d+)?", (out.stdout or "") + " " + (out.stderr or ""))
+                _AGY_VERSION = m.group(0) if m else ""
+            except (OSError, subprocess.SubprocessError, ValueError):
+                pass
+    return _AGY_VERSION
+
+
+AGY_HEADLESS_FLAGS = ("p", "print", "prompt", "input-format")  # not -i/--prompt-interactive: a person types there
+AGY_HEADLESS_COMMANDS = ("acp",)  # `agy acp`: prompts come from an editor's client program (Agent Client Protocol)
+
+
+def agy_args_headless(args: List[str]) -> bool:
+    """True when `agy`'s arguments start it headless. Go's flag parsing: one or two dashes alike, a value after `=`
+    (`-p=…`, `-print`, `--p`, `-input-format=stream-json`). Over-cautious on purpose: a stray word in a prompt that
+    looks like such a flag also counts (then a switch in it is just not applied)."""
+    for a in args:
+        if a in AGY_HEADLESS_COMMANDS:
+            return True
+        if a.startswith("-") and a.strip("-"):
+            if a.lstrip("-").split("=", 1)[0].lower() in AGY_HEADLESS_FLAGS:
+                return True
+    return False
+
+
+def agy_headless() -> Optional[bool]:
+    """Whether this process runs under an `agy` started headless (`agy -p "…"`, `--input-format stream-json`,
+    `agy acp`): its prompts come from a program, not from a person typing — like `agentapi`. True / False, or None
+    when it can't be told (no process table, no `agy` ancestor, an unreadable command line) — a caller deciding
+    something a person must type treats None like True. Reads the process table (tens of ms): call it only when a
+    decision needs it. AGP_AGY_HEADLESS=1/0/? overrides (tests)."""
+    forced = os.environ.get("AGP_AGY_HEADLESS", "").strip()
+    if forced in ("0", "1", "?"):
+        return None if forced == "?" else forced == "1"
+    try:
+        table = process_table(cmdlines=True)
+        cur, seen = table.get(os.getpid()), set()
+        while cur and cur.ppid and cur.ppid not in seen:
+            seen.add(cur.ppid)
+            cur = table.get(cur.ppid)
+            if cur and cur.name in (AGY_NAME, AGY_NAME + ".exe"):
+                line = cur.cmdline.strip()
+                if not line:
+                    return None
+                return agy_args_headless(line.split()[1:])
+    except Exception:
+        pass
+    return None
+
+
+def tool(name) -> str:
+    """The canonical name of an agent tool (`write_to_file` → `write_file`, `view_file` → `read_file`, …);
+    an unknown name comes back as it is ("" for a non-string)."""
+    if not isinstance(name, str):
+        return ""
+    return TOOL_ALIASES.get(name.strip(), name.strip())
+
+
+def tool_names(canonical: str) -> List[str]:
+    """The canonical name and every synonym of it — for hooks.json matchers and their tests."""
+    return [canonical] + sorted(k for k, v in TOOL_ALIASES.items() if v == canonical)
 
 
 def kill_tree(pid: int) -> None:

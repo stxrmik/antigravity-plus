@@ -21,7 +21,10 @@ def run(extra=None):
          "fullyIdle": True, "executionNum": 0}
     p.update(extra or {})
     out = subprocess.run([sys.executable, os.path.join(HOOKS, "stop.py")], input=json.dumps(p), capture_output=True, text=True)
-    return json.loads(out.stdout).get("decision") == "continue", out.stderr.strip()
+    d = json.loads(out.stdout)
+    REASONS.append(d.get("reason") or "") if d.get("decision") == "continue" else None
+    return d.get("decision") == "continue", out.stderr.strip()
+REASONS = []  # every message that sent the agent back in this test: each must end the same way
 OPEN = "# Задача\n\n## Сортировка серверов\n- [x] Реализовать auto_sort\n- [/] Добавить эндпоинт\n- [ ] Тесты\n"
 cases = [
  ("open items, agent just stopped",              "Сделай сортировку", "Готово: реализовал auto_sort.", OPEN, 0, None, True),
@@ -112,7 +115,9 @@ def run_plan(reply, rows_extra=()):
          "modelName": "Orchestrator (Carbon)", "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 0}
     r = subprocess.run([sys.executable, os.path.join(HOOKS, "stop.py")], input=json.dumps(p),
                        capture_output=True, text=True, encoding="utf-8")
-    return json.loads(r.stdout or "{}")
+    d = json.loads(r.stdout or "{}")
+    REASONS.append(d.get("reason") or "") if d.get("decision") == "continue" else None
+    return d
 plan_skip = not run_plan("План готов.")
 plan_facts = "facts" in (run_plan("Все тесты проходят.").get("reason") or "")
 HAND = [{"step_index": 3, "type": "PLANNER_RESPONSE", "created_at": now, "content": "",
@@ -161,11 +166,14 @@ def run_pe_decide(reply, handed=False):
     rows.append({"step_index": len(rows), "type": "PLANNER_RESPONSE", "created_at": now, "content": reply})
     with open(pe_tp, "w", encoding="utf-8") as f:
         f.write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
-    return stop_mod.decide({
+    return keep(stop_mod.decide({
         "conversationId": pe_cid, "transcriptPath": pe_tp, "artifactDirectoryPath": pe_art,
         "workspacePaths": [ws_plan], "modelName": "Claude Opus 5.5 (High)",
         "terminationReason": "NO_TOOL_CALL", "fullyIdle": True, "executionNum": 0,
-    })
+    }))
+def keep(reason):
+    REASONS.append(reason) if reason else None
+    return reason
 pe_open = "Открытый пункт" in (run_pe_decide("План готов.") or "")
 pe_ann = "ended your turn without doing it" in (run_pe_decide("Сейчас запущу тесты.") or "")
 pe_open_skip = run_pe_decide("План готов.", handed=True) is None
@@ -181,6 +189,30 @@ print(f"{'✅' if pe_ok else '❌'} plan_execute:true: task.md & ann checked unl
 shutil.rmtree(pe_root, ignore_errors=True)
 if os.path.exists(pe_state):
     os.remove(pe_state)
+
+# Sent back over its report, an agent wrote the whole report again (seen live: the user saw it twice). Every return,
+# whatever its cause, ends with the same steps: the work first, then only what changed.
+kinds = {k: any(k in r for r in REASONS) for k in ("task.md", "facts", "ended your turn without doing it", "ran no check",
+                                                  "in the background")}
+ends = [r for r in REASONS if not r.endswith(stop_mod.AFTER) or r.count(stop_mod.AFTER) != 1]
+after_ok = REASONS and not ends and all(kinds.values()) and stop_mod.AFTER.index("1. Do") < stop_mod.AFTER.index("2. Reply")
+ok &= bool(after_ok)
+print(f"{'✅' if after_ok else '❌'} each of {len(REASONS)} returns ends once with the shared ending (work first, then a short reply) → "
+      f"kinds={kinds}, bad={[r[:80] for r in ends]}")
+# The same report again after a facts return, and nothing new to say: the hook is quiet (no loop).
+with open(task, "w", encoding="utf-8") as f:
+    f.write("## План\n- [x] Пункт\n")
+setup("Сделай сортировку", "Готово, все тесты проходят.", "## План\n- [x] Пункт\n")
+first_facts, _ = run()
+note = REASONS[-1] if first_facts else ""
+rows = [json.loads(x) for x in open(tp, encoding="utf-8")]
+rows += [{"step_index": 2, "type": "SYSTEM_MESSAGE", "content": f"<SYSTEM_MESSAGE>\nStop hook blocked termination: {note}\n</SYSTEM_MESSAGE>"},
+         {"step_index": 3, "type": "PLANNER_RESPONSE", "content": "Готово, все тесты проходят."}]
+open(tp, "w", encoding="utf-8").write("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n")
+again_facts, _ = run({"executionNum": 1, "continuationActive": True})
+quiet_ok = first_facts and "facts" in note and not again_facts
+ok &= quiet_ok
+print(f"{'✅' if quiet_ok else '❌'} the same report after a facts return → quiet → first {first_facts}, again {again_facts}")
 
 shutil.rmtree(art); os.path.exists(state) and os.remove(state)
 print("ALL OK" if ok else "FAILURES")

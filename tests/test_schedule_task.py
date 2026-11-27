@@ -21,6 +21,7 @@ SIDECARS = os.path.join(HOME, ".gemini", "config", "sidecars")
 CACHE = os.path.join(HOME, ".gemini", "antigravity-plus", "quota.json")
 WS = os.path.join(SP, "sample-workspace")
 os.makedirs(WS, exist_ok=True)
+os.makedirs(os.path.join(HOME, ".gemini", "antigravity"), exist_ok=True)  # the App is set up here
 
 ok = True
 
@@ -654,6 +655,22 @@ check(
 # Remove missing slug fails cleanly
 r = run_cli("remove", "--slug", "nightly-audit")
 check("remove missing slug exits non-zero", r.returncode != 0, r.stdout + r.stderr)
+
+# A computer with only the Antigravity CLI: no sidecar is written, the user is told why
+if os.name != "nt":
+    import shutil
+    bin_dir = os.path.join(SP, "cli-bin")
+    os.makedirs(bin_dir, exist_ok=True)
+    fake_agy = os.path.join(bin_dir, "agy")
+    with open(fake_agy, "w") as f:
+        f.write("#!/bin/sh\necho 1.5.18\n")
+    os.chmod(fake_agy, 0o755)
+    shutil.rmtree(os.path.join(HOME, ".gemini", "antigravity"))
+    r = run_cli("create", "--slug", "cli-only", "--schedule", "0 9 * * *", "--prompt", "x",
+                env_overrides={"PATH": bin_dir + os.pathsep + os.environ.get("PATH", "")})
+    check("CLI only (no App data folder): create refuses and says automations need the App",
+          r.returncode != 0 and "Antigravity App" in r.stderr and not os.path.exists(os.path.join(SIDECARS, "agp-cli-only")),
+          r.stdout + r.stderr)
 
 print("ALL OK" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

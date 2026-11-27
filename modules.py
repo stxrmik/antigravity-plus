@@ -8,7 +8,7 @@ Each module: id, title, summary (one line) and details (what it does, what you l
 Russian and English; skills (folder names under skills/), agents (agents/<name>.md), rules (rules/<file>), sidecars
 (sidecars/<name>), off (settings forced while the module is missing), needs (tools it uses, checked to warn), claude
 (Claude Code's side, installed into ~/.claude); keep (paths installed even without the module — scripts the
-hooks need). Stdlib only, Python 3.8+.
+hooks need). GROUPS: the headings of the installer's menu. Stdlib only, Python 3.8+.
 """
 from __future__ import annotations
 
@@ -307,16 +307,16 @@ MODULES: List[Dict] = [
                     "en": "tokens and cost, Control Center sidecar, /context, /insights, /standup, /export, /schedule-task"},
         "details": {
             "ru": "/usage: токены, кэш, заполнение контекста и стоимость по ценам API, разбивка по ходам и "
-                  "субагентам, HTML-отчёт. Боковая панель 2.0 «Центр управления» показывает расходы, 5-часовой и "
+                  "субагентам, HTML-отчёт. Боковая панель 2.0 «Центр управления» (только в Antigravity Desktop) показывает расходы, 5-часовой и "
                   "недельный лимиты Antigravity, активных агентов в проектах, задачи моста Claude ↔ Antigravity, "
                   "запущенные LSP-серверы (с RAM и остановкой), переключатели настроек и журнал guard. /context — что "
                   "занимает окно контекста; /insights — статистика хуков и guard; /standup — сводка за день/неделю; "
-                  "/export — разговор в Markdown со скрытыми секретами; /schedule-task — квото-зависимые расписания Antigravity (включаются в панели Automations).",
+                  "/export — разговор в Markdown со скрытыми секретами; /schedule-task — квото-зависимые расписания Antigravity Desktop (включаются в панели Automations).",
             "en": "/usage: tokens, cache, context fill and the API-price cost, broken down by turn and subagent, with "
-                  "an HTML report. The Control Center 2.0 side panel shows usage, Antigravity's 5-hour and weekly limits, "
+                  "an HTML report. The Control Center 2.0 side panel (Antigravity Desktop only) shows usage, Antigravity's 5-hour and weekly limits, "
                   "active workspace agents, Claude ↔ Antigravity tasks, running LSP daemons (RAM + Stop), coaching "
                   "toggles, and the guard feed. /context shows what fills context; /insights reports hook/guard stats; "
-                  "/standup — work across projects; /export — redacted Markdown export; /schedule-task — quota-gated Antigravity automations (enabled in the Automations dashboard).",
+                  "/standup — work across projects; /export — redacted Markdown export; /schedule-task — quota-gated Antigravity Desktop automations (enabled in the Automations dashboard).",
         },
         "skills": ["usage", "standup", "export", "context", "insights", "schedule-task"],
         "sidecars": ["usage"],
@@ -351,5 +351,15 @@ MODULES: List[Dict] = [
     },
 ]
 
+# The installer's menu shows the modules under these headings, in this order (MODULES keeps the same order).
+GROUPS: List[Dict] = [
+    {"id": "base", "title": {"ru": "Основа", "en": "Core"}, "modules": ["core"]},
+    {"id": "agent", "title": {"ru": "Как работает агент", "en": "How the agent works"},
+     "modules": ["quality", "facts", "memory", "parallel", "speed"]},
+    {"id": "tools", "title": {"ru": "Инструменты", "en": "Tools"}, "modules": ["git", "lsp", "deploy", "web", "mobile"]},
+    {"id": "more", "title": {"ru": "Панель и мост", "en": "Control Center and bridge"}, "modules": ["usage", "claude"]},
+]
+
 IDS = [m["id"] for m in MODULES]
 BY_ID = {m["id"]: m for m in MODULES}
+GROUP_OF = {mid: g for g in GROUPS for mid in g["modules"]}

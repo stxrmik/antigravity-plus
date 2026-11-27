@@ -39,6 +39,13 @@ RULE_FILE_LIMIT = 24000
 RULES_TOKEN_BUDGET = 20000
 OK, WARN, BAD = "✅", "⚠️", "❌"
 
+# Пути и имена Antigravity CLI — по документации, сверено вживую с agy 1.5.18 (recon 2026-11-27).
+CLI_BIN = "agy"
+CLI_DATA_DIR = os.path.join("~", ".gemini", "antigravity-cli")
+CLI_SETTINGS_PATH = os.path.join(CLI_DATA_DIR, "settings.json")
+CLI_PLUGINS_DIR = os.path.join("~", ".gemini", "config", "plugins", NAME)
+CLI_LOCAL_BIN = os.path.join("~", ".local", "bin", CLI_BIN)
+
 
 # ─────────────────────────────── helpers ───────────────────────────────
 
@@ -630,10 +637,13 @@ def _drop_selftest_log() -> None:
         pass
 
 
-def antigravity_view(inv: dict, workspace: Optional[str]) -> List[str]:
-    ls = discover_ls()
+def antigravity_view(inv: dict, workspace: Optional[str], ls: Optional[Tuple[str, str, str]] = None) -> List[str]:
+    if ls is None:
+        ls = discover_ls()
     if not ls:
-        return [f"{WARN} Antigravity не найден (не запущен, или из песочницы не видно ~/.gemini/antigravity/daemon "
+        if _find_agy():
+            return ["ℹ️ Desktop не найден (не запущен или не установлен)"]
+        return [f"{WARN} Desktop не найден (не запущен, или из песочницы не видно ~/.gemini/antigravity/daemon "
                 "и порта его language server). Внутри Antigravity перезапустите проверку с `BypassSandbox: true`."]
     body = {"workspaceUris": ["file://" + workspace]} if workspace else {}
     try:
@@ -726,6 +736,146 @@ def panel_status(ls: Tuple[str, str, str]) -> str:
     if status in ("starting", "restarting", "pending"):
         return f"⏳ панель «Расход токенов» запускается — через пару секунд будет готова"
     return f"{BAD} панель «Расход токенов»: статус {status or '?'} — лог: ~/.gemini/antigravity/sidecar_data/{sid}/logs/"
+
+
+def _find_agy() -> str:
+    """Return path to `agy` CLI binary, or '' if not found."""
+    fn = getattr(compat, "agy", None)
+    if callable(fn):
+        return fn() or ""
+    found = shutil.which(CLI_BIN)
+    if found:
+        return found
+    home = os.path.expanduser("~")
+    win = getattr(compat, "WINDOWS", os.name == "nt")
+    places = [os.path.expanduser(CLI_LOCAL_BIN)]
+    if win:
+        local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
+        places = [os.path.join(local, CLI_BIN, "bin", CLI_BIN + ext) for ext in (".exe", ".cmd")] + places
+    for place in places:
+        if os.path.isfile(place) and (win or os.access(place, os.X_OK)):
+            return place
+    return ""
+
+
+def _agy_version(exe: str) -> str:
+    """Return `agy` CLI version string, or '' if unknown."""
+    fn = getattr(compat, "agy_version", None)
+    if callable(fn):
+        return fn() or ""
+    if not exe:
+        return ""
+    code, out = run([exe, "--version"], timeout=2.0)
+    if code != 0 and not out:
+        return ""
+    m = re.search(r"\d+\.\d+(?:\.\d+)?", out)
+    return m.group(0) if m else ""
+
+
+def cli_plugin_line(exe: str) -> str:
+    """What `agy plugin list` says of this plugin (state and components); "" when it can't tell."""
+    code, out = run([exe, "plugin", "list"], timeout=10.0)
+    lines = out.splitlines() if code == 0 else []
+    for i, line in enumerate(lines):
+        m = re.match(r"^\s*-\s*" + re.escape(NAME) + r"\s*\(([^)]*)\)", line)
+        if not m:
+            continue
+        comp = next((l.split(":", 1)[1].strip() for l in lines[i + 1:i + 4] if l.strip().lower().startswith("components:")), "")
+        state = m.group(1).split(",")[0].strip()
+        mark = OK if state == "enabled" else WARN
+        return f"{mark} CLI видит плагин (`agy plugin list`): {state}" + (f" · {comp}" if comp else "")
+    return f"{WARN} `agy plugin list` не показывает {NAME} — запустите `./install.sh`" if code == 0 else ""
+
+
+def cli_status() -> List[str]:
+    """Check Antigravity CLI binary, plugin visibility, and CLI settings readability."""
+    exe = _find_agy()
+    if not exe:
+        return ["ℹ️ Antigravity CLI не найден"]
+    ver = _agy_version(exe)
+    out = [f"{OK} Antigravity CLI: `{exe}`" + (f" · версия {ver}" if ver else " (версия неизвестна)")]
+    listed = cli_plugin_line(exe)
+    plugin_dir = os.path.expanduser(CLI_PLUGINS_DIR)
+    if listed:
+        out.append(listed)
+    elif os.path.isdir(plugin_dir):
+        out.append(f"{OK} папка плагина видна CLI: `{CLI_PLUGINS_DIR}`")
+    else:
+        out.append(f"{WARN} папка плагина `{CLI_PLUGINS_DIR}` не найдена — запустите `./install.sh`")
+    settings_path = os.path.expanduser(CLI_SETTINGS_PATH)
+    if not os.path.isfile(settings_path):
+        out.append(f"ℹ️ настройки `{CLI_SETTINGS_PATH}`: нет файла")
+    else:
+        try:
+            with open(settings_path, encoding="utf-8", errors="replace") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                keys = sorted(str(k) for k in data.keys())
+                shown = ", ".join(keys[:10]) + ("…" if len(keys) > 10 else "")
+                out.append(f"{OK} настройки `{CLI_SETTINGS_PATH}`: читается (ключи: {shown or 'пусто'})")
+            else:
+                out.append(f"{OK} настройки `{CLI_SETTINGS_PATH}`: читается (JSON)")
+        except (OSError, ValueError):
+            out.append(f"{WARN} настройки `{CLI_SETTINGS_PATH}`: не JSON")
+    out.append("ℹ️ в CLI нет панели «Расход токенов» и автоматизаций (/schedule-task)")
+    return out
+
+
+def _human_age(at: object) -> str:
+    if not isinstance(at, (int, float)) or isinstance(at, bool) or at <= 0:
+        return "возраст неизвестен"
+    diff = max(0, int(time.time() - float(at)))
+    if diff < 60:
+        return "только что"
+    if diff < 3600:
+        return f"{diff // 60} мин назад"
+    if diff < 86400:
+        return f"{diff // 3600} ч назад"
+    return f"{diff // 86400} дн. назад"
+
+
+def _parse_ver(v: str) -> Tuple[int, ...]:
+    m = re.search(r"(\d+(?:\.\d+)+)", v or "")
+    if not m:
+        return ()
+    return tuple(int(p) for p in m.group(1).split("."))
+
+
+def _ver_newer(a: str, b: str) -> bool:
+    pa, pb = _parse_ver(a), _parse_ver(b)
+    if not pa or not pb:
+        return False
+    n = max(len(pa), len(pb))
+    return pa + (0,) * (n - len(pa)) > pb + (0,) * (n - len(pb))
+
+
+def client_status(ls: Optional[Tuple[str, str, str]] = None) -> List[str]:
+    """Report client snapshot source, age, version, and staleness against running Desktop."""
+    try:
+        import client as client_mod  # type: ignore[import-not-found]
+    except ImportError:
+        return [f"{WARN} модуль данных клиента не установлен"]
+    try:  # a broken module must not stop the report
+        snap = client_mod.snapshot()
+        if not isinstance(snap, dict):
+            snap = {}
+        snap_ver = str(snap.get("client") or client_mod.version() or "?")
+        is_stale = bool(client_mod.stale(snap))
+    except Exception as e:
+        return [f"{WARN} данные клиента не читаются: {type(e).__name__}"]
+    source = str(snap.get("source") or "?")
+    age = _human_age(snap.get("at"))
+    if ls is None:
+        ls = discover_ls()
+    desktop_ver = ls[2] if ls and len(ls) > 2 else ""
+    outdated = bool(desktop_ver and snap_ver != "?" and _ver_newer(desktop_ver, snap_ver))
+    out = [f"{OK if not (is_stale or outdated) else WARN} источник: {source} · версия снимка: {snap_ver} · {age}"]
+    if outdated:
+        out.append(f"{WARN} запущенный Desktop ({desktop_ver}) новее снимка ({snap_ver}) — данные могут быть устаревшими")
+    if is_stale:
+        out.append(f"{WARN} снимок данных клиента устарел — обновится сам при следующем разговоре "
+                   "(или `python3 ~/.gemini/config/plugins/antigravity-plus/hooks/client.py refresh`)")
+    return out
 
 
 def environment() -> List[str]:
@@ -1085,7 +1235,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             rep.append(f"{WARN} rules/{name} {size} байт > лимита {RULE_FILE_LIMIT} — будет обрезан")
     rep.append(modules_line())
     rep.append(update_line())
-    rep += ["", "### Что видит Antigravity"] + antigravity_view(inv, ws)
+    ls = discover_ls()
+    rep += ["", "### Что видит Antigravity"] + antigravity_view(inv, ws, ls=ls)
+    rep += ["", "### Antigravity CLI"] + cli_status()
+    rep += ["", "### Данные клиента"] + client_status(ls=ls)
     rep += ["", "### Хуки (самопроверка)"] + hook_selftest()
     rep += ["", "### Окружение"] + environment()
     rep += ["", "### Текущий проект"] + workspace_info(ws)

@@ -17,6 +17,7 @@ for var in ("ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVITY_CSRF_TOKEN", "AGP_WINDOW_CHEC
             "AGY_CLI_AUTO_COMPACT_OVERRIDE"):
     os.environ.pop(var, None)
 sys.path.insert(0, HOOKS)
+import client  # noqa: E402
 import compat  # noqa: E402
 import context_window as cw  # noqa: E402
 import speed  # noqa: E402
@@ -204,6 +205,54 @@ del asked[:]
 check("refresh() of a call older than FRESH: nothing asked, nothing recorded",
       cw.refresh(CID, 3, time.time() - cw.FRESH - 5) is None and not asked and not os.path.exists(CACHE))
 
+# client_window() and best() (hooks/client.py)
+check("client_window(): bundled snapshot for Neon, Orchestrator (Neon), Claude 5.5 (840k), unknown → None",
+      cw.client_window("Gemini 4 Neon (High)") == 512_000
+      and cw.client_window("gemini-4-neon") == 512_000
+      and cw.client_window("orchestrator-neon") == 512_000
+      and cw.client_window("claude-sonnet-5-5") == 840_000
+      and cw.client_window("unknown-model-x") is None,
+      (cw.client_window("Gemini 4 Neon (High)"), cw.client_window("gemini-4-neon"),
+       cw.client_window("orchestrator-neon"), cw.client_window("claude-sonnet-5-5")))
+
+reset()
+cw.record([(["gemini-4-neon"], 600_000, time.time() - 60)])
+check("best(): a fresh reading wins over the client's window", cw.best("gemini-4-neon") == 600_000)
+
+with open(CACHE, "w", encoding="utf-8") as f:
+    json.dump({"v": 1, "models": {"gemini-4-neon": {"window": 256_000, "at": time.time() - cw.FRESH - 60}}}, f)
+check("best(): a reading older than FRESH loses to the client's window",
+      cw.best("gemini-4-neon") == 512_000, cw.best("gemini-4-neon"))
+reset()
+
+_old_cc = os.environ.get("AGP_CLIENT_CACHE")
+_old_bundled = client.BUNDLED
+_custom_cc = os.path.join(SP, "cw-client-cache.json")
+try:
+    os.environ["AGP_CLIENT_CACHE"] = os.path.join(SP, "cw-missing-client.json")
+    client.BUNDLED = os.path.join(SP, "cw-missing-bundled.json")
+    client._memo.clear()
+    check("best(): no client snapshot and no reading → None", cw.best("gemini-4-neon") is None, cw.best("gemini-4-neon"))
+
+    with open(_custom_cc, "w", encoding="utf-8") as f:
+        json.dump({"v": 1, "at": int(time.time()), "models": {
+            "gemini-4-neon-high": {"id": "gemini-4-neon-high", "label": "Gemini 4 Neon (High)",
+                                   "family": "gemini-4-neon", "effort": "high", "provider": "google", "window": 1_000_000},
+        }}, f)
+    os.environ["AGP_CLIENT_CACHE"] = _custom_cc
+    client._memo.clear()
+    check("client_window(): follows a hand-written cache snapshot (1_000_000)",
+          cw.client_window("gemini-4-neon-high") == 1_000_000, cw.client_window("gemini-4-neon-high"))
+finally:
+    if _old_cc is None:
+        os.environ.pop("AGP_CLIENT_CACHE", None)
+    else:
+        os.environ["AGP_CLIENT_CACHE"] = _old_cc
+    client.BUNDLED = _old_bundled
+    if os.path.exists(_custom_cc):
+        os.remove(_custom_cc)
+    client._memo.clear()
+
 
 # ─────────────────────────────── 4. the context hints (hooks/speed.py) ───────────────────────────────
 check("ctx_limits() without a reading: the numbers known at release",
@@ -228,10 +277,10 @@ reset()
 del asked[:]
 payload = {"conversationId": CID, "modelName": "gemini-4-carbon-high"}
 calls, sp = {"n_calls": 3, "ctx_at": iso(20)}, {}
-check("real_window(): no call made yet → nothing asked",
-      speed.real_window(payload, {}, {}, "gemini-4-carbon-high") is None and not asked)
+check("real_window(): no call made yet → nothing asked, the client's window (hooks/client.py snapshot)",
+      speed.real_window(payload, {}, {}, "gemini-4-carbon-high") == 512_000 and not asked)
 check("real_window(): calls counted from the middle (begun under an older version) → nothing asked",
-      speed.real_window(payload, dict(calls, n_partial=True), {}, "gemini-4-carbon-high") is None and not asked)
+      speed.real_window(payload, dict(calls, n_partial=True), {}, "gemini-4-carbon-high") == 512_000 and not asked)
 w = speed.real_window(payload, calls, sp, "gemini-4-carbon-high")
 check("real_window(): no reading → asks its own latest call after the first one, records it",
       w == 600_000 and asked == [(CID, 1)] and sp.get("win_ask") == {"k": "gemini-4-carbon", "n": 3}
@@ -258,8 +307,8 @@ reset()
 SWITCH = "dddddddd-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 CALLS[SWITCH] = [entry(1, 512000, "Gemini 4 Neon (High)", "gemini-4-neon")]
 sp = {}
-check("real_window(): the user switched to Claude — Neon's latest call is no reading of Claude's window",
-      speed.real_window({"conversationId": SWITCH}, {"n_calls": 1, "ctx_at": iso(20)}, sp, "claude-sonnet-5-5-high") is None
+check("real_window(): the user switched to Claude — Neon's latest call is no reading of Claude's window (the client's 840k)",
+      speed.real_window({"conversationId": SWITCH}, {"n_calls": 1, "ctx_at": iso(20)}, sp, "claude-sonnet-5-5-high") == 840_000
       and "win_conv" not in sp and cw.window("gemini-4-neon") == 512000, sp)
 reset()
 with open(CACHE, "w", encoding="utf-8") as f:  # a reading older than STALE (written by hand: record() keeps only fresh ones)
@@ -277,11 +326,36 @@ check(f"real_window(): … until {speed.ASK_AGAIN} calls later (an overcount of 
       and asked == [(CID, 1 + speed.ASK_AGAIN), (CID, 0)], asked)
 reset()
 del asked[:]
-check("real_window(): the latest call is days old (an old conversation resumed) → not asked, the table applies",
-      speed.real_window(payload, {"n_calls": 3, "ctx_at": iso(3 * 86400)}, {}, "gemini-4-carbon-high") is None
+check("real_window(): the latest call is days old (an old conversation resumed) → not asked, the client's window",
+      speed.real_window(payload, {"n_calls": 3, "ctx_at": iso(3 * 86400)}, {}, "gemini-4-carbon-high") == 512_000
       and not asked)
 check("real_window(): never raises on odd state",
       speed.real_window({}, {"n_calls": "x", "ctx_at": 5}, {"win_ask": "odd"}, "gemini-4-carbon-high") is None)
+
+cli_tp = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli", "brain", CID, ".system_generated", "logs", "transcript_full.jsonl")
+desk_tp = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity", "brain", CID, ".system_generated", "logs", "transcript_full.jsonl")
+cli_payload = {"conversationId": CID, "modelName": "gemini-4-carbon-high", "transcriptPath": cli_tp}
+desk_payload = {"conversationId": CID, "modelName": "gemini-4-carbon-high", "transcriptPath": desk_tp}
+check("cli_session(): True for antigravity-cli transcriptPath, False for Desktop",
+      speed.cli_session(cli_payload) is True and speed.cli_session(desk_payload) is False,
+      (speed.cli_session(cli_payload), speed.cli_session(desk_payload)))
+reset()
+del asked[:]
+check("real_window() in CLI session (transcriptPath): asks nothing, returns client window (512000)",
+      speed.real_window(cli_payload, calls, {}, "gemini-4-carbon-high") == 512_000 and not asked,
+      (speed.real_window(cli_payload, calls, {}, "gemini-4-carbon-high"), asked))
+os.environ["AGP_RUNTIME"] = "cli"
+del asked[:]
+w_cli_env = speed.real_window({"conversationId": CID, "modelName": "gemini-4-carbon-high"}, calls, {}, "gemini-4-carbon-high")
+os.environ.pop("AGP_RUNTIME", None)
+check("real_window() in CLI session (AGP_RUNTIME=cli): asks nothing, returns client window (512000)",
+      w_cli_env == 512_000 and not asked, (w_cli_env, asked))
+cw.record([(["gemini-4-carbon"], 600_000, time.time() - 60)])
+del asked[:]
+check("real_window() in CLI session with fresh reading: asks nothing, returns recorded reading (600000)",
+      speed.real_window(cli_payload, calls, {}, "gemini-4-carbon-high") == 600_000 and not asked,
+      (speed.real_window(cli_payload, calls, {}, "gemini-4-carbon-high"), asked))
+reset()
 
 # how the hook counts calls (hooks/conversation.py)
 import conversation as conv  # noqa: E402
@@ -436,13 +510,13 @@ check("usage --recent: its cache is computed again when a recorded window change
       (first.get("context") or {}).get("window") == 640_000, r.stdout[:600] + r.stderr)
 out, err = usage("--json", "--model", "gemini-3.8-flash")
 ctx = (json.loads(out or "{}").get("context") or {})
-check("usage --model: that model's window (pricing.json), not the conversation's",
-      ctx.get("window") == 256_000 and ctx.get("window_source") == "pricing", ctx)
+check("usage --model: that model's window (the client's snapshot, before pricing.json), not the conversation's",
+      ctx.get("window") == 256_000 and ctx.get("window_source") == "client", ctx)
 reset()
 out, err = usage("--json", env_extra={"ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:9"})
 ctx = (json.loads(out or "{}").get("context") or {})
-check("usage with no server and nothing recorded: pricing.json's 512k, as before",
-      ctx.get("window") == 512_000 and ctx.get("window_source") == "pricing", ctx)
+check("usage with no server and nothing recorded: the client's 512k (its snapshot), before pricing.json",
+      ctx.get("window") == 512_000 and ctx.get("window_source") == "client", ctx)
 r = subprocess.run([sys.executable, CONTEXT, "--root", SP, "--conversation", CID, "--json"], capture_output=True, text=True,
                    encoding="utf-8", errors="replace")
 cj = json.loads(r.stdout or "{}")

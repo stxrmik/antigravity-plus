@@ -145,6 +145,29 @@ def window(model: str) -> Optional[int]:
     return found[0] if found else None
 
 
+def client_window(model: str) -> Optional[int]:
+    """The window the Antigravity client lists for `model` (hooks/client.py's snapshot: GetAvailableModels'
+    checkpointer max_token_limit), known before the model's first call; None when unknown. Reads a file only."""
+    try:
+        import client
+        win = client.window(model)
+        if not win and key(model).startswith("orchestrator-"):
+            win = client.window("orchestrator " + key(model)[len("orchestrator-"):])
+    except Exception:
+        return None
+    return win if sane(win) else None
+
+
+def best(model: str, now: Optional[float] = None) -> Optional[int]:
+    """The window to plan with: a real call's reading made within FRESH seconds → the client's snapshot → None (the
+    caller's own table, pricing.json's context_window, comes next)."""
+    now = time.time() if now is None else now
+    found = lookup(model)
+    if found and now - found[1] <= FRESH:
+        return found[0]
+    return client_window(model)
+
+
 def record(readings: Iterable[Reading], now: Optional[float] = None) -> int:
     """Keep each reading of a call made within FRESH seconds whose model has no newer one; returns how many models
     changed (the file is written only then)."""

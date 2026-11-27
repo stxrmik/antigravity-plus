@@ -1,12 +1,13 @@
 {
-  "_note": "USD per 1M tokens. Prices change — verify on https://www.anthropic.com/pricing and https://ai.google.dev/gemini-api/docs/pricing and edit this file. 'match' is a case-insensitive regex tested against the normalized model name; first match wins, so keep specific patterns (e.g. flash-lite) above generic ones. 'context_window' is the conversation's token limit in Antigravity as known at release — the maxContextTokens its generator metadata and agent-state stream report (verified on Antigravity 2.35.1, 2026-11-25); Antigravity sets it on its servers, so usage.py shows the window it gave the latest call and the newest one recorded per model (hooks/context_window.py, ~/.gemini/antigravity-plus/context-windows.json) before this number: 512k for Gemini 4 (Neon, Carbon, Argon, Hydrogen, Orchestrators and executors) and Gemini 3.5 Flash-Lite, 256k for Gemini 3.8/3.6/3 Flash & 3.1 Pro, 128k for 3.1 Flash-Lite and Gemini 2.5, 840k for Claude 5.5 (1M API window), 80k for GPT-OSS 120B; the native API window is 'api_context_window'. Antigravity compacts when the next model call won't fit the window (or, in the Antigravity CLI only, its AGY_CLI_AUTO_COMPACT_OVERRIDE setting). 'compaction_threshold' (optional) is only for models compacting well below their window. 'price_changes' entries ({from: 'YYYY-MM-DD', …prices}) apply to calls made on or after that local date. 'service_tiers' (Gemini API batch / flex / priority / contributor) are used only with usage.py --tier. Orchestrator (fixed or configurable Planner/Executor in Settings > Models) prices planner calls at the planner's model and executor calls at the executor's model (Gemini 4 Hydrogen or Claude Sonnet 5.5).",
-  "_updated": "2026-11-25",
-  "default_model": "claude-opus-5.5",
-  "default_context_window": 200000,
+  "_note": "USD per 1M tokens. Prices change — verify on https://www.anthropic.com/pricing and https://ai.google.dev/gemini-api/docs/pricing and edit this file. 'match' is a case-insensitive regex tested against the normalized model name; first match wins, so keep specific patterns (e.g. flash-lite) above generic ones. 'context_window' is the conversation's token limit in Antigravity as known at release — the maxContextTokens its generator metadata and agent-state stream report (verified on Antigravity 2.35.1, 2026-11-25); Antigravity sets it on its servers, so usage.py shows the window it gave the latest call and the newest one recorded per model (hooks/context_window.py, ~/.gemini/antigravity-plus/context-windows.json), then the window the client's own model list gives (hooks/client.py), before this number: 512k for Gemini 4 (Neon, Carbon, Argon, Hydrogen, Orchestrators and executors), 256k for Gemini 3.8/3.6/3 Flash & 3.1 Pro, 128k for 3.5/3.1 Flash-Lite and Gemini 2.5 (the client's list on 2.35.2, 2026-11-27), 840k for Claude 5.5 (1M API window), 80k for GPT-OSS 120B; the native API window is 'api_context_window'. Antigravity compacts when the next model call won't fit the window (or, in the Antigravity CLI only, its AGY_CLI_AUTO_COMPACT_OVERRIDE setting). 'compaction_threshold' (optional) is only for models compacting well below their window. 'price_changes' entries ({from: 'YYYY-MM-DD', …prices}) apply to calls made on or after that local date. 'service_tiers' (Gemini API batch / flex / priority / contributor) are used only with usage.py --tier. Orchestrator (fixed or configurable Planner/Executor in Settings > Models) prices planner calls at the planner's model and executor calls at the executor's model (Gemini 4 Hydrogen or Claude Sonnet 5.5).",
+  "_updated": "2026-11-27",
+  "_fallbacks": "default_model, default_context_window and subagent_model_aliases are last resorts: usage.py takes the default model, the windows and the flash/pro aliases from the Antigravity client itself (hooks/client.py: its cached reading, else the snapshot bundled with the plugin) and uses these only when neither is readable. They match Antigravity 2.35.2 (defaultAgentModelId, tieredModelIds). A model missing from 'models' is priced by the client's family of it (its family / family label against 'match'); one no rule covers is shown as «цена неизвестна» and costs 0, never the default model's price.",
+  "default_model": "gemini-4-neon-high",
+  "default_context_window": 512000,
   "subagent_model_aliases": {
     "flash_lite": "gemini-3.5-flash-lite",
-    "flash": "gemini-4-hydrogen",
-    "pro": "gemini-4-hydrogen"
+    "flash": "gemini-4-hydrogen-tiered-high",
+    "pro": "gemini-4-hydrogen-tiered-xhigh"
   },
   "models": [
     {
@@ -192,7 +193,7 @@
       "label": "Gemini 3.5 Flash-Lite",
       "match": "gemini[-_ ]?3\\.5[-_ ]?flash[-_ ]?lite",
       "input": 0.30, "output": 2.50, "cache_read": 0.03, "cache_write": 0.30,
-      "context_window": 512000,
+      "context_window": 128000,
       "api_context_window": 1000000,
       "service_tiers": {
         "batch": {"input": 0.15, "output": 1.25, "cache_read": 0.015, "cache_write": 0.15},

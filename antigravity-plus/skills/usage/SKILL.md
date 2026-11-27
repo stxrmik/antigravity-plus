@@ -1,7 +1,7 @@
 ---
 name: usage
 description: >-
-  Token usage and API-equivalent cost of this conversation or all of them: tokens, cache, context fill, per-turn
+  Token usage and API-equivalent cost of this conversation or all of them (Antigravity Desktop and CLI): tokens, cache, context fill, per-turn
   breakdown, subagents, plan limits, plus a live side panel. Use when the user asks about tokens, context, cost or
   limits («сколько потратили», «сколько осталось лимита», /usage, /cost), and on your own when a long conversation
   may be near its context limit, to decide whether to suggest /handoff.

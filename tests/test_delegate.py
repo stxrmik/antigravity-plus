@@ -289,7 +289,7 @@ check("models: ultra after strong — Gemini 4 Carbon at its recommended High ef
       and "recommended High effort" in out, out)
 check("models: the models in no tier are listed as Experimental, each with a word on when it fits",
       "Experimental — in no tier" in out and "gemini-4-neon-xhigh" in out.split("Experimental — in no tier")[1].split("All models")[0]
-      and "the deepest Neon" in out and "gemini-4-hydrogen-medium " not in out.split("Experimental — in no tier")[1].split("All models")[0], out)
+      and "Neon at its deepest effort" in out and "gemini-4-hydrogen-medium " not in out.split("Experimental — in no tier")[1].split("All models")[0], out)
 check("models: the Claude tier falls back to a Gemini model with quota left", "claude    gemini-4-neon-medium" in out
       and "Claude Sonnet 5.5 (High): quota used up — resets in 22 h → next with quota left" in out
       and "«Claude and GPT models»: used up — resets in 22 h → unavailable" in out, out)
@@ -306,9 +306,9 @@ check("models: Gemini 4 Neon (High) is Antigravity's default", "Antigravity's de
       and "Antigravity's default" not in line_of(out, "gemini-4-carbon-medium "), out)
 code, out = run("models", "--json")
 exp_json = json.loads(out)["experimental"]
-check("models --json: the experimental models with their notes (incl. Nov-30-leaving 3.8 Flash)",
+check("models --json: the experimental models (in no tier) with notes, no leaving date baked in",
       list(exp_json) == ["gemini-4-neon-xhigh", "gemini-3.8-flash-medium"]
-      and "2026-11-30" in exp_json["gemini-3.8-flash-medium"], out)
+      and "2026-11-30" not in exp_json["gemini-3.8-flash-medium"] and "Neon" in exp_json["gemini-4-neon-xhigh"], out)
 check("models --json", code == 0 and json.loads(out)["tiers"]["claude"] == "gemini-4-neon-medium"
       and json.loads(out)["states"]["Gemini Models"]["status"] == "ok" and json.loads(out)["default"] == "gemini-4-neon-high", out)
 # strong by the 2026-11-20 benchmark: Neon (Medium), then Hydrogen (High), Neon (High), Orchestrator (Neon); Carbon and
@@ -641,9 +641,9 @@ import conversation as conv
 sys.path.insert(0, os.path.dirname(DELEGATE))
 import delegate
 check("parse_ts: a month 13 is unparsable, not an exception", delegate.parse_ts("2026-13-01T00:00:00Z") is None)
-orch = delegate.EXPERIMENTAL["gemini-pro-orchestrator-argon"]
-check("EXPERIMENTAL: Orchestrator (Argon) isn't said to be removed — only Argon leaves on 2026-11-30",
-      "removes it" not in orch and "removes Argon on 2026-11-30" in orch and "hasn't said what happens" in orch, orch)
+check("no leaving dates or hand-kept experimental list in the bridge: Antigravity's own tags say it",
+      not hasattr(delegate, "EXPERIMENTAL") and "2026-11-30" not in open(DELEGATE, encoding="utf-8").read()
+      and all(isinstance(r, tuple) and len(r) == 2 for rules in delegate.TIERS.values() for r in rules))
 check("TIER_USE: standard ~1–4 min; ultra says Carbon (High) hit the 9-minute cap, took 11–26 min and --timeout stays",
       "~1–4 min" in delegate.TIER_USE["standard"] and "9-minute cap" in delegate.TIER_USE["ultra"]
       and "11–26 min" in delegate.TIER_USE["ultra"] and "don't lower --timeout" in delegate.TIER_USE["ultra"]
@@ -677,20 +677,19 @@ renamed = [{"id": f"m-{i}", "label": label, "left": 0.5, "reset": "", "enum": ""
            enumerate(["Gemini 4 Neon (XHigh)", "Gemini 4 Neon (High)", "Gemini 4 Carbon (High)", "Orchestrator (Neon)",
                       "Gemini 4 Hydrogen (High)", "Orchestrator (Carbon)", "Gemini 4 Neon (Medium)",
                       "Gemini 4 Hydrogen (Medium)", "Gemini 4 Hydrogen (Low)"])]
-got = [m["label"] for m in delegate.generic("strong", renamed, "")]
-check("generic (ids renamed): strong takes Neon (Medium), Hydrogen (High), Neon (High), Orchestrator (Neon), then the "
-      "other (High)", got == ["Gemini 4 Neon (Medium)", "Gemini 4 Hydrogen (High)", "Gemini 4 Neon (High)",
-                              "Orchestrator (Neon)", "Gemini 4 Carbon (High)"], got)
+rid = lambda tier, models, dflt="": delegate.tier_ids(tier, models, dflt)
+liveish = [{"id": i, "label": i} for i in ("gemini-4-neon-high", "gemini-4-hydrogen-high", "gemini-pro-orchestrator-neon",
+                                             "gemini-4-neon-medium", "claude-opus-5-5-high")]
+check("tier rules: resolved to the live ids in the measured order, a rule without a live model skipped",
+      rid("strong", liveish) == ["gemini-4-neon-medium", "gemini-4-hydrogen-high", "gemini-4-neon-high",
+                                 "gemini-pro-orchestrator-neon", "claude-opus-5-5-high"], rid("strong", liveish))
+check("tier rules: Orchestrator (Carbon) is gemini-pro-orchestrator; a tier with no live model takes the default",
+      rid("ultra", [{"id": "gemini-pro-orchestrator", "label": "x"}]) == ["gemini-pro-orchestrator"]
+      and rid("fast", renamed, "m-1") == ["m-1"] and rid("fast", renamed) == [], rid("fast", renamed, "m-1"))
 fresh = [{"id": "gemini-9-test", "label": "Gemini 9 Test (High)", "note": "A model added later"},
          {"id": "gemini-4-hydrogen-low", "label": "Gemini 4 Hydrogen (Low)", "note": ""}]
 check("experimental: a model Antigravity adds later shows up with Antigravity's own description; tier models don't",
       [(m["id"], n) for m, n in delegate.experimental(fresh)] == [("gemini-9-test", "A model added later")])
-got = [m["label"] for m in delegate.generic("ultra", renamed, "")][:3]
-check("generic (ids renamed): ultra takes Carbon (High), Orchestrator (Carbon), then Neon (High)",
-      got == ["Gemini 4 Carbon (High)", "Orchestrator (Carbon)", "Gemini 4 Neon (High)"], got)
-got = [m["label"] for m in delegate.generic("standard", renamed, "")][:3]
-check("generic (ids renamed): standard takes Hydrogen (Medium), Hydrogen (High), Neon (Medium)",
-      got == ["Gemini 4 Hydrogen (Medium)", "Gemini 4 Hydrogen (High)", "Gemini 4 Neon (Medium)"], got)
 ms, default = delegate.models(LIVE)
 pick_id = lambda words, order=ms: (delegate.fuzzy(words, order) or {}).get("id")
 check("a few words: «orchestrator» is Orchestrator (Carbon) though Antigravity lists Orchestrator (Neon) first; "

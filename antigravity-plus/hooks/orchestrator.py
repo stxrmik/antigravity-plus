@@ -133,6 +133,40 @@ _WRAPPER_RE = re.compile(r"^[ \t]*<SYSTEM_MESSAGE>[ \t]*\r?$", re.M)
 _PREAMBLE = "The following is a <SYSTEM_MESSAGE>"
 _ROLE_OK_RE = re.compile(r"[\w .()/+-]+")
 MAX_ROLE = 60
+# The Orchestrator's executor as Antigravity 2.35.2 lists it (GetAvailableModels plan-execute-config): only the fallback
+# for hooks/client.py's snapshot, which names it live.
+EXECUTOR_FALLBACK = {"id": "gemini-flash-worker-agy", "label": "Gemini 4 Hydrogen (Orchestrator)"}
+
+
+def executor() -> dict:
+    """{"id", "label"} of the model that carries an Orchestrator plan out: the client's (hooks/client.py), else
+    EXECUTOR_FALLBACK. Reads a file only."""
+    try:
+        import client
+        found = client.executor()
+        if found.get("id"):
+            return {"id": str(found["id"]), "label": str(found.get("label") or "")}
+    except Exception:
+        pass
+    return dict(EXECUTOR_FALLBACK)
+
+
+def is_orchestrator_model(model: str) -> bool:
+    """An Orchestrator model (planner) or its executor: by the client's snapshot (family «orchestrator», the executor's
+    id or label), else by the name («orchestrator», gemini-flash-worker-agy)."""
+    name = (model or "").strip()
+    if not name:
+        return False
+    low = name.lower()
+    ex = executor()
+    if "orchestrator" in low or low in (ex["id"].lower(), ex["label"].lower()):
+        return True
+    try:
+        import client
+        entry = client.model(name) or {}
+        return entry.get("family") == "orchestrator" or (bool(entry.get("id")) and entry.get("id") == ex["id"])
+    except Exception:
+        return False
 
 
 def _body(content: object) -> str:
@@ -433,8 +467,8 @@ def is_plan_execute(payload: dict, steps: Optional[List[dict]] = None) -> bool:
     """True for classic Orchestrator models, configurable Orchestrator (`plan_execute:true` annotation), or `/plan` turns.
     `steps` are the current turn's steps only (see _since_user): a plan tool call left over from the previous turn
     says nothing about this one."""
-    model = str((payload or {}).get("modelName") or "").lower()
-    if "orchestrator" in model or _annotation_plan_execute(payload):
+    model = str((payload or {}).get("modelName") or "")
+    if is_orchestrator_model(model) or _annotation_plan_execute(payload):
         return True
     return bool(steps and any(_step_has_plan_execute(d) for d in steps))
 

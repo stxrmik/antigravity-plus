@@ -87,11 +87,10 @@ Once per session, and again before you hand over a big batch:
   since Antigravity 2.34; nothing there gives it Carbon. Only the configurable Orchestrator defaults to High effort
   (App 2.35.0: Settings > Models starts at High; there you also pick the Planner/Executor pair). Carbon's API price
   doubles on 2026-12-01.
-- **Experimental** — every model in no tier (`Neon (XHigh)`, `Carbon (Low)`, `Claude Opus 5.5 (Low)`, `Argon`,
-  `Orchestrator (Argon)`, `Gemini 3.8 Flash`, `GPT-OSS 120B`): `delegate.py models` lists them with notes, and any model
-  Antigravity adds later shows up there too. Antigravity itself tags Argon and Gemini 3.8 Flash «Leaving on Nov 30» and
-  says GPT-OSS will be removed on 2026-11-30; it has not said so of Orchestrator (Argon). Take one by its exact id. `--model
-  "orchestrator neon"` is Orchestrator (Neon); `--model orchestrator` is Orchestrator (Carbon).
+- **Experimental** — every model Antigravity offers in no tier: `delegate.py models` lists them with Antigravity's own
+  tags («New», «Leaving on …») and notes, and any model it adds later shows up there too. Take one by its exact id.
+  The tiers are rules (family + effort) resolved against the live model list, so a renamed or retired model drops out
+  by itself. `--model "orchestrator neon"` is Orchestrator (Neon); `--model orchestrator` is Orchestrator (Carbon).
 
 ## Write the brief
 
@@ -127,6 +126,9 @@ It prints the task id at once. Then follow it while you work on your own part:
   an older one, and what a report of `wait` or `result` showed you isn't told again. A task that ended while no watch
   ran gets its end told by the next watch. Just before the monitor's 30-minute limit it ends with exit 0 and «⏳ watch:
   still running … Start it again» — start the same command again. `watch <id> …` follows only those tasks.
+- **Several agents side by side** (subagents of one session): each runs its tasks with `--owner <its name>` and
+  follows them with `watch --owner <its name>` or `wait <id>`; a plain watch never takes a task with an owner or one
+  that a live `watch <id>` named.
 - **Without Monitor:** `python3 ${CLAUDE_SKILL_DIR}/scripts/delegate.py wait <id>` with the Bash tool's
   `run_in_background: true` — you are notified when it finishes, and earlier when it asks you something (exit 4).
 - Plain `run` without `--no-wait` also waits — run it in the background the same way.
@@ -151,8 +153,13 @@ It prints the task id at once. Then follow it while you work on your own part:
   task whose conversation was deleted in Antigravity: nothing more comes from it.
 - It works in the current folder; `--cwd <path>` for another one. The first task in a folder Antigravity doesn't know
   yet creates an Antigravity project for it (the report says so).
+- **Antigravity CLI:** when Antigravity Desktop isn't running but the CLI (`agy`) is installed, tasks run there,
+  headless (`--via auto`, the default; `--via desktop|cli` or `AGP_DELEGATE_VIA` to choose). Everything above works the
+  same, with three differences: no quota figures (`budget` says so), a message sent while a turn runs goes out when the
+  turn ends, and nobody can approve anything — what the guard would ask about is denied and listed in the report
+  (exit 2). `diff` there is the folder's change since the start (git: exact; elsewhere: files by size and time).
 - Exit code: 0 finished · 4 it asks you a question and waits (answer it, then `wait` again) · 2 needs attention (it
-  waits for an approval in Antigravity, or was canceled or failed) · 3 still running after `--timeout` (default
+  waits for an approval in Antigravity, the CLI denied an action, or it was canceled or failed) · 3 still running after `--timeout` (default
   30 min; `wait <id>` goes on waiting) · 1 error (Antigravity not reachable, no model with quota left, …).
 
 ## Chains of pieces and shared templates

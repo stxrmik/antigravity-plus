@@ -1,0 +1,715 @@
+{
+ "aliases": {
+  "flash": "gemini-4-hydrogen-tiered-high",
+  "flash_lite": "gemini-3.5-flash-lite",
+  "pro": "gemini-4-hydrogen-tiered-xhigh"
+ },
+ "at": 1795785889,
+ "client": "2.35.2",
+ "default": "gemini-4-neon-high",
+ "executor": {
+  "id": "gemini-flash-worker-agy",
+  "label": "Gemini 4 Hydrogen (Orchestrator)"
+ },
+ "families": {
+  "claude-opus-5-5": {
+   "efforts": {
+    "high": "claude-opus-5-5-high",
+    "low": "claude-opus-5-5-low",
+    "medium": "claude-opus-5-5-medium"
+   },
+   "label": "Claude Opus 5.5",
+   "provider": "anthropic"
+  },
+  "claude-sonnet-5-5": {
+   "efforts": {
+    "high": "claude-sonnet-5-5-high",
+    "low": "claude-sonnet-5-5-low",
+    "medium": "claude-sonnet-5-5-medium"
+   },
+   "label": "Claude Sonnet 5.5",
+   "provider": "anthropic"
+  },
+  "gemini-2.5-flash": {
+   "efforts": {
+    "": "gemini-2.5-flash"
+   },
+   "label": "Gemini 3.5 Flash Lite",
+   "provider": "google"
+  },
+  "gemini-2.5-flash-lite": {
+   "efforts": {
+    "": "gemini-2.5-flash-lite"
+   },
+   "label": "Gemini 3.5 Flash Lite",
+   "provider": "google"
+  },
+  "gemini-2.5-flash-thinking": {
+   "efforts": {
+    "": "gemini-2.5-flash-thinking"
+   },
+   "label": "Gemini 3.5 Flash Lite",
+   "provider": "google"
+  },
+  "gemini-3-flash": {
+   "efforts": {
+    "": "gemini-3-flash"
+   },
+   "label": "Gemini 3 Flash",
+   "provider": "google"
+  },
+  "gemini-3.1-flash-image": {
+   "efforts": {
+    "": "gemini-3.1-flash-image"
+   },
+   "label": "Gemini 3.1 Flash Image",
+   "provider": "google"
+  },
+  "gemini-3.1-flash-lite": {
+   "efforts": {
+    "": "gemini-3.1-flash-lite"
+   },
+   "label": "Gemini 3.1 Flash Lite",
+   "provider": "google"
+  },
+  "gemini-3.5-flash-lite": {
+   "efforts": {
+    "": "gemini-3.5-flash-lite"
+   },
+   "label": "Gemini 3.5 Flash Lite",
+   "provider": "google"
+  },
+  "gemini-3.8-flash": {
+   "efforts": {
+    "high": "gemini-3.8-flash-high",
+    "low": "gemini-3.8-flash-low",
+    "medium": "gemini-3.8-flash-medium"
+   },
+   "label": "Gemini 3.8 Flash",
+   "provider": "google"
+  },
+  "gemini-3.8-flash-tiered": {
+   "efforts": {
+    "": "gemini-3.8-flash-tiered"
+   },
+   "label": "",
+   "provider": "google"
+  },
+  "gemini-4-argon": {
+   "efforts": {
+    "high": "gemini-4-argon-high",
+    "low": "gemini-4-argon-low",
+    "medium": "gemini-4-argon-medium"
+   },
+   "label": "Gemini 4 Argon",
+   "provider": "google"
+  },
+  "gemini-4-carbon": {
+   "efforts": {
+    "high": "gemini-4-carbon-high",
+    "low": "gemini-4-carbon-low",
+    "medium": "gemini-4-carbon-medium"
+   },
+   "label": "Gemini 4 Carbon",
+   "provider": "google"
+  },
+  "gemini-4-hydrogen": {
+   "efforts": {
+    "high": "gemini-4-hydrogen-high",
+    "low": "gemini-4-hydrogen-low",
+    "medium": "gemini-4-hydrogen-medium",
+    "xhigh": "gemini-4-hydrogen-xhigh"
+   },
+   "label": "Gemini 4 Hydrogen",
+   "provider": "google"
+  },
+  "gemini-4-hydrogen-sonar": {
+   "efforts": {
+    "": "gemini-4-hydrogen-sonar"
+   },
+   "label": "",
+   "provider": "google"
+  },
+  "gemini-4-hydrogen-tiered": {
+   "efforts": {
+    "high": "gemini-4-hydrogen-tiered-high",
+    "xhigh": "gemini-4-hydrogen-tiered-xhigh"
+   },
+   "label": "Gemini 4 Hydrogen",
+   "provider": "google"
+  },
+  "gemini-4-neon": {
+   "efforts": {
+    "high": "gemini-4-neon-high",
+    "low": "gemini-4-neon-low",
+    "medium": "gemini-4-neon-medium",
+    "xhigh": "gemini-4-neon-xhigh"
+   },
+   "label": "Gemini 4 Neon",
+   "provider": "google"
+  },
+  "gemini-flash-worker-agy": {
+   "efforts": {
+    "": "gemini-flash-worker-agy"
+   },
+   "label": "Gemini 4 Hydrogen (Orchestrator)",
+   "provider": "google"
+  },
+  "gpt-oss-120b": {
+   "efforts": {
+    "medium": "gpt-oss-120b-medium"
+   },
+   "label": "GPT-OSS 120B",
+   "provider": "openai"
+  },
+  "orchestrator": {
+   "efforts": {
+    "argon": "gemini-pro-orchestrator-argon",
+    "carbon": "gemini-pro-orchestrator",
+    "neon": "gemini-pro-orchestrator-neon"
+   },
+   "label": "Orchestrator",
+   "provider": "google"
+  }
+ },
+ "models": {
+  "claude-opus-5-5-high": {
+   "effort": "high",
+   "enum": "MODEL_PLACEHOLDER_M402",
+   "family": "claude-opus-5-5",
+   "family_label": "Claude Opus 5.5",
+   "id": "claude-opus-5-5-high",
+   "label": "Claude Opus 5.5 (High)",
+   "note": "",
+   "provider": "anthropic",
+   "recommended": true,
+   "tag": "New",
+   "window": 840000
+  },
+  "claude-opus-5-5-low": {
+   "effort": "low",
+   "enum": "MODEL_PLACEHOLDER_M400",
+   "family": "claude-opus-5-5",
+   "family_label": "Claude Opus 5.5",
+   "id": "claude-opus-5-5-low",
+   "label": "Claude Opus 5.5 (Low)",
+   "note": "",
+   "provider": "anthropic",
+   "recommended": true,
+   "tag": "New",
+   "window": 840000
+  },
+  "claude-opus-5-5-medium": {
+   "effort": "medium",
+   "enum": "MODEL_PLACEHOLDER_M401",
+   "family": "claude-opus-5-5",
+   "family_label": "Claude Opus 5.5",
+   "id": "claude-opus-5-5-medium",
+   "label": "Claude Opus 5.5 (Medium)",
+   "note": "",
+   "provider": "anthropic",
+   "recommended": true,
+   "tag": "New",
+   "window": 840000
+  },
+  "claude-sonnet-5-5-high": {
+   "effort": "high",
+   "enum": "MODEL_PLACEHOLDER_M405",
+   "family": "claude-sonnet-5-5",
+   "family_label": "Claude Sonnet 5.5",
+   "id": "claude-sonnet-5-5-high",
+   "label": "Claude Sonnet 5.5 (High)",
+   "note": "",
+   "provider": "anthropic",
+   "recommended": true,
+   "tag": "New",
+   "window": 840000
+  },
+  "claude-sonnet-5-5-low": {
+   "effort": "low",
+   "enum": "MODEL_PLACEHOLDER_M403",
+   "family": "claude-sonnet-5-5",
+   "family_label": "Claude Sonnet 5.5",
+   "id": "claude-sonnet-5-5-low",
+   "label": "Claude Sonnet 5.5 (Low)",
+   "note": "",
+   "provider": "anthropic",
+   "recommended": true,
+   "tag": "New",
+   "window": 840000
+  },
+  "claude-sonnet-5-5-medium": {
+   "effort": "medium",
+   "enum": "MODEL_PLACEHOLDER_M404",
+   "family": "claude-sonnet-5-5",
+   "family_label": "Claude Sonnet 5.5",
+   "id": "claude-sonnet-5-5-medium",
+   "label": "Claude Sonnet 5.5 (Medium)",
+   "note": "",
+   "provider": "anthropic",
+   "recommended": true,
+   "tag": "New",
+   "window": 840000
+  },
+  "gemini-2.5-flash": {
+   "effort": "",
+   "enum": "MODEL_GOOGLE_GEMINI_2_5_FLASH",
+   "family": "gemini-2.5-flash",
+   "family_label": "Gemini 3.5 Flash Lite",
+   "id": "gemini-2.5-flash",
+   "label": "Gemini 3.5 Flash Lite",
+   "note": "",
+   "provider": "google",
+   "recommended": true,
+   "tag": "",
+   "window": 128000
+  },
+  "gemini-2.5-flash-lite": {
+   "effort": "",
+   "enum": "MODEL_GOOGLE_GEMINI_2_5_FLASH_LITE",
+   "family": "gemini-2.5-flash-lite",
+   "family_label": "Gemini 3.5 Flash Lite",
+   "id": "gemini-2.5-flash-lite",
+   "label": "Gemini 3.5 Flash Lite",
+   "note": "",
+   "provider": "google",
+   "recommended": true,
+   "tag": "",
+   "window": 128000
+  },
+  "gemini-2.5-flash-thinking": {
+   "effort": "",
+   "enum": "MODEL_GOOGLE_GEMINI_2_5_FLASH_THINKING",
+   "family": "gemini-2.5-flash-thinking",
+   "family_label": "Gemini 3.5 Flash Lite",
+   "id": "gemini-2.5-flash-thinking",
+   "label": "Gemini 3.5 Flash Lite",
+   "note": "",
+   "provider": "google",
+   "recommended": true,
+   "tag": "",
+   "window": 128000
+  },
+  "gemini-3-flash": {
+   "effort": "",
+   "enum": "MODEL_PLACEHOLDER_M18",
+   "family": "gemini-3-flash",
+   "family_label": "Gemini 3 Flash",
+   "id": "gemini-3-flash",
+   "label": "Gemini 3 Flash",
+   "note": "",
+   "provider": "google",
+   "recommended": true,
+   "tag": "",
+   "window": 128000
+  },
+  "gemini-3.1-flash-image": {
+   "effort": "",
+   "enum": "MODEL_PLACEHOLDER_M21",
+   "family": "gemini-3.1-flash-image",
+   "family_label": "Gemini 3.1 Flash Image",
+   "id": "gemini-3.1-flash-image",
+   "label": "Gemini 3.1 Flash Image",
+   "note": "",
+   "provider": "google",
+   "recommended": false,
+   "tag": "",
+   "window": null
+  },
+  "gemini-3.1-flash-lite": {
+   "effort": "",
+   "enum": "MODEL_PLACEHOLDER_M50",
+   "family": "gemini-3.1-flash-lite",
+   "family_label": "Gemini 3.1 Flash Lite",
+   "id": "gemini-3.1-flash-lite",
+   "label": "Gemini 3.1 Flash Lite",
+   "note": "",
+   "provider": "google",
+   "recommended": true,
+   "tag": "",
+   "window": 128000
+  },
+  "gemini-3.5-flash-lite": {
+   "effort": "",
+   "enum": "MODEL_PLACEHOLDER_M198",
+   "family": "gemini-3.5-flash-lite",
+   "family_label": "Gemini 3.5 Flash Lite",
+   "id": "gemini-3.5-flash-lite",
+   "label": "Gemini 3.5 Flash Lite",
+   "note": "",
+   "provider": "google",
+   "recommended": true,
+   "tag": "",
+   "window": 128000
+  },
+  "gemini-3.8-flash-high": {
+   "effort": "high",
+   "enum": "MODEL_PLACEHOLDER_M318",
+   "family": "gemini-3.8-flash",
+   "family_label": "Gemini 3.8 Flash",
+   "id": "gemini-3.8-flash-high",
+   "label": "Gemini 3.8 Flash (High)",
+   "note": "Use Hydrogen for better quality with lower quota usage. Leaving on Nov 30.",
+   "provider": "google",
+   "recommended": true,
+   "tag": "Leaving Soon",
+   "window": 256000
+  },
+  "gemini-3.8-flash-low": {
+   "effort": "low",
+   "enum": "MODEL_PLACEHOLDER_M320",
+   "family": "gemini-3.8-flash",
+   "family_label": "Gemini 3.8 Flash",
+   "id": "gemini-3.8-flash-low",
+   "label": "Gemini 3.8 Flash (Low)",
+   "note": "Use Hydrogen for better quality with lower quota usage. Leaving on Nov 30.",
+   "provider": "google",
+   "recommended": true,
+   "tag": "Leaving Soon",
+   "window": 256000
+  },
+  "gemini-3.8-flash-medium": {
+   "effort": "medium",
+   "enum": "MODEL_PLACEHOLDER_M319",
+   "family": "gemini-3.8-flash",
+   "family_label": "Gemini 3.8 Flash",
+   "id": "gemini-3.8-flash-medium",
+   "label": "Gemini 3.8 Flash (Medium)",
+   "note": "Use Hydrogen for better quality with lower quota usage. Leaving on Nov 30.",
+   "provider": "google",
+   "recommended": true,
+   "tag": "Leaving Soon",
+   "window": 256000
+  },
+  "gemini-3.8-flash-tiered": {
+   "effort": "",
+   "enum": "MODEL_PLACEHOLDER_M322",
+   "family": "gemini-3.8-flash-tiered",
+   "family_label": "",
+   "id": "gemini-3.8-flash-tiered",
+   "label": "",
+   "note": "",
+   "provider": "google",
+   "recommended": true,
+   "tag": "",
+   "window": 256000
+  },
+  "gemini-4-argon-high": {
+   "effort": "high",
+   "enum": "MODEL_PLACEHOLDER_M417",
+   "family": "gemini-4-argon",
+   "family_label": "Gemini 4 Argon",
+   "id": "gemini-4-argon-high",
+   "label": "Gemini 4 Argon (High)",
+   "note": "The original Gemini 4 model for advanced workflows. Leaving on Nov 30.",
+   "provider": "google",
+   "recommended": true,
+   "tag": "Leaving Soon",
+   "window": 512000
+  },
+  "gemini-4-argon-low": {
+   "effort": "low",
+   "enum": "MODEL_PLACEHOLDER_M419",
+   "family": "gemini-4-argon",
+   "family_label": "Gemini 4 Argon",
+   "id": "gemini-4-argon-low",
+   "label": "Gemini 4 Argon (Low)",
+   "note": "The original Gemini 4 model for advanced workflows. Leaving on Nov 30.",
+   "provider": "google",
+   "recommended": true,
+   "tag": "Leaving Soon",
+   "window": 512000
+  },
+  "gemini-4-argon-medium": {
+   "effort": "medium",
+   "enum": "MODEL_PLACEHOLDER_M418",
+   "family": "gemini-4-argon",
+   "family_label": "Gemini 4 Argon",
+   "id": "gemini-4-argon-medium",
+   "label": "Gemini 4 Argon (Medium)",
+   "note": "The original Gemini 4 model for advanced workflows. Leaving on Nov 30.",
+   "provider": "google",
+   "recommended": true,
+   "tag": "Leaving Soon",
+   "window": 512000
+  },
+  "gemini-4-carbon-high": {
+   "effort": "high",
+   "enum": "MODEL_PLACEHOLDER_M427",
+   "family": "gemini-4-carbon",
+   "family_label": "Gemini 4 Carbon",
+   "id": "gemini-4-carbon-high",
+   "label": "Gemini 4 Carbon (High)",
+   "note": "For your hardest, long-horizon tasks",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-4-carbon-low": {
+   "effort": "low",
+   "enum": "MODEL_PLACEHOLDER_M438",
+   "family": "gemini-4-carbon",
+   "family_label": "Gemini 4 Carbon",
+   "id": "gemini-4-carbon-low",
+   "label": "Gemini 4 Carbon (Low)",
+   "note": "For your hardest, long-horizon tasks",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-4-carbon-medium": {
+   "effort": "medium",
+   "enum": "MODEL_PLACEHOLDER_M437",
+   "family": "gemini-4-carbon",
+   "family_label": "Gemini 4 Carbon",
+   "id": "gemini-4-carbon-medium",
+   "label": "Gemini 4 Carbon (Medium)",
+   "note": "For your hardest, long-horizon tasks",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-4-hydrogen-high": {
+   "effort": "high",
+   "enum": "MODEL_PLACEHOLDER_M525",
+   "family": "gemini-4-hydrogen",
+   "family_label": "Gemini 4 Hydrogen",
+   "id": "gemini-4-hydrogen-high",
+   "label": "Gemini 4 Hydrogen (High)",
+   "note": "For speed and efficiency in execution tasks",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-4-hydrogen-low": {
+   "effort": "low",
+   "enum": "MODEL_PLACEHOLDER_M527",
+   "family": "gemini-4-hydrogen",
+   "family_label": "Gemini 4 Hydrogen",
+   "id": "gemini-4-hydrogen-low",
+   "label": "Gemini 4 Hydrogen (Low)",
+   "note": "For speed and efficiency in execution tasks",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-4-hydrogen-medium": {
+   "effort": "medium",
+   "enum": "MODEL_PLACEHOLDER_M526",
+   "family": "gemini-4-hydrogen",
+   "family_label": "Gemini 4 Hydrogen",
+   "id": "gemini-4-hydrogen-medium",
+   "label": "Gemini 4 Hydrogen (Medium)",
+   "note": "For speed and efficiency in execution tasks",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-4-hydrogen-sonar": {
+   "effort": "",
+   "enum": "MODEL_PLACEHOLDER_M578",
+   "family": "gemini-4-hydrogen-sonar",
+   "family_label": "",
+   "id": "gemini-4-hydrogen-sonar",
+   "label": "",
+   "note": "",
+   "provider": "google",
+   "recommended": true,
+   "tag": "",
+   "window": null
+  },
+  "gemini-4-hydrogen-tiered-high": {
+   "effort": "high",
+   "enum": "MODEL_PLACEHOLDER_M530",
+   "family": "gemini-4-hydrogen-tiered",
+   "family_label": "Gemini 4 Hydrogen",
+   "id": "gemini-4-hydrogen-tiered-high",
+   "label": "Gemini 4 Hydrogen (High)",
+   "note": "",
+   "provider": "google",
+   "recommended": true,
+   "tag": "",
+   "window": 512000
+  },
+  "gemini-4-hydrogen-tiered-xhigh": {
+   "effort": "xhigh",
+   "enum": "MODEL_PLACEHOLDER_M531",
+   "family": "gemini-4-hydrogen-tiered",
+   "family_label": "Gemini 4 Hydrogen",
+   "id": "gemini-4-hydrogen-tiered-xhigh",
+   "label": "Gemini 4 Hydrogen (XHigh)",
+   "note": "",
+   "provider": "google",
+   "recommended": true,
+   "tag": "",
+   "window": 512000
+  },
+  "gemini-4-hydrogen-xhigh": {
+   "effort": "xhigh",
+   "enum": "MODEL_PLACEHOLDER_M528",
+   "family": "gemini-4-hydrogen",
+   "family_label": "Gemini 4 Hydrogen",
+   "id": "gemini-4-hydrogen-xhigh",
+   "label": "Gemini 4 Hydrogen (XHigh)",
+   "note": "For speed and efficiency in execution tasks",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-4-neon-high": {
+   "effort": "high",
+   "enum": "MODEL_PLACEHOLDER_M532",
+   "family": "gemini-4-neon",
+   "family_label": "Gemini 4 Neon",
+   "id": "gemini-4-neon-high",
+   "label": "Gemini 4 Neon (High)",
+   "note": "For most deep reasoning and complex problems",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-4-neon-low": {
+   "effort": "low",
+   "enum": "MODEL_PLACEHOLDER_M534",
+   "family": "gemini-4-neon",
+   "family_label": "Gemini 4 Neon",
+   "id": "gemini-4-neon-low",
+   "label": "Gemini 4 Neon (Low)",
+   "note": "For most deep reasoning and complex problems",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-4-neon-medium": {
+   "effort": "medium",
+   "enum": "MODEL_PLACEHOLDER_M533",
+   "family": "gemini-4-neon",
+   "family_label": "Gemini 4 Neon",
+   "id": "gemini-4-neon-medium",
+   "label": "Gemini 4 Neon (Medium)",
+   "note": "For most deep reasoning and complex problems",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-4-neon-xhigh": {
+   "effort": "xhigh",
+   "enum": "MODEL_PLACEHOLDER_M535",
+   "family": "gemini-4-neon",
+   "family_label": "Gemini 4 Neon",
+   "id": "gemini-4-neon-xhigh",
+   "label": "Gemini 4 Neon (XHigh)",
+   "note": "For most deep reasoning and complex problems",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-flash-worker-agy": {
+   "effort": "",
+   "enum": "MODEL_PLACEHOLDER_M669",
+   "family": "gemini-flash-worker-agy",
+   "family_label": "Gemini 4 Hydrogen (Orchestrator)",
+   "id": "gemini-flash-worker-agy",
+   "label": "Gemini 4 Hydrogen (Orchestrator)",
+   "note": "",
+   "provider": "google",
+   "recommended": false,
+   "tag": "",
+   "window": 512000
+  },
+  "gemini-pro-orchestrator": {
+   "effort": "carbon",
+   "enum": "MODEL_PLACEHOLDER_M667",
+   "family": "orchestrator",
+   "family_label": "Orchestrator",
+   "id": "gemini-pro-orchestrator",
+   "label": "Orchestrator (Carbon)",
+   "note": "Carbon that may offload routine steps to Hydrogen. Same Carbon-level quality, fewer tokens used.",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-pro-orchestrator-argon": {
+   "effort": "argon",
+   "enum": "MODEL_PLACEHOLDER_M681",
+   "family": "orchestrator",
+   "family_label": "Orchestrator",
+   "id": "gemini-pro-orchestrator-argon",
+   "label": "Orchestrator (Argon)",
+   "note": "Argon that may offload routine steps to Hydrogen. Same Argon-level quality, fewer tokens used.",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gemini-pro-orchestrator-neon": {
+   "effort": "neon",
+   "enum": "MODEL_PLACEHOLDER_M537",
+   "family": "orchestrator",
+   "family_label": "Orchestrator",
+   "id": "gemini-pro-orchestrator-neon",
+   "label": "Orchestrator (Neon)",
+   "note": "Neon that may offload routine steps to Hydrogen. Same Neon-level quality, fewer tokens used.",
+   "provider": "google",
+   "recommended": true,
+   "tag": "New",
+   "window": 512000
+  },
+  "gpt-oss-120b-medium": {
+   "effort": "medium",
+   "enum": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
+   "family": "gpt-oss-120b",
+   "family_label": "GPT-OSS 120B",
+   "id": "gpt-oss-120b-medium",
+   "label": "GPT-OSS 120B (Medium)",
+   "note": "GPT-OSS will be removed from Antigravity on November 30, 2026.",
+   "provider": "openai",
+   "recommended": true,
+   "tag": "Notice",
+   "window": 80000
+  }
+ },
+ "sort": [
+  "gemini-4-neon-high",
+  "gemini-4-neon-xhigh",
+  "gemini-4-neon-medium",
+  "gemini-4-neon-low",
+  "gemini-4-carbon-medium",
+  "gemini-4-carbon-high",
+  "gemini-4-carbon-low",
+  "gemini-4-argon-medium",
+  "gemini-4-argon-high",
+  "gemini-4-argon-low",
+  "gemini-4-hydrogen-high",
+  "gemini-4-hydrogen-xhigh",
+  "gemini-4-hydrogen-medium",
+  "gemini-4-hydrogen-low",
+  "gemini-pro-orchestrator-neon",
+  "gemini-pro-orchestrator",
+  "gemini-pro-orchestrator-argon",
+  "gemini-3.8-flash-high",
+  "gemini-3.8-flash-medium",
+  "gemini-3.8-flash-low",
+  "claude-opus-5-5-low",
+  "claude-opus-5-5-medium",
+  "claude-opus-5-5-high",
+  "claude-sonnet-5-5-low",
+  "claude-sonnet-5-5-medium",
+  "claude-sonnet-5-5-high",
+  "gpt-oss-120b-medium"
+ ],
+ "source": "bundled",
+ "v": 1
+}

@@ -1,7 +1,7 @@
 """Plan limits: the main agent hears when the quota of its model's group gets short (hooks/quota.py)."""
 import http.server, json, os, socket, subprocess, sys, threading, time
 PLUGIN, SP = sys.argv[1], sys.argv[2]; HOOKS = os.path.join(PLUGIN, "hooks")
-sys.path.insert(0, HOOKS); import conversation as conv
+sys.path.insert(0, HOOKS); import client, compat, conversation as conv  # noqa: E402
 import quota
 MEMORY = os.path.join(PLUGIN, "skills", "memory", "scripts", "memory.py")
 CACHE = os.path.expanduser("~/.gemini/antigravity-plus/quota.json")
@@ -341,5 +341,79 @@ check("parse(): accepts unwrapped {groups: ...} as well as {response: {groups: .
       quota.parse({"groups": answer()["response"]["groups"]}) == quota.parse(answer()))
 check("parse_ts(): impossible date (month 13) returns None instead of raising",
       quota.parse_ts("2026-13-01T00:00:00Z") is None)
+
+# 11. client.py integration: group_for(), cheaper_model(), ls_possible()
+groups_client = [{"name": "Gemini Models", "models": ["gemini 4 carbon"], "buckets": {}},
+                 {"name": "Claude and GPT models", "models": ["gpt-oss 120b"], "buckets": {}}]
+check("group_for(): bare id gemini-4-carbon-high via client label/family",
+      (quota.group_for("gemini-4-carbon-high", groups_client) or {}).get("name") == "Gemini Models")
+check("group_for(): claude-sonnet-5-5-high via client provider",
+      (quota.group_for("claude-sonnet-5-5-high", groups_client) or {}).get("name") == "Claude and GPT models")
+check("cheaper_model(): bundled snapshot → Gemini 4 Hydrogen (Medium)",
+      quota.cheaper_model() == "Gemini 4 Hydrogen (Medium)", quota.cheaper_model())
+
+_old_cc = os.environ.get("AGP_CLIENT_CACHE")
+_old_bundled = client.BUNDLED
+_custom_cc = os.path.join(art, "quota-client-cache.json")
+try:
+    with open(_custom_cc, "w", encoding="utf-8") as fh:
+        json.dump({"v": 1, "at": int(time.time()),
+                   "models": {"gemini-4-neon-high": {"id": "gemini-4-neon-high", "label": "Gemini 4 Neon (High)",
+                                                     "family": "gemini-4-neon", "effort": "high", "provider": "google",
+                                                     "window": 512000}},
+                   "families": {"gemini-4-neon": {"label": "Gemini 4 Neon", "provider": "google",
+                                                  "efforts": {"high": "gemini-4-neon-high"}}}}, fh)
+    os.environ["AGP_CLIENT_CACHE"] = _custom_cc
+    client._memo.clear()
+    _rendered = quota.render("Gemini 4 Carbon (High)", groups[0], {"status": "tight", "text": "week 10% left"}, [])
+    check("cheaper_model(): snapshot without hydrogen → '' and render() says 'a cheaper model of this group'",
+          quota.cheaper_model() == "" and "a cheaper model of this group" in _rendered,
+          (quota.cheaper_model(), _rendered))
+
+    os.environ["AGP_CLIENT_CACHE"] = os.path.join(art, "quota-missing-client.json")
+    client.BUNDLED = os.path.join(art, "quota-missing-bundled.json")
+    client._memo.clear()
+    check("cheaper_model(): no snapshot at all → literal Gemini 4 Hydrogen (Medium)",
+          quota.cheaper_model() == "Gemini 4 Hydrogen (Medium)", quota.cheaper_model())
+finally:
+    if _old_cc is None:
+        os.environ.pop("AGP_CLIENT_CACHE", None)
+    else:
+        os.environ["AGP_CLIENT_CACHE"] = _old_cc
+    client.BUNDLED = _old_bundled
+    if os.path.exists(_custom_cc):
+        os.remove(_custom_cc)
+    client._memo.clear()
+
+_saved_ls = {k: os.environ.pop(k, None) for k in ("ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVITY_CSRF_TOKEN", "AGP_RUNTIME")}
+_real_daemons = compat.daemon_servers
+compat.daemon_servers = lambda: []
+try:
+    os.environ["AGP_RUNTIME"] = "cli"
+    check("ls_possible(): AGP_RUNTIME=cli with no LS env and no hub → False", not quota.ls_possible({}))
+    drop_cache()
+    _n_calls = len(calls)
+    _t0 = time.time()
+    _m1 = quota.message({"conversationId": "cli-q-1", "modelName": "Gemini 4 Carbon (High)"},
+                        {"users": [{"text": "hi", "step": 0, "ts": iso(0)}]})
+    _m2 = quota.message_with_ui({"conversationId": "cli-q-2", "modelName": "Gemini 4 Carbon (High)"},
+                                {"users": [{"text": "hi", "step": 0, "ts": iso(0)}]})
+    _dt = time.time() - _t0
+    check("ls_possible() False → message()/message_with_ui() return None quickly without RPC",
+          _m1 is None and _m2 is None and _dt < 0.5 and len(calls) == _n_calls, (_m1, _m2, _dt, len(calls) - _n_calls))
+
+    os.environ.pop("AGP_RUNTIME", None)
+    _cli_tp = os.path.expanduser("~/.gemini/antigravity-cli/conv/transcript.jsonl")
+    check("ls_possible(): transcriptPath under ~/.gemini/antigravity-cli/ → False",
+          not quota.ls_possible({"transcriptPath": _cli_tp}))
+    check("ls_possible(): desktop → True",
+          quota.ls_possible({"transcriptPath": os.path.join(art, "desk.jsonl")}))
+finally:
+    compat.daemon_servers = _real_daemons
+    for _k, _v in _saved_ls.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
 
 sys.exit(0 if ok else 1)

@@ -421,5 +421,120 @@ for c in (A, B, S, L, F, D, E, M, P, Q):
     for suffix in (".json", ".checks.json", ".checks.json.lock"):
         p = os.path.join(conv.STATE_DIR, c + suffix)
         if os.path.exists(p): os.remove(p)
+
+# ── App + CLI data folders & tool-name synonyms ──
+import importlib.util as _ilu
+_hf_spec = _ilu.spec_from_file_location("handoff", os.path.join(PLUGIN, "skills", "handoff", "scripts", "handoff.py"))
+handoff = _ilu.module_from_spec(_hf_spec); _hf_spec.loader.exec_module(handoff)
+
+desk_dir = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity")
+cli_dir = os.path.join(os.path.expanduser("~"), ".gemini", "antigravity-cli")
+shutil.rmtree(desk_dir, ignore_errors=True); shutil.rmtree(cli_dir, ignore_errors=True)
+ws_both = os.path.realpath(os.path.join(SP, "coord_both"))
+shutil.rmtree(ws_both, ignore_errors=True); os.makedirs(ws_both)
+
+def _mk_conv(root, cid, title, parent, ws_path, with_db=True):
+    logs = os.path.join(root, "brain", cid, ".system_generated", "logs")
+    os.makedirs(logs, exist_ok=True)
+    tp = os.path.join(logs, "transcript_full.jsonl")
+    sub_tp = os.path.join(root, "brain", "sub-1111-2222", ".system_generated", "logs", "transcript.jsonl").replace("\\", "/")
+    lines = [
+        json.dumps({"type": "USER_INPUT", "step_index": 0, "created_at": "2026-11-27T10:00:00Z",
+                    "content": f"## Workspace: {ws_path}\nFix the CLI bug"}),
+        "{malformed json line",
+        "[1, 2, 3]",
+        json.dumps({"type": "UNKNOWN_FUTURE_STEP", "step_index": 1, "content": "should not be user input"}),
+        json.dumps({"type": "PLANNER_RESPONSE", "step_index": 2, "created_at": "2026-11-27T10:01:00Z",
+                    "content": "", "tool_calls": [
+                        {"name": "invoke_subagent", "args": {"TypeName": "explorer", "Role": "probe"}},
+                    ]}),
+        json.dumps({"type": "GENERIC", "step_index": 3,
+                    "content": 'Created the following subagent:\n{"conversationId": "sub-1111-2222"}'}),
+        json.dumps({"type": "PLANNER_RESPONSE", "step_index": 4, "created_at": "2026-11-27T10:02:00Z",
+                    "content": "", "tool_calls": [
+                        {"name": "view_file", "args": {"Path": sub_tp}},
+                    ]}),
+        json.dumps({"type": "PLANNER_RESPONSE", "step_index": 5, "created_at": "2026-11-27T10:03:00Z",
+                    "content": "", "tool_calls": [
+                        {"name": "write_to_file", "args": {"Path": os.path.join(ws_path, "out.py")}},
+                        {"name": "replace_file_content", "args": {"TargetFile": os.path.join(ws_path, "app.py")}},
+                        {"name": "run_terminal_command", "args": {"CommandLine": "git commit -m test"}},
+                    ]}),
+        json.dumps({"type": "GENERIC", "step_index": 6, "content": "ok"}),
+        json.dumps({"type": "GENERIC", "step_index": 7, "content": "Encountered error: target content not found"}),
+        json.dumps({"type": "GENERIC", "step_index": 8, "content": "Command exited with code 0\nCommand output:\nok"}),
+        json.dumps({"type": "PLANNER_RESPONSE", "step_index": 9, "content": "Done."}),
+    ]
+    with open(tp, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    with open(os.path.join(root, "brain", cid, "task.md"), "w", encoding="utf-8") as fh:
+        fh.write("- [x] Verified\n")
+    if with_db:
+        db = os.path.join(root, "conversation_summaries.db")
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE IF NOT EXISTS conversation_summaries "
+                    "(conversation_id TEXT, title TEXT, preview TEXT, step_count INT, "
+                    "last_modified_time TEXT, workspace_uris TEXT, nesting_depth INT, status TEXT, parent_conversation_id TEXT)")
+        con.execute("INSERT INTO conversation_summaries VALUES (?, ?, '', 10, '2026-11-27T10:05:00Z', ?, 0, 'IDLE', ?)",
+                    (cid, title, json.dumps(["file://" + ws_path]), parent))
+        con.commit(); con.close()
+    return tp
+
+CLI1, CLI_PAR = "agp-cli-only-0001", "agp-cli-par-0001"
+APP1, APP_PAR = "agp-app-only-0001", "agp-app-par-0001"
+
+# 1. CLI-only machine (no ~/.gemini/antigravity)
+tp_cli = _mk_conv(cli_dir, CLI1, "CLI Only Title", CLI_PAR, ws_both, with_db=True)
+check("CLI-only: transcript found by id without transcriptPath", conv.transcript_path({"conversationId": CLI1}) == tp_cli)
+st_cli = conv.load({"conversationId": CLI1, "workspacePaths": [ws_both]})
+check("CLI-only: unknown step ignored, malformed/non-dict lines don't crash",
+      st_cli is not None and [u["text"] for u in st_cli["users"]] == [f"## Workspace: {ws_both}\nFix the CLI bug"], st_cli)
+check("CLI-only: tool synonyms normalized (view_file polling + replace_file_content failure + run_terminal_command)",
+      st_cli["calls"].get("poll_step") == 4 and st_cli["calls"].get("fail_last") == "edit_file failed"
+      and st_cli["calls"].get("fail_step") == 7 and st_cli["calls"].get("n_cmd") == 1,
+      st_cli.get("calls") if st_cli else None)
+check("CLI-only: _parent reads CLI DB", conv._parent(CLI1) == CLI_PAR)
+check("CLI-only: coord._index_row reads CLI DB", coord._index_row(CLI1) == ("CLI Only Title", "", CLI_PAR))
+hf_cli = handoff.antigravity_facts(CLI1)
+check("CLI-only: handoff collects files/cmds/task.md via tool synonyms",
+      os.path.join(ws_both, "out.py") in hf_cli["files"] and os.path.join(ws_both, "app.py") in hf_cli["files"]
+      and "git commit -m test" in hf_cli["cmds"] and "Verified" in hf_cli["checklist"], hf_cli)
+check("CLI-only: handoff lists CLI conversation from DB", any(r["id"] == CLI1 for r in handoff.antigravity_conversations([ws_both])))
+os.remove(os.path.join(cli_dir, "conversation_summaries.db"))
+check("CLI-only: missing CLI DB tolerated, scan_brain fallback finds conversation",
+      conv._parent(CLI1) == "" and any(r["id"] == CLI1 for r in handoff.antigravity_conversations([ws_both])))
+
+# 2. App-only machine (no ~/.gemini/antigravity-cli)
+shutil.rmtree(cli_dir, ignore_errors=True)
+tp_app = _mk_conv(desk_dir, APP1, "App Only Title", APP_PAR, ws_both, with_db=True)
+check("App-only: transcript, _parent, coord._index_row, handoff work without CLI folder",
+      conv.transcript_path({"conversationId": APP1}) == tp_app and conv._parent(APP1) == APP_PAR
+      and coord._index_row(APP1) == ("App Only Title", "", APP_PAR)
+      and any(r["id"] == APP1 for r in handoff.antigravity_conversations([ws_both])))
+
+# 3. Both App and CLI at once: coord sees peers from both, handoff lists both
+_mk_conv(cli_dir, CLI1, "CLI Only Title", CLI_PAR, ws_both, with_db=True)
+f_both = os.path.join(ws_both, "shared_both.py"); write(f_both, "x = 1\n")
+coord.record({"conversationId": APP1, "workspacePaths": [ws_both]}, "read_file", f_both)
+coord.record({"conversationId": CLI1, "workspacePaths": [ws_both]}, "edit_file", f_both)
+peers_from_app = coord.others({"conversationId": APP1, "workspacePaths": [ws_both]})
+peers_from_cli = coord.others({"conversationId": CLI1, "workspacePaths": [ws_both]})
+check("both at once: App agent sees CLI peer with CLI index title, and vice versa",
+      len(peers_from_app) == 1 and peers_from_app[0]["id"] == CLI1 and peers_from_app[0]["title"] == "CLI Only Title"
+      and len(peers_from_cli) == 1 and peers_from_cli[0]["id"] == APP1 and peers_from_cli[0]["title"] == "App Only Title",
+      (peers_from_app, peers_from_cli))
+both_ids = {r["id"] for r in handoff.antigravity_conversations([ws_both])}
+check("both at once: handoff lists conversations from both App and CLI", {APP1, CLI1}.issubset(both_ids), both_ids)
+
+# cleanup new test artifacts
+shutil.rmtree(ws_both, ignore_errors=True)
+shutil.rmtree(desk_dir, ignore_errors=True); shutil.rmtree(cli_dir, ignore_errors=True)
+reg_both = os.path.join(coord.COORD_DIR, coord.slug(ws_both) + ".json")
+for p in (reg_both, reg_both + ".lock"):
+    if os.path.exists(p): os.remove(p)
+shutil.rmtree(coord._snap_root(ws_both), ignore_errors=True)
+for c in (CLI1, APP1):
+    p = os.path.join(conv.STATE_DIR, c + ".json")
+    if os.path.exists(p): os.remove(p)
 print("ALL OK" if ok else "FAILURES")
 sys.exit(0 if ok else 1)

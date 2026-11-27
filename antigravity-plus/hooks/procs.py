@@ -248,6 +248,23 @@ def priority(pid: int) -> str:
 
 # ─────────────────────────────── agent processes ───────────────────────────────
 
+AGY_NAMES = {getattr(compat, "AGY_NAME", "agy"), getattr(compat, "AGY_NAME", "agy") + ".exe"}
+
+
+def agy_roots(table: Dict[int, compat.Proc], me: int = 0) -> List[int]:
+    """Running Antigravity CLI processes (`agy`): the one `me` runs under first, then the rest by pid."""
+    out: List[int] = []
+    cur, seen = table.get(me), set()
+    while cur and cur.ppid and cur.ppid not in seen:
+        seen.add(cur.ppid)
+        cur = table.get(cur.ppid)
+        if cur and cur.name in AGY_NAMES:
+            out.append(cur.pid)
+            break
+    out.extend(pid for pid in sorted(table) if table[pid].name in AGY_NAMES and pid not in out)
+    return out
+
+
 def language_servers(table: Dict[int, compat.Proc], pin: int = 0, slow: bool = False) -> List[int]:
     """Antigravity's language servers on this computer (the module's docstring), the one this process runs under
     first. `slow`: when nothing else finds one, also compat.language_server() (≤ 2.33: its command line)."""
@@ -263,6 +280,9 @@ def language_servers(table: Dict[int, compat.Proc], pin: int = 0, slow: bool = F
         p = table.get(ls.pid)
         if p and p.name.startswith("language_server") and ls.pid not in out:
             out.append(ls.pid)
+    # The Antigravity CLI runs its agent inside the `agy` process itself (no separate language server): the nearest
+    # `agy` ancestor first, then every other running `agy`. Exact names — `agy-node` is the App's sidecar runtime.
+    out.extend(p for p in agy_roots(table, os.getpid()) if p not in out)
     if not out and slow:
         try:
             found = compat.language_server(probe=1.0)

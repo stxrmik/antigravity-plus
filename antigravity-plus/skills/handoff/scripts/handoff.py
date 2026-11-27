@@ -86,7 +86,16 @@ def json_text(escaped: str) -> str:
         return escaped
 
 
-def transcript(cid: str) -> str:
+def transcript(cid: str, data_dir: Optional[str] = None) -> str:
+    """The conversation's transcript in `data_dir`, else in any Antigravity data folder (App, CLI); the CLI may
+    write only transcript.jsonl."""
+    for d in ([data_dir] if data_dir else compat.data_dirs()):
+        for name in ("transcript_full.jsonl", "transcript.jsonl"):
+            tp = os.path.join(d, "brain", cid, ".system_generated", "logs", name)
+            if os.path.isfile(tp):
+                return tp
+    if data_dir:
+        return os.path.join(data_dir, "brain", cid, ".system_generated", "logs", "transcript_full.jsonl")
     return os.path.join(AG, "brain", cid, ".system_generated", "logs", "transcript_full.jsonl")
 
 
@@ -112,15 +121,18 @@ def git(args: List[str], cwd: str) -> Optional[str]:
 
 # ─────────────────────────────── Antigravity conversations ───────────────────────────────
 
-def index_rows() -> List[dict]:
-    """Top-level conversations from Antigravity's own index (what its sidebar shows)."""
+def _index_rows_from(db: str) -> Optional[List[dict]]:
+    if not os.path.isfile(db):
+        return None
     try:
-        con = sqlite3.connect(f"file:{INDEX_DB}?immutable=1", uri=True, timeout=1)
-        rows = con.execute("SELECT conversation_id, title, preview, step_count, last_modified_time, workspace_uris, "
-                           "nesting_depth, status FROM conversation_summaries").fetchall()
-        con.close()
+        con = sqlite3.connect(f"file:{db}?immutable=1", uri=True, timeout=1)
+        try:
+            rows = con.execute("SELECT conversation_id, title, preview, step_count, last_modified_time, workspace_uris, "
+                               "nesting_depth, status FROM conversation_summaries").fetchall()
+        finally:
+            con.close()
     except sqlite3.Error:
-        return []
+        return None
     out = []
     for cid, title, preview, steps, modified, uris, depth, status in rows:
         try:
@@ -135,29 +147,61 @@ def index_rows() -> List[dict]:
     return out
 
 
-def scan_brain() -> List[dict]:
+def index_rows() -> List[dict]:
+    """Top-level conversations from Antigravity's own index (what its sidebar shows)."""
+    out, seen = [], set()
+    for d in compat.data_dirs():
+        rows = _index_rows_from(os.path.join(d, "conversation_summaries.db"))
+        if not rows:
+            continue
+        for r in rows:
+            if r["id"] not in seen:
+                seen.add(r["id"])
+                out.append(r)
+    return out
+
+
+def scan_brain(dirs: Optional[List[str]] = None) -> List[dict]:
     """Fallback when the index can't be read: the workspace line our SessionStart hook writes into each transcript."""
-    out = []
-    try:
-        ids = os.listdir(os.path.join(AG, "brain"))
-    except OSError:
-        return out
-    for cid in ids:
-        tp = transcript(cid)
+    out, seen = [], set()
+    for d in (dirs if dirs is not None else compat.data_dirs()):
         try:
-            with open(tp, encoding="utf-8", errors="replace") as f:
-                head = f.read(65536)
-            when = mtime(tp)
+            ids = os.listdir(os.path.join(d, "brain"))
         except OSError:
             continue
-        if '"USER_INPUT"' in head:  # subagents have none
-            paths = [p.strip() for p in re.findall(r"## Workspace: ([^\\\n]+)", head)]
-            out.append({"id": cid, "title": "", "steps": 0, "paths": paths, "modified": when, "running": False})
+        for cid in ids:
+            if cid in seen:
+                continue
+            tp = transcript(cid, d)
+            try:
+                with open(tp, encoding="utf-8", errors="replace") as f:
+                    head = f.read(65536)
+                when = mtime(tp)
+            except OSError:
+                continue
+            if '"USER_INPUT"' in head:  # subagents have none
+                paths = [p.strip() for p in re.findall(r"## Workspace: ([^\\\n]+)", head)]
+                seen.add(cid)
+                out.append({"id": cid, "title": "", "steps": 0, "paths": paths, "modified": when, "running": False})
     return out
 
 
 def antigravity_conversations(dirs: List[str], exclude: Optional[str] = None) -> List[dict]:
-    rows = index_rows() or scan_brain()
+    rows, seen, fallback_dirs = [], set(), []
+    for d in compat.data_dirs():
+        db_rows = _index_rows_from(os.path.join(d, "conversation_summaries.db"))
+        if db_rows is None:
+            fallback_dirs.append(d)
+        else:
+            for r in db_rows:
+                if r["id"] not in seen:
+                    seen.add(r["id"])
+                    rows.append(r)
+    if fallback_dirs:
+        for r in scan_brain(fallback_dirs):
+            if r["id"] not in seen:
+                seen.add(r["id"])
+                rows.append(r)
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=RECENT_DAYS)
     hits = [r for r in rows if r["id"] != exclude and r["modified"] and r["modified"] >= cutoff
             and any(same_dir(p, d) for p in r["paths"] for d in dirs)]
@@ -176,9 +220,12 @@ def antigravity_facts(cid: str) -> dict:
     files: Dict[str, int] = {}
     cmds: List[str] = []
     answer = ""
-    skip = (os.path.join(AG, "brain"), memstore.PLUGIN_MEMORY, memstore.CLAUDE_PROJECTS)
+    tp = transcript(cid)
+    ddir = compat.data_dir(tp)
+    skip = tuple(os.path.join(d, "brain") for d in compat.data_dirs()) + (
+        os.path.join(AG, "brain"), memstore.PLUGIN_MEMORY, memstore.CLAUDE_PROJECTS)
     try:
-        with open(transcript(cid), encoding="utf-8", errors="replace") as f:
+        with open(tp, encoding="utf-8", errors="replace") as f:
             for raw in f:
                 if '"PLANNER_RESPONSE"' not in raw[:400]:
                     continue
@@ -191,11 +238,12 @@ def antigravity_facts(cid: str) -> dict:
                     answer = d["content"]
                 for c in calls:
                     args = c.get("args") or {}
-                    if c.get("name") in ("write_file", "edit_file"):
+                    cname = compat.tool(c.get("name"))
+                    if cname in ("write_file", "edit_file"):
                         p = args.get("Path") or args.get("TargetFile") or ""
                         if p and not p.startswith(skip):
                             files[p] = files.get(p, 0) + 1
-                    elif c.get("name") == "run_command" and NOTABLE.search(args.get("CommandLine") or ""):
+                    elif cname == "run_command" and NOTABLE.search(args.get("CommandLine") or ""):
                         cmds.append(args["CommandLine"])
     except OSError:
         pass
@@ -203,7 +251,7 @@ def antigravity_facts(cid: str) -> dict:
             "users": users, "started": parse_time(users[0]["ts"]) if users and users[0].get("ts") else None,
             "modified": row.get("modified"), "steps": row.get("steps") or (st["last_step"] + 1 if st else 0),
             "compactions": len(st["checkpoints"]) if st else 0, "answer": answer, "files": files, "cmds": cmds,
-            "checklist": memstore.read_text(os.path.join(AG, "brain", cid, "task.md"), 6000).strip(),
+            "checklist": memstore.read_text(os.path.join(ddir, "brain", cid, "task.md"), 6000).strip(),
             "checklist_name": "task.md"}
 
 

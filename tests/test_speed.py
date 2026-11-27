@@ -261,7 +261,8 @@ check("Orchestrator's executor (gemini-flash-worker-agy) → the Gemini 4 window
       ["~455k", "512k window"])
 start("ctxflashlite", main=False)
 think(10_000, 440_000)
-check("Flash-Lite subagent (3.5) → warns near its 512k window", pre("gemini-3.5-flash-lite"), ["~450k", "512k window"], ["128k"])
+check("Flash-Lite subagent (3.5) → warns near the 128k window the client gives it (hooks/client.py)",
+      pre("gemini-3.5-flash-lite"), ["~450k", "128k window"], ["512k"])
 start("ctxflashlite25", main=False)
 think(10_000, 105_000)
 check("Gemini 2.5 Flash-Lite → warns near its 128k window", pre("gemini-2.5-flash-lite"), ["~115k", "128k window"], ["512k"])

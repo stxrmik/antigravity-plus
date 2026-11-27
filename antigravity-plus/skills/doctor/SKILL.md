@@ -2,7 +2,8 @@
 name: doctor
 description: >-
   Health check of the Antigravity Plus setup: what Antigravity loaded (skills, subagents, hooks, rules), hook
-  self-tests, tools (git, gh, ripgrep, linters), memory and edit-check status. Use when the user asks (/doctor,
+  self-tests, tools (git, gh, ripgrep, linters), the Antigravity CLI, the model data read from Antigravity, memory
+  and edit-check status. Use when the user asks (/doctor,
   «плагин не работает»), and on your own when a plugin command, hook, panel or subagent misbehaves (errors in hook
   output, a skill or subagent not found).
 ---

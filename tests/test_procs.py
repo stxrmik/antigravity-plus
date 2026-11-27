@@ -282,6 +282,13 @@ try:
           json.dumps({"pid": os.getpid(), "httpsPort": 41233, "httpPort": 41234, "lsVersion": "2.35.1", "csrfToken": "t"}))
     check("…a stale daemon file whose pid another process holds now: no language server",
           os.getpid() not in procs.language_servers(compat.process_table()))
+    P = compat.Proc
+    fake_table = {1: P(1, 0, "launchd"), 50: P(50, 1, "agy"), 51: P(51, 50, "zsh"), 52: P(52, 51, "python3"),
+                  60: P(60, 1, "agy-node"), 70: P(70, 1, "agy.exe"), 80: P(80, 1, "zsh")}
+    check("agy_roots(): the CLI the caller runs under first, then other agy; agy-node (sidecar) is not one",
+          procs.agy_roots(fake_table, 52) == [50, 70], procs.agy_roots(fake_table, 52))
+    check("agy_roots(): outside any agy → all of them", procs.agy_roots(fake_table, 80) == [50, 70])
+    check("agy_roots(): none running → []", procs.agy_roots({1: P(1, 0, "init"), 2: P(2, 1, "zsh")}, 2) == [])
     os.environ["AGP_PROCS_LS_PID"] = "0"
     trees = dict(procs.agent_trees(table, ls_a))
     check("agent_trees(): the shell is an agent command, with its Python under it", root_a in trees and trees[root_a],

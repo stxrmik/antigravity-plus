@@ -33,7 +33,9 @@ def main() -> int:
         env = dict(os.environ, HOME=home, USERPROFILE=home, PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
                    PYTHONDONTWRITEBYTECODE="1", GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.com",
                    GIT_COMMITTER_NAME="Test", GIT_COMMITTER_EMAIL="test@example.com", GIT_CONFIG_NOSYSTEM="1",
-                   AGP_UPDATE_CHECK="off", AGP_UPDATE_PANEL="off")  # no update check (network), no panel restart
+                   AGP_UPDATE_CHECK="off", AGP_UPDATE_PANEL="off",  # no update check (network), no panel restart
+                   AGP_CLIENT_REFRESH="off",  # no background refresh of the client snapshot (language server)
+                   AGP_CLIENT_CACHE=os.path.join(home, ".gemini", "antigravity-plus", "client.json"))
         for var in ("ANTIGRAVITY_LS_ADDRESS", "ANTIGRAVITY_CSRF_TOKEN", "ANTIGRAVITY_CONVERSATION_ID", "CLAUDE_CODE_SESSION_ID"):
             env.pop(var, None)
         try:

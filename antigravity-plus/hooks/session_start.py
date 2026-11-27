@@ -632,6 +632,12 @@ def _build_with_notices(payload: dict) -> Tuple[str, List[str]]:
                                "(установка и откат в один шаг).")
     except Exception as e:  # the session context must come through anyway
         print(f"session_start: update: {e}", file=sys.stderr)
+    if not sub:  # models, windows and the version from Antigravity itself (hooks/client.py): a detached refresh
+        try:
+            import client
+            client.background()
+        except Exception as e:  # never in the way of the session context
+            print(f"session_start: client: {e}", file=sys.stderr)
     bridge.extend(user_claude_md())
     query = (st["users"][0]["text"] if st and st["users"] else "") or str(payload.get("lastUserInput") or "")
     memory = [] if sub else memory_section(paths, tops, query)  # subagents don't talk to the user or write memory

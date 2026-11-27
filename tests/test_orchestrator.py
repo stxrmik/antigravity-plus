@@ -9,6 +9,7 @@ PLUGIN, SP = sys.argv[1], sys.argv[2]
 HOOKS = os.path.join(PLUGIN, "hooks")
 sys.path.insert(0, HOOKS)
 
+import client  # type: ignore[import-not-found]
 import conversation as conv  # type: ignore[import-not-found]
 import coord  # type: ignore[import-not-found]
 import orchestrator  # type: ignore[import-not-found]
@@ -534,6 +535,51 @@ check("guard.py exit_plan_mode denies unverified plan even under full access",
 d_fa_ok = run_guard(f"{unverified}\n2. Run pytest")
 check("guard.py exit_plan_mode returns allow (PASS) for valid plan under full access",
       d_fa_ok == {"decision": "allow"}, d_fa_ok)
+
+# 5. client.py integration: executor(), is_orchestrator_model(), is_plan_execute()
+_ex_bundled = orchestrator.executor()
+check("executor(): bundled snapshot → gemini-flash-worker-agy",
+      _ex_bundled.get("id") == "gemini-flash-worker-agy" and bool(_ex_bundled.get("label")), _ex_bundled)
+
+_old_cc = os.environ.get("AGP_CLIENT_CACHE")
+_old_bundled = client.BUNDLED
+_custom_cc = os.path.join(art, "orch-client-cache.json")
+try:
+    with open(_custom_cc, "w", encoding="utf-8") as f:
+        json.dump({"v": 1, "at": int(time.time()) if "time" in dir() else 1795784886,
+                   "executor": {"id": "custom-exec-1", "label": "Custom Executor"},
+                   "models": {"custom-exec-1": {"id": "custom-exec-1", "label": "Custom Executor",
+                                                "family": "custom-exec-1", "effort": "", "provider": "google",
+                                                "window": 512000}}}, f)
+    os.environ["AGP_CLIENT_CACHE"] = _custom_cc
+    client._memo.clear()
+    check("executor(): follows hand-written snapshot with different executor id",
+          orchestrator.executor() == {"id": "custom-exec-1", "label": "Custom Executor"}, orchestrator.executor())
+
+    os.environ["AGP_CLIENT_CACHE"] = os.path.join(art, "orch-missing-client.json")
+    client.BUNDLED = os.path.join(art, "orch-missing-bundled.json")
+    client._memo.clear()
+    check("executor(): no snapshot → EXECUTOR_FALLBACK",
+          orchestrator.executor() == orchestrator.EXECUTOR_FALLBACK, orchestrator.executor())
+finally:
+    if _old_cc is None:
+        os.environ.pop("AGP_CLIENT_CACHE", None)
+    else:
+        os.environ["AGP_CLIENT_CACHE"] = _old_cc
+    client.BUNDLED = _old_bundled
+    if os.path.exists(_custom_cc):
+        os.remove(_custom_cc)
+    client._memo.clear()
+
+check("is_orchestrator_model(): true for Orchestrator (Neon), gemini-pro-orchestrator, executor id & label; false for gemini-4-neon-high and ''",
+      orchestrator.is_orchestrator_model("Orchestrator (Neon)")
+      and orchestrator.is_orchestrator_model("gemini-pro-orchestrator")
+      and orchestrator.is_orchestrator_model(_ex_bundled["id"])
+      and orchestrator.is_orchestrator_model(_ex_bundled["label"])
+      and not orchestrator.is_orchestrator_model("gemini-4-neon-high")
+      and not orchestrator.is_orchestrator_model(""))
+check("is_plan_execute(): true for executor modelName gemini-flash-worker-agy",
+      orchestrator.is_plan_execute({"modelName": "gemini-flash-worker-agy"}))
 
 # Clean up settings/state created during test
 if os.path.exists(settings_path):
