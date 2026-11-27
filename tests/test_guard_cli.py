@@ -109,10 +109,27 @@ try:
 finally:
     if saved:
         compat.tool = saved
-out = guard.decide({"toolCall": {"name": "write_to_file",
-                                 "args": {"TargetFile": os.path.join(HOME, ".gemini", "config", "hooks.json"),
-                                          "CodeContent": "{}"}}})
-check("decide(write_to_file ~/.gemini/config/hooks.json)", out.get("decision"), "force_ask")
+# A file tool's path is this OS's own (backslashes on Windows): read it with this OS's slashes, not the POSIX shell
+# syntax forced above for the commands — else a real `C:\…\hooks.json` would look unprotected to the test.
+compat.WINDOWS = os.name == "nt"
+try:
+    out = guard.decide({"toolCall": {"name": "write_to_file",
+                                     "args": {"TargetFile": os.path.join(HOME, ".gemini", "config", "hooks.json"),
+                                              "CodeContent": "{}"}}})
+    check("decide(write_to_file ~/.gemini/config/hooks.json)", out.get("decision"), "force_ask")
+finally:
+    compat.WINDOWS = False
+# the same with a Windows path, on any OS
+compat.WINDOWS = True
+try:
+    for p in (r"C:\Users\x\.gemini\config\hooks.json", r"C:\Users\x\.gemini\antigravity-cli\settings.json"):
+        hit = guard.analyze_path(p)
+        check(f"write {p}", hit[0] if hit else None, "agent-settings")
+        out = guard.decide({"toolCall": {"name": "write_to_file", "args": {"TargetFile": p, "CodeContent": "{}"}}})
+        check(f"decide(write_to_file {p})", out.get("decision"), "force_ask")
+    check(r"write C:\Users\x\proj\hooks.json", guard.analyze_path(r"C:\Users\x\proj\hooks.json"), None)
+finally:
+    compat.WINDOWS = False
 out = guard.decide({"toolCall": {"name": "run_command", "args": {"CommandLine": "agy plugin disable antigravity-plus"}}})
 check("decide(run_command agy plugin disable)", out.get("decision"), "force_ask")
 # the LS of the CLI itself: a random port from $ANTIGRAVITY_LS_ADDRESS, no hub file

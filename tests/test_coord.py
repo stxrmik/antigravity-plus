@@ -424,6 +424,7 @@ for c in (A, B, S, L, F, D, E, M, P, Q):
 
 # ── App + CLI data folders & tool-name synonyms ──
 import importlib.util as _ilu
+import pathlib
 _hf_spec = _ilu.spec_from_file_location("handoff", os.path.join(PLUGIN, "skills", "handoff", "scripts", "handoff.py"))
 handoff = _ilu.module_from_spec(_hf_spec); _hf_spec.loader.exec_module(handoff)
 
@@ -476,9 +477,27 @@ def _mk_conv(root, cid, title, parent, ws_path, with_db=True):
                     "(conversation_id TEXT, title TEXT, preview TEXT, step_count INT, "
                     "last_modified_time TEXT, workspace_uris TEXT, nesting_depth INT, status TEXT, parent_conversation_id TEXT)")
         con.execute("INSERT INTO conversation_summaries VALUES (?, ?, '', 10, '2026-11-27T10:05:00Z', ?, 0, 'IDLE', ?)",
-                    (cid, title, json.dumps(["file://" + ws_path]), parent))
+                    (cid, title, json.dumps([pathlib.Path(ws_path).as_uri()]), parent))  # file:///C:/… on Windows
         con.commit(); con.close()
     return tp
+
+# Windows paths on any OS: a transcript's raw JSON doubles each backslash; the index stores file:///c%3A/… URIs
+_raw = json.dumps({"type": "USER_INPUT", "content": "## Workspace: C:\\Users\\me\\My Proj\nFix it"})
+check("handoff.workspace_lines(): a Windows path in raw JSON keeps its backslashes",
+      handoff.workspace_lines(_raw) == ["C:\\Users\\me\\My Proj"], handoff.workspace_lines(_raw))
+check("handoff.workspace_lines(): a POSIX path ends at the escaped newline",
+      handoff.workspace_lines(json.dumps({"content": "## Workspace: /Users/me/proj\nx"})) == ["/Users/me/proj"])
+_win_db = os.path.join(SP, "win_index.db")
+if os.path.exists(_win_db): os.remove(_win_db)
+_con = sqlite3.connect(_win_db)
+_con.execute("CREATE TABLE conversation_summaries (conversation_id TEXT, title TEXT, preview TEXT, step_count INT, "
+             "last_modified_time TEXT, workspace_uris TEXT, nesting_depth INT, status TEXT, parent_conversation_id TEXT)")
+_con.execute("INSERT INTO conversation_summaries VALUES ('w1', 't', '', 1, '2026-11-27T10:05:00Z', ?, 0, 'IDLE', '')",
+             (json.dumps(["file:///c%3A/Users/me/My%20Proj"]),))
+_con.commit(); _con.close()
+_wp = (handoff._index_rows_from(_win_db) or [{}])[0].get("paths")
+check("handoff index: file:///c%3A/Users/me/My%20Proj → c:…Users…me…My Proj",
+      bool(_wp) and _wp[0].replace("\\", "/").lower() == "c:/users/me/my proj", _wp)
 
 CLI1, CLI_PAR = "agp-cli-only-0001", "agp-cli-par-0001"
 APP1, APP_PAR = "agp-app-only-0001", "agp-app-par-0001"

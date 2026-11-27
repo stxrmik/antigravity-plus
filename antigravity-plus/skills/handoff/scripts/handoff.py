@@ -161,6 +161,15 @@ def index_rows() -> List[dict]:
     return out
 
 
+WORKSPACE_LINE = re.compile(r"## Workspace: ((?:[^\\\n\"]|\\\\)+)")  # in raw JSON: a Windows path's \ is «\\»
+
+
+def workspace_lines(raw: str) -> List[str]:
+    """The workspaces our SessionStart hook named («## Workspace: <path>») in a transcript's raw JSON text.
+    Windows paths keep their backslashes (JSON writes each as two); `\n` and the string's end close a path."""
+    return [m.strip().replace("\\\\", "\\") for m in WORKSPACE_LINE.findall(raw)]
+
+
 def scan_brain(dirs: Optional[List[str]] = None) -> List[dict]:
     """Fallback when the index can't be read: the workspace line our SessionStart hook writes into each transcript."""
     out, seen = [], set()
@@ -180,7 +189,7 @@ def scan_brain(dirs: Optional[List[str]] = None) -> List[dict]:
             except OSError:
                 continue
             if '"USER_INPUT"' in head:  # subagents have none
-                paths = [p.strip() for p in re.findall(r"## Workspace: ([^\\\n]+)", head)]
+                paths = workspace_lines(head)
                 seen.add(cid)
                 out.append({"id": cid, "title": "", "steps": 0, "paths": paths, "modified": when, "running": False})
     return out
